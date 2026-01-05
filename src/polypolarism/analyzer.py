@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ast
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 from polypolarism.types import DataType, FrameType, Nullable
 from polypolarism.dsl import parse_schema, ParseError
@@ -23,6 +23,103 @@ class AnalysisError(Exception):
     """Error during analysis."""
 
     pass
+
+
+# =============================================================================
+# Data structures for function registry
+# =============================================================================
+
+
+@dataclass
+class FunctionSignature:
+    """Type signature for a DF-annotated function."""
+
+    name: str
+    parameters: dict[str, tuple[int, FrameType]]  # param_name -> (position, type)
+    return_type: Optional[FrameType]
+    lineno: int
+
+    def get_param_by_position(self, position: int) -> Optional[tuple[str, FrameType]]:
+        """Get parameter info by position."""
+        for name, (idx, frame_type) in self.parameters.items():
+            if idx == position:
+                return (name, frame_type)
+        return None
+
+
+@dataclass
+class FunctionInfo:
+    """Information about a function (typed or untyped)."""
+
+    name: str
+    node: ast.FunctionDef  # AST node for body analysis
+    signature: Optional[FunctionSignature]  # None if untyped
+    inferred_returns: dict[tuple, FrameType] = field(default_factory=dict)
+
+
+@dataclass
+class FunctionRegistry:
+    """Registry of all functions in a file."""
+
+    functions: dict[str, FunctionInfo] = field(default_factory=dict)
+
+    def register(self, info: FunctionInfo) -> None:
+        """Register a function."""
+        self.functions[info.name] = info
+
+    def get(self, name: str) -> Optional[FunctionInfo]:
+        """Get function info by name."""
+        return self.functions.get(name)
+
+    def has_signature(self, name: str) -> bool:
+        """Check if function has a type signature."""
+        info = self.functions.get(name)
+        return info is not None and info.signature is not None
+
+
+# =============================================================================
+# Type compatibility checking
+# =============================================================================
+
+
+def _is_column_subtype(actual: DataType, expected: DataType) -> bool:
+    """Check if actual is a subtype of expected.
+
+    Rules:
+    - T is subtype of T
+    - T is subtype of Nullable[T]
+    - Nullable[T] is NOT subtype of T
+    """
+    if actual == expected:
+        return True
+
+    # Non-nullable is subtype of nullable with same base
+    if isinstance(expected, Nullable) and not isinstance(actual, Nullable):
+        return actual == expected.inner
+
+    return False
+
+
+def _is_frame_subtype(actual: FrameType, expected: FrameType) -> bool:
+    """Check if actual FrameType is subtype of expected.
+
+    Rules:
+    - actual must have all columns that expected has
+    - Each column type must be a subtype
+    - actual may have extra columns (structural subtyping)
+    """
+    for col_name, expected_type in expected.columns.items():
+        if col_name not in actual.columns:
+            return False
+        actual_type = actual.columns[col_name]
+        if not _is_column_subtype(actual_type, expected_type):
+            return False
+    return True
+
+
+# =============================================================================
+# Analysis result
+# =============================================================================
 
 
 @dataclass
@@ -155,17 +252,48 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 self.errors.append(str(e))
                 return None, None
 
+        # Check for pl.lit(value)
+        lit_type = self._extract_lit_type(inner_node)
+        if lit_type:
+            return alias, lit_type
+
         return None, None
+
+    def _extract_lit_type(self, node: ast.expr) -> Optional[DataType]:
+        """Extract type from pl.lit(value) expression."""
+        from polypolarism.types import Int64, Float64, Utf8, Boolean, Null
+
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Attribute):
+                if node.func.attr == "lit":
+                    if isinstance(node.func.value, ast.Name) and node.func.value.id == "pl":
+                        if node.args and isinstance(node.args[0], ast.Constant):
+                            value = node.args[0].value
+                            if value is None:
+                                return Null()
+                            elif isinstance(value, bool):
+                                return Boolean()
+                            elif isinstance(value, int):
+                                return Int64()
+                            elif isinstance(value, float):
+                                return Float64()
+                            elif isinstance(value, str):
+                                return Utf8()
+        return None
 
 
 class FunctionBodyAnalyzer(ast.NodeVisitor):
     """Analyze a function body to track DataFrame types."""
 
     def __init__(
-        self, input_types: dict[str, FrameType], errors: list[str]
+        self,
+        input_types: dict[str, FrameType],
+        errors: list[str],
+        registry: Optional[FunctionRegistry] = None,
     ):
         self.input_types = input_types
         self.errors = errors
+        self.registry = registry or FunctionRegistry()
         # Track variable -> FrameType mapping
         self.var_types: dict[str, FrameType] = dict(input_types)
         self.return_type: Optional[FrameType] = None
@@ -184,20 +312,43 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 self.var_types[var_name] = inferred
         self.generic_visit(node)
 
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        """Handle annotated assignments like: df: DF["{...}"] = expr."""
+        if isinstance(node.target, ast.Name):
+            var_name = node.target.id
+            # Try to get type from annotation
+            schema_str = _extract_df_schema(node.annotation)
+            if schema_str:
+                frame_type = _parse_frame_type(schema_str)
+                if frame_type:
+                    self.var_types[var_name] = frame_type
+                    return
+            # Fall back to inference from value
+            if node.value:
+                inferred = self._infer_expr_type(node.value)
+                if inferred:
+                    self.var_types[var_name] = inferred
+        self.generic_visit(node)
+
     def _infer_expr_type(self, node: ast.expr) -> Optional[FrameType]:
         """Infer the FrameType of an expression."""
         # Variable reference
         if isinstance(node, ast.Name):
             return self.var_types.get(node.id)
 
-        # Method call chain
+        # Method call chain or function call
         if isinstance(node, ast.Call):
             return self._infer_call_type(node)
 
         return None
 
     def _infer_call_type(self, node: ast.Call) -> Optional[FrameType]:
-        """Infer the type of a method call."""
+        """Infer the type of a method or function call."""
+        # Function call: func_name(args)
+        if isinstance(node.func, ast.Name):
+            return self._infer_function_call_type(node)
+
+        # Method call: obj.method(args)
         if isinstance(node.func, ast.Attribute):
             method_name = node.func.attr
             receiver = node.func.value
@@ -221,6 +372,84 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     return self._infer_with_columns_call(receiver_type, node)
 
         return None
+
+    def _infer_function_call_type(self, node: ast.Call) -> Optional[FrameType]:
+        """Infer type of a function call like helper(df)."""
+        if not isinstance(node.func, ast.Name):
+            return None
+
+        func_name = node.func.id
+        func_info = self.registry.get(func_name)
+
+        if func_info is None:
+            # Unknown function - cannot infer
+            return None
+
+        # Infer argument types
+        arg_types: list[Optional[FrameType]] = []
+        for arg in node.args:
+            arg_type = self._infer_expr_type(arg)
+            arg_types.append(arg_type)
+
+        # If function has a signature, use declared return type and check args
+        if func_info.signature is not None:
+            sig = func_info.signature
+            # Check argument types against parameters
+            for idx, arg_type in enumerate(arg_types):
+                if arg_type is None:
+                    continue
+                param_info = sig.get_param_by_position(idx)
+                if param_info is None:
+                    continue
+                param_name, expected_type = param_info
+                if not _is_frame_subtype(arg_type, expected_type):
+                    # Generate detailed error
+                    for col_name, expected_col_type in expected_type.columns.items():
+                        if col_name not in arg_type.columns:
+                            self.errors.append(
+                                f"Argument '{param_name}' is missing column '{col_name}'"
+                            )
+                        elif not _is_column_subtype(
+                            arg_type.columns[col_name], expected_col_type
+                        ):
+                            self.errors.append(
+                                f"Argument '{param_name}' column '{col_name}' has type "
+                                f"{arg_type.columns[col_name]} but expected {expected_col_type}"
+                            )
+            return sig.return_type
+
+        # Untyped function - analyze body with propagated argument types
+        return self._analyze_untyped_function(func_info, arg_types)
+
+    def _analyze_untyped_function(
+        self, func_info: FunctionInfo, arg_types: list[Optional[FrameType]]
+    ) -> Optional[FrameType]:
+        """Analyze an untyped function body with propagated argument types."""
+        # Create cache key from argument types
+        cache_key = tuple(
+            tuple(sorted(t.columns.items())) if t else None for t in arg_types
+        )
+        if cache_key in func_info.inferred_returns:
+            return func_info.inferred_returns[cache_key]
+
+        # Build input types from function parameters and provided arg types
+        input_types: dict[str, FrameType] = {}
+        func_node = func_info.node
+        for idx, arg in enumerate(func_node.args.args):
+            if idx < len(arg_types) and arg_types[idx] is not None:
+                input_types[arg.arg] = arg_types[idx]
+
+        # Analyze the function body
+        errors: list[str] = []
+        body_analyzer = FunctionBodyAnalyzer(input_types, errors, self.registry)
+        for stmt in func_node.body:
+            body_analyzer.visit(stmt)
+
+        # Cache and return the result
+        result = body_analyzer.return_type
+        if result is not None:
+            func_info.inferred_returns[cache_key] = result
+        return result
 
     def _infer_join_call(
         self, left_type: FrameType, node: ast.Call
@@ -335,7 +564,42 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         return FrameType(columns=result_columns)
 
 
-def analyze_function(func_node: ast.FunctionDef) -> Optional[FunctionAnalysis]:
+def _extract_function_signature(func_node: ast.FunctionDef) -> Optional[FunctionSignature]:
+    """Extract type signature from a function definition."""
+    parameters: dict[str, tuple[int, FrameType]] = {}
+    return_type: Optional[FrameType] = None
+
+    # Extract parameter types
+    for idx, arg in enumerate(func_node.args.args):
+        if arg.annotation:
+            schema_str = _extract_df_schema(arg.annotation)
+            if schema_str:
+                frame_type = _parse_frame_type(schema_str)
+                if frame_type:
+                    parameters[arg.arg] = (idx, frame_type)
+
+    # Extract return type
+    if func_node.returns:
+        schema_str = _extract_df_schema(func_node.returns)
+        if schema_str:
+            return_type = _parse_frame_type(schema_str)
+
+    # Return None if no DF annotations found
+    if not parameters and return_type is None:
+        return None
+
+    return FunctionSignature(
+        name=func_node.name,
+        parameters=parameters,
+        return_type=return_type,
+        lineno=func_node.lineno,
+    )
+
+
+def analyze_function(
+    func_node: ast.FunctionDef,
+    registry: Optional[FunctionRegistry] = None,
+) -> Optional[FunctionAnalysis]:
     """Analyze a single function definition."""
     input_types: dict[str, FrameType] = {}
     declared_return: Optional[FrameType] = None
@@ -360,8 +624,8 @@ def analyze_function(func_node: ast.FunctionDef) -> Optional[FunctionAnalysis]:
     if not input_types and not declared_return:
         return None
 
-    # Analyze function body
-    body_analyzer = FunctionBodyAnalyzer(input_types, errors)
+    # Analyze function body with registry
+    body_analyzer = FunctionBodyAnalyzer(input_types, errors, registry)
     for stmt in func_node.body:
         body_analyzer.visit(stmt)
 
@@ -378,6 +642,11 @@ def analyze_source(source: str) -> list[FunctionAnalysis]:
     """
     Analyze Python source code for DataFrame type annotations.
 
+    Uses a 3-pass approach:
+    1. Collect all function AST nodes
+    2. Build registry with signatures (typed) and nodes (all)
+    3. Analyze function bodies with registry for call resolution
+
     Args:
         source: Python source code as a string
 
@@ -385,12 +654,30 @@ def analyze_source(source: str) -> list[FunctionAnalysis]:
         List of FunctionAnalysis results for functions with DF annotations
     """
     tree = ast.parse(source)
-    results: list[FunctionAnalysis] = []
 
+    # Pass 1: Collect all function nodes
+    func_nodes: list[ast.FunctionDef] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef):
-            analysis = analyze_function(node)
-            if analysis:
-                results.append(analysis)
+            func_nodes.append(node)
+
+    # Pass 2: Build registry with all functions
+    registry = FunctionRegistry()
+    for func_node in func_nodes:
+        signature = _extract_function_signature(func_node)
+        info = FunctionInfo(
+            name=func_node.name,
+            node=func_node,
+            signature=signature,
+            inferred_returns={},
+        )
+        registry.register(info)
+
+    # Pass 3: Analyze functions with registry
+    results: list[FunctionAnalysis] = []
+    for func_node in func_nodes:
+        analysis = analyze_function(func_node, registry)
+        if analysis:
+            results.append(analysis)
 
     return results
