@@ -43,6 +43,7 @@ PRIMITIVE_TYPES: dict[str, type[DataType]] = {
     "Float32": Float32,
     "Float64": Float64,
     "Utf8": Utf8,
+    "String": Utf8,  # Alias for Utf8 (Polars 1.x uses String)
     "Boolean": Boolean,
     "Date": Date,
     "Datetime": Datetime,

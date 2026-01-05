@@ -160,6 +160,16 @@ def _parse_frame_type(schema_str: str) -> Optional[FrameType]:
         return None
 
 
+def _parse_frame_type_with_error(
+    schema_str: str,
+) -> tuple[Optional[FrameType], Optional[str]]:
+    """Parse a schema string into FrameType, returning error message if failed."""
+    try:
+        return parse_schema(schema_str), None
+    except ParseError as e:
+        return None, str(e)
+
+
 class ExpressionAnalyzer(ast.NodeVisitor):
     """Analyze expressions to infer their types and output column names."""
 
@@ -604,24 +614,31 @@ def analyze_function(
     input_types: dict[str, FrameType] = {}
     declared_return: Optional[FrameType] = None
     errors: list[str] = []
+    has_df_annotation = False
 
     # Extract input parameter types
     for arg in func_node.args.args:
         if arg.annotation:
             schema_str = _extract_df_schema(arg.annotation)
             if schema_str:
-                frame_type = _parse_frame_type(schema_str)
+                has_df_annotation = True
+                frame_type, parse_error = _parse_frame_type_with_error(schema_str)
                 if frame_type:
                     input_types[arg.arg] = frame_type
+                elif parse_error:
+                    errors.append(f"Parameter '{arg.arg}': {parse_error}")
 
     # Extract return type
     if func_node.returns:
         schema_str = _extract_df_schema(func_node.returns)
         if schema_str:
-            declared_return = _parse_frame_type(schema_str)
+            has_df_annotation = True
+            declared_return, parse_error = _parse_frame_type_with_error(schema_str)
+            if parse_error:
+                errors.append(f"Return type: {parse_error}")
 
     # If no DF annotations found, skip this function
-    if not input_types and not declared_return:
+    if not has_df_annotation:
         return None
 
     # Analyze function body with registry
