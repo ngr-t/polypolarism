@@ -15,17 +15,21 @@ Static type checker for Polars DataFrames based on row polymorphism.
 
 ## Installation
 
+Install directly from GitHub:
+
 ```bash
-pip install polypolarism
+pip install git+https://github.com/ngr-t/polypolarism.git
 ```
 
-Or install from source:
+Or clone and install locally:
 
 ```bash
 git clone https://github.com/ngr-t/polypolarism.git
 cd polypolarism
 pip install .
 ```
+
+> **Note**: This package is not yet published to PyPI.
 
 ## Quick Start
 
