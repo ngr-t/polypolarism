@@ -6,12 +6,12 @@ from polypolarism import DF
 def expects_non_nullable(
     df: DF["{id: Int64, value: Int64}"]
 ) -> DF["{id: Int64, value: Int64}"]:
-    """Non-nullable Int64 を期待."""
+    """Expects non-nullable Int64."""
     return df
 
 
 def caller(
     data: DF["{id: Int64, value: Int64?}"]
 ) -> DF["{id: Int64, value: Int64}"]:
-    """Error: value が Nullable[Int64] で Int64 と不一致."""
+    """Error: value is Nullable[Int64], mismatches expected Int64."""
     return expects_non_nullable(data)  # Error: nullable mismatch

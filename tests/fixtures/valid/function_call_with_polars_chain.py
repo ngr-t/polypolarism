@@ -14,7 +14,7 @@ def normalize(df: DF["{id: Int64, value: Float64}"]) -> DF["{id: Int64, norm: Fl
 def process_and_filter(
     data: DF["{id: Int64, value: Float64}"]
 ) -> DF["{id: Int64, norm: Float64}"]:
-    """関数呼び出し後に Polars メソッドチェーンを続ける."""
+    """Continue Polars method chain after function call."""
     normalized = normalize(data)
-    # 関数の戻り値に対してさらに操作
+    # Further operations on function return value
     return normalized.select(pl.col("id"), pl.col("norm"))

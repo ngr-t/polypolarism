@@ -4,11 +4,11 @@ from polypolarism import DF
 
 
 def get_data():
-    """外部から DataFrame を取得（型推論不可）."""
+    """Fetch DataFrame from external source (type inference not possible)."""
     return external_source.fetch()
 
 
 def process() -> DF["{id: Int64, name: Utf8}"]:
-    """変数に型アノテーションをつけて型情報を与える."""
+    """Provide type information via variable annotation."""
     df: DF["{id: Int64, name: Utf8}"] = get_data()
     return df
