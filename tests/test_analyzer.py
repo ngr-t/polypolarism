@@ -400,3 +400,52 @@ class TestAnalyzeIntermediateVariables:
             "amount": Float64(),
         })
         assert results[0].inferred_return_type == expected
+
+
+class TestParseErrorReporting:
+    """Test that schema parse errors are reported."""
+
+    def test_unknown_type_in_return_type(self):
+        """Unknown type in return annotation should report error."""
+        source = textwrap.dedent('''
+            from polypolarism import DF
+
+            def process(df: DF["{id: Int64}"]) -> DF["{id: UnknownType}"]:
+                return df
+        ''')
+        results = analyze_source(source)
+
+        assert len(results) == 1
+        assert results[0].has_errors
+        assert any("Unknown type" in err for err in results[0].errors)
+
+    def test_unknown_type_in_parameter(self):
+        """Unknown type in parameter annotation should report error."""
+        source = textwrap.dedent('''
+            from polypolarism import DF
+
+            def process(df: DF["{id: BadType}"]) -> DF["{id: Int64}"]:
+                return df
+        ''')
+        results = analyze_source(source)
+
+        assert len(results) == 1
+        assert results[0].has_errors
+        assert any("Unknown type" in err for err in results[0].errors)
+
+    def test_string_type_alias_works(self):
+        """String should be accepted as alias for Utf8."""
+        source = textwrap.dedent('''
+            from polypolarism import DF
+
+            def process(df: DF["{name: String}"]) -> DF["{name: String}"]:
+                return df
+        ''')
+        results = analyze_source(source)
+
+        assert len(results) == 1
+        assert not results[0].has_errors
+        assert results[0].declared_return_type is not None
+        assert "name" in results[0].declared_return_type.columns
+        # String should be parsed as Utf8
+        assert results[0].declared_return_type.columns["name"] == Utf8()

@@ -48,6 +48,10 @@ class TestParseType:
     def test_parse_utf8(self):
         assert parse_type("Utf8") == Utf8()
 
+    def test_parse_string_as_utf8_alias(self):
+        """String is an alias for Utf8 (Polars 1.x compatibility)."""
+        assert parse_type("String") == Utf8()
+
     def test_parse_boolean(self):
         assert parse_type("Boolean") == Boolean()
 
