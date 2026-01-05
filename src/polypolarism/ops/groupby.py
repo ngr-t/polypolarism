@@ -1,0 +1,1 @@
+"""GroupBy operation type inference."""

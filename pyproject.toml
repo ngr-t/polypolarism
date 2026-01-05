@@ -1,0 +1,24 @@
+[project]
+name = "polypolarism"
+version = "0.1.0"
+description = "Polars DataFrame static type checker based on row polymorphism"
+readme = "README.md"
+authors = [
+    { name = "Tetsuya NEGORO", email = "negotetsu@gmail.com" }
+]
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+polypolarism = "polypolarism.cli:main"
+
+[dependency-groups]
+dev = [
+    "polars>=1.0.0",
+    "pytest>=8.0.0",
+    "pytest-cov>=4.0.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.9.21,<0.10.0"]
+build-backend = "uv_build"
