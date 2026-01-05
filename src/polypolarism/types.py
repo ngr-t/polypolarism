@@ -217,6 +217,20 @@ class Categorical(DataType):
 
 
 @dataclass(frozen=True)
+class Null(DataType):
+    """Null type (for null literals)."""
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, Null)
+
+    def __hash__(self) -> int:
+        return hash("Null")
+
+    def __str__(self) -> str:
+        return "Null"
+
+
+@dataclass(frozen=True)
 class Nullable(DataType):
     """Nullable wrapper for any type."""
 
