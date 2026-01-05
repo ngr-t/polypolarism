@@ -154,18 +154,21 @@ def create_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _check_file_with_locations(file_path: Path) -> tuple[list[CheckResult], dict[str, int]]:
+def _check_file_with_locations(
+    file_path: Path,
+) -> tuple[list[CheckResult], dict[str, int], dict[str, int]]:
     """
     Check a file and return results with function line numbers.
 
     Returns:
-        Tuple of (results, function_lines mapping)
+        Tuple of (results, function_lines mapping, function_end_lines mapping)
     """
     source = file_path.read_text()
     analyses = analyze_source(source)
     results = check_source(source)
     function_lines = {a.name: a.lineno for a in analyses}
-    return results, function_lines
+    function_end_lines = {a.name: a.end_lineno for a in analyses}
+    return results, function_lines, function_end_lines
 
 
 def main(args: Optional[list[str]] = None) -> int:
@@ -187,6 +190,7 @@ def main(args: Optional[list[str]] = None) -> int:
 
     all_results: list[CheckResult] = []
     all_function_lines: dict[str, int] = {}
+    all_function_end_lines: dict[str, int] = {}
     current_file: Optional[Path] = None
 
     for path in parsed.paths:
@@ -196,9 +200,10 @@ def main(args: Optional[list[str]] = None) -> int:
 
         if path.is_file():
             try:
-                results, function_lines = _check_file_with_locations(path)
+                results, function_lines, function_end_lines = _check_file_with_locations(path)
                 all_results.extend(results)
                 all_function_lines.update(function_lines)
+                all_function_end_lines.update(function_end_lines)
                 current_file = path
             except Exception as e:
                 print(f"Error checking {path}: {e}", file=sys.stderr)
@@ -214,7 +219,9 @@ def main(args: Optional[list[str]] = None) -> int:
     # Format output based on --format option
     if parsed.format == "json":
         file_path_str = str(current_file) if current_file else "unknown"
-        output = format_json(all_results, file_path_str, all_function_lines)
+        output = format_json(
+            all_results, file_path_str, all_function_lines, all_function_end_lines
+        )
     else:
         output = format_results(
             all_results, verbose=parsed.verbose, function_lines=all_function_lines

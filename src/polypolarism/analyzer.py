@@ -128,6 +128,7 @@ class FunctionAnalysis:
 
     name: str
     lineno: int  # Line number of function definition (1-indexed)
+    end_lineno: int  # End line number of function definition (1-indexed)
     input_types: dict[str, FrameType]
     declared_return_type: Optional[FrameType]
     inferred_return_type: Optional[FrameType]
@@ -650,6 +651,7 @@ def analyze_function(
     return FunctionAnalysis(
         name=func_node.name,
         lineno=func_node.lineno,
+        end_lineno=func_node.end_lineno or func_node.lineno,
         input_types=input_types,
         declared_return_type=declared_return,
         inferred_return_type=body_analyzer.return_type,

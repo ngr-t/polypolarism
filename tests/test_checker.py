@@ -31,6 +31,7 @@ class TestCheckFunctionBasic:
         analysis = FunctionAnalysis(
             name="process",
             lineno=1,
+            end_lineno=1,
             input_types={"data": FrameType({"id": Int64()})},
             declared_return_type=FrameType({"id": Int64()}),
             inferred_return_type=FrameType({"id": Int64()}),
@@ -47,6 +48,7 @@ class TestCheckFunctionBasic:
         analysis = FunctionAnalysis(
             name="bad_func",
             lineno=1,
+            end_lineno=1,
             input_types={"data": FrameType({"id": Int64()})},
             declared_return_type=FrameType({"id": Int64()}),
             inferred_return_type=None,
@@ -67,6 +69,7 @@ class TestCheckMissingColumn:
         analysis = FunctionAnalysis(
             name="process",
             lineno=1,
+            end_lineno=1,
             input_types={"data": FrameType({"id": Int64()})},
             declared_return_type=FrameType({"id": Int64(), "name": Utf8()}),
             inferred_return_type=FrameType({"id": Int64()}),
@@ -98,6 +101,7 @@ class TestCheckExtraColumn:
         analysis = FunctionAnalysis(
             name="process",
             lineno=1,
+            end_lineno=1,
             input_types={"data": FrameType({"id": Int64(), "name": Utf8()})},
             declared_return_type=FrameType({"id": Int64()}),
             inferred_return_type=FrameType({"id": Int64(), "name": Utf8()}),
@@ -128,6 +132,7 @@ class TestCheckTypeDifference:
         analysis = FunctionAnalysis(
             name="process",
             lineno=1,
+            end_lineno=1,
             input_types={"data": FrameType({"value": Int64()})},
             declared_return_type=FrameType({"value": Float64()}),
             inferred_return_type=FrameType({"value": Int64()}),
@@ -163,6 +168,7 @@ class TestCheckNullability:
         analysis = FunctionAnalysis(
             name="process",
             lineno=1,
+            end_lineno=1,
             input_types={"data": FrameType({"value": Nullable(Int64())})},
             declared_return_type=FrameType({"value": Nullable(Int64())}),
             inferred_return_type=FrameType({"value": Nullable(Int64())}),
@@ -178,6 +184,7 @@ class TestCheckNullability:
         analysis = FunctionAnalysis(
             name="process",
             lineno=1,
+            end_lineno=1,
             input_types={"data": FrameType({"value": Int64()})},
             declared_return_type=FrameType({"value": Int64()}),
             inferred_return_type=FrameType({"value": Nullable(Int64())}),
@@ -194,6 +201,7 @@ class TestCheckNullability:
         analysis = FunctionAnalysis(
             name="process",
             lineno=1,
+            end_lineno=1,
             input_types={"data": FrameType({"value": Int64()})},
             declared_return_type=FrameType({"value": Nullable(Int64())}),
             inferred_return_type=FrameType({"value": Int64()}),
@@ -268,6 +276,7 @@ class TestCheckResult:
         analysis = FunctionAnalysis(
             name="my_function",
             lineno=1,
+            end_lineno=1,
             input_types={},
             declared_return_type=FrameType({"id": Int64()}),
             inferred_return_type=FrameType({"id": Int64()}),
@@ -283,6 +292,7 @@ class TestCheckResult:
         analysis = FunctionAnalysis(
             name="process",
             lineno=1,
+            end_lineno=1,
             input_types={},
             declared_return_type=FrameType({"id": Int64()}),
             inferred_return_type=FrameType({"id": Int64()}),
@@ -302,6 +312,7 @@ class TestNoReturnTypeInferred:
         analysis = FunctionAnalysis(
             name="process",
             lineno=1,
+            end_lineno=1,
             input_types={"data": FrameType({"id": Int64()})},
             declared_return_type=FrameType({"id": Int64()}),
             inferred_return_type=None,  # Could not infer

@@ -58,6 +58,7 @@ def format_json(
     results: list[CheckResult],
     file_path: str,
     function_lines: Optional[dict[str, int]] = None,
+    function_end_lines: Optional[dict[str, int]] = None,
 ) -> str:
     """
     Format check results as JSON.
@@ -66,12 +67,15 @@ def format_json(
         results: List of CheckResult objects
         file_path: Path to the source file
         function_lines: Optional mapping of function name to line number
+        function_end_lines: Optional mapping of function name to end line number
 
     Returns:
         JSON string with diagnostics
     """
     if function_lines is None:
         function_lines = {}
+    if function_end_lines is None:
+        function_end_lines = {}
 
     diagnostics: list[dict] = []
 
@@ -80,6 +84,7 @@ def format_json(
             continue
 
         line = function_lines.get(result.function_name, 1)
+        end_line = function_end_lines.get(result.function_name)
 
         for error in result.errors:
             diag = Diagnostic(
@@ -88,6 +93,8 @@ def format_json(
                 column=0,
                 message=_error_to_message(error),
                 severity=DiagnosticSeverity.ERROR,
+                end_line=end_line,
+                end_column=0,
             )
             diagnostics.append(diag.to_dict())
 
