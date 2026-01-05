@@ -63,17 +63,25 @@ def check_directory(dir_path: Path) -> list[CheckResult]:
     return results
 
 
-def format_results(results: list[CheckResult], verbose: bool = False) -> str:
+def format_results(
+    results: list[CheckResult],
+    verbose: bool = False,
+    function_lines: Optional[dict[str, int]] = None,
+) -> str:
     """
     Format check results for display.
 
     Args:
         results: List of check results
         verbose: If True, show more details
+        function_lines: Optional mapping of function name to line number
 
     Returns:
         Formatted string for output
     """
+    if function_lines is None:
+        function_lines = {}
+
     if not results:
         return "No functions with DF annotations found.\n"
 
@@ -87,7 +95,11 @@ def format_results(results: list[CheckResult], verbose: bool = False) -> str:
         else:
             status = "\033[31mFAIL\033[0m"  # Red
 
-        lines.append(f"  {result.function_name}: {status}")
+        lineno = function_lines.get(result.function_name)
+        if lineno is not None:
+            lines.append(f"  {result.function_name} (line {lineno}): {status}")
+        else:
+            lines.append(f"  {result.function_name}: {status}")
 
         if not result.passed:
             for error in result.errors:
@@ -204,7 +216,9 @@ def main(args: Optional[list[str]] = None) -> int:
         file_path_str = str(current_file) if current_file else "unknown"
         output = format_json(all_results, file_path_str, all_function_lines)
     else:
-        output = format_results(all_results, verbose=parsed.verbose)
+        output = format_results(
+            all_results, verbose=parsed.verbose, function_lines=all_function_lines
+        )
         # Strip color codes if requested
         if parsed.no_color:
             import re
