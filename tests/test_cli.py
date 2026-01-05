@@ -203,3 +203,82 @@ class TestCLIIntegration:
             text=True,
         )
         assert result.returncode == 0
+
+
+class TestFormatOption:
+    """Test --format option for different output formats."""
+
+    def test_format_json_outputs_valid_json(self, tmp_path):
+        """--format json outputs valid JSON."""
+        import json
+
+        test_file = tmp_path / "test.py"
+        test_file.write_text('''
+from polypolarism import DF
+
+def identity(data: DF["{id: Int64}"]) -> DF["{id: Int64}"]:
+    return data
+''')
+
+        result = subprocess.run(
+            [sys.executable, "-m", "polypolarism", "--format", "json", str(test_file)],
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0
+        # Output should be valid JSON
+        data = json.loads(result.stdout)
+        assert "diagnostics" in data
+
+    def test_format_json_with_errors(self, tmp_path):
+        """--format json includes errors in output."""
+        import json
+
+        test_file = tmp_path / "test.py"
+        test_file.write_text('''
+from polypolarism import DF
+
+def bad(data: DF["{id: Int64}"]) -> DF["{id: Int64, missing: Utf8}"]:
+    return data
+''')
+
+        result = subprocess.run(
+            [sys.executable, "-m", "polypolarism", "--format", "json", str(test_file)],
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode != 0  # Errors should cause non-zero exit
+        data = json.loads(result.stdout)
+        assert len(data["diagnostics"]) >= 1
+        assert any("missing" in d["message"].lower() for d in data["diagnostics"])
+
+    def test_format_text_is_default(self, tmp_path):
+        """--format text is the default format."""
+        test_file = tmp_path / "test.py"
+        test_file.write_text('''
+from polypolarism import DF
+
+def identity(data: DF["{id: Int64}"]) -> DF["{id: Int64}"]:
+    return data
+''')
+
+        result_default = subprocess.run(
+            [sys.executable, "-m", "polypolarism", str(test_file)],
+            capture_output=True,
+            text=True,
+        )
+
+        result_text = subprocess.run(
+            [sys.executable, "-m", "polypolarism", "--format", "text", str(test_file)],
+            capture_output=True,
+            text=True,
+        )
+
+        # Both should exit with 0
+        assert result_default.returncode == 0
+        assert result_text.returncode == 0
+        # Both should produce similar output (not JSON)
+        assert "identity" in result_default.stdout
+        assert "identity" in result_text.stdout

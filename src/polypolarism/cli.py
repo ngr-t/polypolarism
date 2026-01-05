@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Optional
 
 from polypolarism.checker import check_source, CheckResult
+from polypolarism.analyzer import analyze_source
+from polypolarism.output import format_json
 
 
 __version__ = "0.1.0"
@@ -131,7 +133,27 @@ def create_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable colored output",
     )
+    parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
     return parser
+
+
+def _check_file_with_locations(file_path: Path) -> tuple[list[CheckResult], dict[str, int]]:
+    """
+    Check a file and return results with function line numbers.
+
+    Returns:
+        Tuple of (results, function_lines mapping)
+    """
+    source = file_path.read_text()
+    analyses = analyze_source(source)
+    results = check_source(source)
+    function_lines = {a.name: a.lineno for a in analyses}
+    return results, function_lines
 
 
 def main(args: Optional[list[str]] = None) -> int:
@@ -152,6 +174,8 @@ def main(args: Optional[list[str]] = None) -> int:
         return 0
 
     all_results: list[CheckResult] = []
+    all_function_lines: dict[str, int] = {}
+    current_file: Optional[Path] = None
 
     for path in parsed.paths:
         if not path.exists():
@@ -160,8 +184,10 @@ def main(args: Optional[list[str]] = None) -> int:
 
         if path.is_file():
             try:
-                results = check_file(path)
+                results, function_lines = _check_file_with_locations(path)
                 all_results.extend(results)
+                all_function_lines.update(function_lines)
+                current_file = path
             except Exception as e:
                 print(f"Error checking {path}: {e}", file=sys.stderr)
                 return 1
@@ -173,12 +199,16 @@ def main(args: Optional[list[str]] = None) -> int:
                 print(f"Error checking {path}: {e}", file=sys.stderr)
                 return 1
 
-    output = format_results(all_results, verbose=parsed.verbose)
-
-    # Strip color codes if requested
-    if parsed.no_color:
-        import re
-        output = re.sub(r"\033\[[0-9;]*m", "", output)
+    # Format output based on --format option
+    if parsed.format == "json":
+        file_path_str = str(current_file) if current_file else "unknown"
+        output = format_json(all_results, file_path_str, all_function_lines)
+    else:
+        output = format_results(all_results, verbose=parsed.verbose)
+        # Strip color codes if requested
+        if parsed.no_color:
+            import re
+            output = re.sub(r"\033\[[0-9;]*m", "", output)
 
     print(output)
 

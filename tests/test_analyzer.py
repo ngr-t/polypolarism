@@ -449,3 +449,46 @@ class TestParseErrorReporting:
         assert "name" in results[0].declared_return_type.columns
         # String should be parsed as Utf8
         assert results[0].declared_return_type.columns["name"] == Utf8()
+
+
+class TestSourceLocation:
+    """Test source location information in analysis results."""
+
+    def test_function_analysis_has_lineno(self):
+        """FunctionAnalysis should include function definition line number."""
+        source = textwrap.dedent('''
+            from polypolarism import DF
+
+            def process(
+                data: DF["{id: Int64}"],
+            ) -> DF["{id: Int64}"]:
+                return data
+        ''')
+
+        results = analyze_source(source)
+
+        assert len(results) == 1
+        # Function def starts at line 4 (1-indexed, after dedent)
+        assert results[0].lineno == 4
+
+    def test_multiple_functions_have_correct_linenos(self):
+        """Multiple functions should each have their correct line numbers."""
+        source = textwrap.dedent('''
+            from polypolarism import DF
+
+            def first(df: DF["{id: Int64}"]) -> DF["{id: Int64}"]:
+                return df
+
+            def second(df: DF["{name: Utf8}"]) -> DF["{name: Utf8}"]:
+                return df
+        ''')
+
+        results = analyze_source(source)
+
+        assert len(results) == 2
+        # Sort by lineno to ensure consistent ordering
+        results.sort(key=lambda r: r.lineno)
+        assert results[0].name == "first"
+        assert results[0].lineno == 4
+        assert results[1].name == "second"
+        assert results[1].lineno == 7

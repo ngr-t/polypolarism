@@ -30,6 +30,7 @@ class TestCheckFunctionBasic:
         """Function with matching declared and inferred types passes."""
         analysis = FunctionAnalysis(
             name="process",
+            lineno=1,
             input_types={"data": FrameType({"id": Int64()})},
             declared_return_type=FrameType({"id": Int64()}),
             inferred_return_type=FrameType({"id": Int64()}),
@@ -45,6 +46,7 @@ class TestCheckFunctionBasic:
         """Analysis errors are included in check result."""
         analysis = FunctionAnalysis(
             name="bad_func",
+            lineno=1,
             input_types={"data": FrameType({"id": Int64()})},
             declared_return_type=FrameType({"id": Int64()}),
             inferred_return_type=None,
@@ -64,6 +66,7 @@ class TestCheckMissingColumn:
         """Detect when declared column is missing from inferred type."""
         analysis = FunctionAnalysis(
             name="process",
+            lineno=1,
             input_types={"data": FrameType({"id": Int64()})},
             declared_return_type=FrameType({"id": Int64(), "name": Utf8()}),
             inferred_return_type=FrameType({"id": Int64()}),
@@ -94,6 +97,7 @@ class TestCheckExtraColumn:
         """Detect when inferred type has column not in declared type."""
         analysis = FunctionAnalysis(
             name="process",
+            lineno=1,
             input_types={"data": FrameType({"id": Int64(), "name": Utf8()})},
             declared_return_type=FrameType({"id": Int64()}),
             inferred_return_type=FrameType({"id": Int64(), "name": Utf8()}),
@@ -123,6 +127,7 @@ class TestCheckTypeDifference:
         """Detect when column has different type than declared."""
         analysis = FunctionAnalysis(
             name="process",
+            lineno=1,
             input_types={"data": FrameType({"value": Int64()})},
             declared_return_type=FrameType({"value": Float64()}),
             inferred_return_type=FrameType({"value": Int64()}),
@@ -157,6 +162,7 @@ class TestCheckNullability:
         """Nullable inferred type matches nullable declared type."""
         analysis = FunctionAnalysis(
             name="process",
+            lineno=1,
             input_types={"data": FrameType({"value": Nullable(Int64())})},
             declared_return_type=FrameType({"value": Nullable(Int64())}),
             inferred_return_type=FrameType({"value": Nullable(Int64())}),
@@ -171,6 +177,7 @@ class TestCheckNullability:
         """Inferred Nullable when declared non-nullable fails."""
         analysis = FunctionAnalysis(
             name="process",
+            lineno=1,
             input_types={"data": FrameType({"value": Int64()})},
             declared_return_type=FrameType({"value": Int64()}),
             inferred_return_type=FrameType({"value": Nullable(Int64())}),
@@ -186,6 +193,7 @@ class TestCheckNullability:
         """Inferred non-nullable is compatible with declared nullable."""
         analysis = FunctionAnalysis(
             name="process",
+            lineno=1,
             input_types={"data": FrameType({"value": Int64()})},
             declared_return_type=FrameType({"value": Nullable(Int64())}),
             inferred_return_type=FrameType({"value": Int64()}),
@@ -259,6 +267,7 @@ class TestCheckResult:
         """CheckResult includes function name."""
         analysis = FunctionAnalysis(
             name="my_function",
+            lineno=1,
             input_types={},
             declared_return_type=FrameType({"id": Int64()}),
             inferred_return_type=FrameType({"id": Int64()}),
@@ -273,6 +282,7 @@ class TestCheckResult:
         """CheckResult has readable repr."""
         analysis = FunctionAnalysis(
             name="process",
+            lineno=1,
             input_types={},
             declared_return_type=FrameType({"id": Int64()}),
             inferred_return_type=FrameType({"id": Int64()}),
@@ -291,6 +301,7 @@ class TestNoReturnTypeInferred:
         """If no return type is inferred, check fails."""
         analysis = FunctionAnalysis(
             name="process",
+            lineno=1,
             input_types={"data": FrameType({"id": Int64()})},
             declared_return_type=FrameType({"id": Int64()}),
             inferred_return_type=None,  # Could not infer
