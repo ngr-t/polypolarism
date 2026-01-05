@@ -3,11 +3,28 @@ name = "polypolarism"
 version = "0.1.0"
 description = "Polars DataFrame static type checker based on row polymorphism"
 readme = "README.md"
+license = { text = "MIT" }
 authors = [
     { name = "Tetsuya NEGORO", email = "negotetsu@gmail.com" }
 ]
 requires-python = ">=3.11"
 dependencies = []
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Quality Assurance",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://github.com/ngr-t/polypolarism"
+Repository = "https://github.com/ngr-t/polypolarism"
+Issues = "https://github.com/ngr-t/polypolarism/issues"
 
 [project.scripts]
 polypolarism = "polypolarism.cli:main"
