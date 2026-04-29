@@ -7,7 +7,7 @@ Static type checker for Polars DataFrames based on row polymorphism.
 - **Static type checking** for Polars DataFrame operations without running your code
 - **Pandera schema declaration** with `pa.DataFrameModel` and `DataFrame[Schema]` annotations
 - **Validation-as-narrowing**: `Schema.validate(df)`, `df.pipe(Schema.validate)`, and `Schema.validate(lf).collect()` all narrow the static type downstream
-- **Operation support**: join, group_by, select, with_columns, filter (predicates type-checked), sort, head/tail/limit/slice, unique, drop, rename, cast, drop_nulls, with_row_index, explode, unpivot/melt, vstack/hstack/extend, `pl.concat([...], how=vertical|horizontal|diagonal)`, plus identity passthrough for lazy/collect/clone/reverse/sample/set_sorted
+- **Operation support**: join, join_asof, group_by, group_by_dynamic, rolling (time-window), select, with_columns, filter (predicates type-checked), sort, head/tail/limit/slice, unique, drop, rename, cast, drop_nulls, with_row_index, explode, unpivot/melt, vstack/hstack/extend, `pl.concat([...], how=vertical|horizontal|diagonal)`, plus identity passthrough for lazy/collect/clone/reverse/sample/set_sorted
 - **Error detection**:
   - Missing columns
   - Type mismatches in join keys
@@ -258,6 +258,64 @@ wrapper is preserved on the result.
 `pivot()` and `partition_by()` are intentionally not yet inferred — they
 are deferred to a later milestone because the result schema depends on
 runtime data.
+
+### Window / time-series (M5)
+
+| Form | Inferred type |
+|---|---|
+| `pl.col("v").cum_sum() / cum_max() / cum_min() / cum_prod()` | preserves receiver dtype |
+| `pl.col("v").cum_count()` | `UInt32` |
+| `pl.col("v").shift(n) / diff(n) / pct_change(n)` | `Nullable[T]` (head positions become NULL) |
+| `pl.col("v").rolling_sum(...) / rolling_min / rolling_max` | preserves receiver dtype |
+| `pl.col("v").rolling_mean / rolling_std / rolling_var / rolling_median / rolling_quantile` | `Float64` |
+| `pl.col("v").mean().over("k")` and other aggregations followed by `.over(...)` | preserves receiver dtype |
+| `df.group_by_dynamic("ts", every="1d").agg(...)` / `df.rolling("ts", period="1d").agg(...)` | same shape as `df.group_by(...).agg(...)` |
+| `df.join_asof(other, on=..., left_on=..., right_on=...)` | same column shape as `df.join(other, how="left")` (right side `Nullable`) |
+
+### `pl.*` expression constructors (M6)
+
+| Form | Inferred type |
+|---|---|
+| `pl.concat_str([...], separator=...)` | `Utf8` |
+| `pl.format(template, *exprs)` | `Utf8` |
+| `pl.coalesce(*exprs)` | unification of operand dtypes; non-`Nullable` if any operand is non-`Nullable` |
+| `pl.struct(pl.col("a"), pl.col("b"), ...)` | `Struct{a: T_a, b: T_b, ...}` (from receiver column names) |
+
+### `polars.selectors` (M6)
+
+`cs.*` selectors are expanded to a list of matching columns when used as
+positional arguments to `select`, `with_columns`, or `drop`.
+
+| Selector | Matches |
+|---|---|
+| `cs.all()` | every column in the frame |
+| `cs.numeric()` | all integer + float columns |
+| `cs.integer()` | `Int8`/`Int16`/`Int32`/`Int64`/`UInt8`/`UInt16`/`UInt32`/`UInt64` |
+| `cs.float()` | `Float32`/`Float64` |
+| `cs.string()` | `Utf8` |
+| `cs.boolean()` | `Boolean` |
+| `cs.temporal()` | `Date`/`Datetime`/`Duration` |
+| `cs.starts_with("prefix")` / `ends_with("suffix")` / `contains("part")` | column-name pattern |
+| `cs.by_name("a", "b", ...)` | exact-name list |
+| `cs.by_dtype(pl.Int64, pl.Float64)` | matching dtypes |
+
+### Diagnostic codes (M6)
+
+Errors are tagged with a stable `[PLY###]` prefix for IDE/CI consumers:
+
+| Code | Meaning |
+|---|---|
+| `PLY001` | column not found in expression (`pl.col("X")`) |
+| `PLY002` | `drop`: column not found |
+| `PLY003` | `rename`: source column not found |
+| `PLY004` | `cast`: column not found |
+| `PLY005` | `drop_nulls`: subset column not found |
+| `PLY006` | `with_row_index`: name collides with existing column |
+| `PLY010` | join key error (missing / dtype mismatch) |
+| `PLY011` | `group_by` key missing or aggregation type error |
+| `PLY020` | `concat` schema mismatch (vertical / horizontal overlap / diagonal unify) |
+| `PLY021` | `explode`: column not found or not `List[T]` |
+| `PLY022` | `unpivot`: column not found or `on`-columns dtype mismatch |
 
 ## Development
 

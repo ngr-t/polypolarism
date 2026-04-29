@@ -5,7 +5,26 @@ from __future__ import annotations
 import ast
 from dataclasses import dataclass, field
 
-from polypolarism.expr_infer import ColumnNotFoundError, infer_col
+from polypolarism.diagnostics import (
+    PLY001,
+    PLY002,
+    PLY003,
+    PLY004,
+    PLY005,
+    PLY006,
+    PLY010,
+    PLY011,
+    PLY020,
+    PLY021,
+    PLY022,
+    tag,
+)
+from polypolarism.expr_infer import (
+    ColumnNotFoundError,
+    TypeUnificationError,
+    infer_col,
+    unify_types,
+)
 from polypolarism.ops.groupby import (
     AggExpr,
     AggFunction,
@@ -40,6 +59,7 @@ from polypolarism.types import (
     Int32,
     Int64,
     Nullable,
+    Struct,
     UInt8,
     UInt16,
     UInt32,
@@ -147,6 +167,99 @@ def _str_list_or_tuple(node: ast.expr) -> list[str] | None:
                 return None
             out.append(s)
         return out
+    return None
+
+
+# polars.selectors return-type predicates by selector name.
+_SELECTOR_NUMERIC = (Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64, Float32, Float64)
+_SELECTOR_INTEGER = (Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64)
+_SELECTOR_FLOAT = (Float32, Float64)
+_SELECTOR_TEMPORAL = (Date, Datetime, Duration)
+
+
+def _selector_dtype_filter(name: str):
+    """Return a predicate ``(DataType) -> bool`` for selector ``cs.<name>()``."""
+    base_map = {
+        "numeric": _SELECTOR_NUMERIC,
+        "integer": _SELECTOR_INTEGER,
+        "float": _SELECTOR_FLOAT,
+        "string": (Utf8,),
+        "boolean": (Boolean,),
+        "temporal": _SELECTOR_TEMPORAL,
+    }
+    target = base_map.get(name)
+    if target is None:
+        return None
+
+    def _match(dtype: DataType) -> bool:
+        inner = dtype.inner if isinstance(dtype, Nullable) else dtype
+        return isinstance(inner, target)
+
+    return _match
+
+
+def _resolve_selector(node: ast.expr, frame: FrameType) -> list[str] | None:
+    """Resolve a ``polars.selectors`` (``cs.*``) call to a list of column names.
+
+    Returns ``None`` if the node isn't a recognised selector.
+    """
+    if not isinstance(node, ast.Call):
+        return None
+    if not isinstance(node.func, ast.Attribute):
+        return None
+    if not (isinstance(node.func.value, ast.Name) and node.func.value.id == "cs"):
+        return None
+    name = node.func.attr
+
+    if name == "all":
+        return list(frame.columns.keys())
+
+    pred = _selector_dtype_filter(name)
+    if pred is not None:
+        return [c for c, spec in frame.columns.items() if pred(spec.dtype)]
+
+    if name == "by_name":
+        out: list[str] = []
+        for arg in node.args:
+            single = _str_constant(arg)
+            multi = _str_list_or_tuple(arg)
+            if single is not None:
+                out.append(single)
+            elif multi is not None:
+                out.extend(multi)
+        return out
+
+    if name == "by_dtype":
+        targets: list[DataType] = []
+        for arg in node.args:
+            multi_args: list[ast.expr] = (
+                list(arg.elts) if isinstance(arg, (ast.List, ast.Tuple)) else [arg]
+            )
+            for inner_arg in multi_args:
+                resolved = _resolve_pl_dtype(inner_arg)
+                if resolved is not None:
+                    targets.append(resolved)
+        if not targets:
+            return []
+
+        def _matches(dtype: DataType) -> bool:
+            inner = dtype.inner if isinstance(dtype, Nullable) else dtype
+            return any(inner == t for t in targets)
+
+        return [c for c, spec in frame.columns.items() if _matches(spec.dtype)]
+
+    if name in ("starts_with", "ends_with", "contains"):
+        if not node.args:
+            return []
+        needle = _str_constant(node.args[0])
+        if needle is None:
+            return []
+        if name == "starts_with":
+            return [c for c in frame.columns if c.startswith(needle)]
+        if name == "ends_with":
+            return [c for c in frame.columns if c.endswith(needle)]
+        return [c for c in frame.columns if needle in c]
+
     return None
 
 
@@ -417,6 +530,31 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             "neg",
             "shrink_dtype",
             "rechunk",
+            # M5 cumulative / window — preserve receiver dtype.
+            "cum_sum",
+            "cum_max",
+            "cum_min",
+            "cum_prod",
+            "over",
+            "rolling_sum",
+            "rolling_min",
+            "rolling_max",
+            "set_sorted",
+            "reverse",
+        }
+    )
+
+    # M5 shift-like methods: receiver dtype, but head positions become NULL.
+    _SHIFT_LIKE_METHODS = frozenset({"shift", "diff", "pct_change"})
+
+    # M5 rolling reductions to Float64.
+    _ROLLING_FLOAT_METHODS = frozenset(
+        {
+            "rolling_mean",
+            "rolling_std",
+            "rolling_var",
+            "rolling_median",
+            "rolling_quantile",
         }
     )
 
@@ -589,6 +727,13 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             output_name = alias if alias else chain_name
             return output_name, chain_type
 
+        # Top-level pl.<func>(...) constructors (pl.struct / concat_str / format / coalesce)
+        pl_result = self._analyze_pl_func(inner_node)
+        if pl_result is not None:
+            pl_name, pl_type = pl_result
+            output_name = alias if alias else pl_name
+            return output_name, pl_type
+
         # Check for pl.col("name")
         col_name = self._extract_col_name(inner_node)
         if col_name:
@@ -597,7 +742,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 output_name = alias if alias else col_name
                 return output_name, col_type
             except ColumnNotFoundError as e:
-                self.errors.append(str(e))
+                self.errors.append(tag(PLY001, str(e)))
                 return None, None
 
         # Check for pl.lit(value)
@@ -606,6 +751,65 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             return alias, lit_type
 
         return None, None
+
+    def _analyze_pl_func(
+        self, node: ast.expr
+    ) -> tuple[str | None, DataType] | None:
+        """Recognise ``pl.struct(...)`` / ``pl.concat_str(...)`` / ``pl.format(...)`` /
+        ``pl.coalesce(...)`` top-level constructor calls."""
+        if not isinstance(node, ast.Call):
+            return None
+        if not isinstance(node.func, ast.Attribute):
+            return None
+        if not (isinstance(node.func.value, ast.Name) and node.func.value.id == "pl"):
+            return None
+        name = node.func.attr
+
+        if name == "concat_str" or name == "format":
+            for arg in node.args:
+                self._validate_subexpr(arg)
+            return None, Utf8()
+
+        if name == "struct":
+            fields: dict[str, DataType] = {}
+            for arg in node.args:
+                col = self._extract_col_name(arg)
+                if col is None:
+                    continue
+                try:
+                    fields[col] = infer_col(col, self.current_frame)
+                except ColumnNotFoundError as e:
+                    self.errors.append(tag(PLY001, str(e)))
+            return None, Struct(fields)
+
+        if name == "coalesce":
+            inferred: list[DataType] = []
+            any_non_nullable = False
+            for arg in node.args:
+                _, t = self.analyze_select_expr(arg)
+                if t is None:
+                    continue
+                inferred.append(t)
+                if not isinstance(t, Nullable):
+                    any_non_nullable = True
+            if not inferred:
+                return None, None  # type: ignore[return-value]
+            unified: DataType = inferred[0]
+            for t in inferred[1:]:
+                try:
+                    unified = unify_types(unified, t)
+                except TypeUnificationError:
+                    return None, unified
+            # If any operand is non-Nullable, the coalesced result is non-Nullable.
+            if any_non_nullable and isinstance(unified, Nullable):
+                unified = unified.inner
+            # Preserve the first-arg column name as the default output name.
+            first_name = (
+                self._extract_col_name(node.args[0]) if node.args else None
+            )
+            return first_name, unified
+
+        return None
 
     def _dispatch_namespace_method(
         self,
@@ -712,6 +916,21 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         # Dtype-preserving methods.
         if method in self._DTYPE_PRESERVING_METHODS and receiver_type is not None:
             return receiver_name, receiver_type
+
+        # cum_count is the only cumulative that doesn't preserve dtype.
+        if method == "cum_count":
+            return receiver_name, UInt32()
+
+        # M5 shift-like: head positions become NULL → wrap in Nullable.
+        if method in self._SHIFT_LIKE_METHODS and receiver_type is not None:
+            inner = receiver_type.inner if isinstance(receiver_type, Nullable) else receiver_type
+            return receiver_name, Nullable(inner)
+
+        # M5 rolling reductions returning Float64.
+        if method in self._ROLLING_FLOAT_METHODS and receiver_type is not None:
+            if isinstance(receiver_type, Nullable):
+                return receiver_name, Nullable(Float64())
+            return receiver_name, Float64()
 
         # Aggregation-style methods used outside of group_by — return reduction dtype.
         # Reuses the same map as analyze_agg_expr.
@@ -926,10 +1145,11 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             if receiver_type:
                 if method_name == "join":
                     return self._infer_join_call(receiver_type, node)
-                elif method_name == "group_by":
-                    # Return a marker or the receiver type
-                    # The actual result comes from .agg()
-                    return None  # Will be handled by .agg()
+                elif method_name in ("group_by", "group_by_dynamic", "rolling"):
+                    # Opaque receiver — the actual frame type comes from .agg().
+                    return None
+                elif method_name == "join_asof":
+                    return self._infer_join_asof_call(receiver_type, node)
                 elif method_name == "select":
                     return self._infer_select_call(receiver_type, node)
                 elif method_name == "with_columns":
@@ -1103,17 +1323,59 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 how=valid_how,
             )
         except JoinError as e:
-            self.errors.append(str(e))
+            self.errors.append(tag(PLY010, str(e)))
+            return None
+
+    def _infer_join_asof_call(
+        self, left_type: FrameType, node: ast.Call
+    ) -> FrameType | None:
+        """``df.join_asof(other, ...)`` — same column shape as a left join."""
+        if not node.args:
+            return None
+        right_expr = node.args[0]
+        right_type = self._infer_expr_type(right_expr)
+        if not right_type:
+            return None
+        on: str | None = None
+        left_on: str | None = None
+        right_on: str | None = None
+        for kw in node.keywords:
+            cand = _str_constant(kw.value)
+            if cand is None:
+                continue
+            if kw.arg == "on":
+                on = cand
+            elif kw.arg == "left_on":
+                left_on = cand
+            elif kw.arg == "right_on":
+                right_on = cand
+        try:
+            return infer_join(
+                left_type,
+                right_type,
+                on=on,
+                left_on=left_on,
+                right_on=right_on,
+                how="left",
+            )
+        except JoinError as e:
+            self.errors.append(tag(PLY010, str(e)))
             return None
 
     def _infer_agg_call(self, groupby_receiver: ast.expr, node: ast.Call) -> FrameType | None:
-        """Infer type of .group_by(...).agg(...) call."""
-        # groupby_receiver should be a Call to .group_by()
+        """Infer type of .group_by(...).agg(...) / .group_by_dynamic(...).agg(...) /
+        .rolling(...).agg(...) calls.
+
+        For the time-window variants the first positional or ``index_column``
+        keyword argument is the index column and is treated like a group key.
+        """
+        # groupby_receiver should be a Call to one of the supported groupers.
         if not isinstance(groupby_receiver, ast.Call):
             return None
         if not isinstance(groupby_receiver.func, ast.Attribute):
             return None
-        if groupby_receiver.func.attr != "group_by":
+        grouper = groupby_receiver.func.attr
+        if grouper not in ("group_by", "group_by_dynamic", "rolling"):
             return None
 
         # Get the DataFrame being grouped
@@ -1124,9 +1386,29 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
 
         # Extract group keys
         keys: list[str] = []
-        for arg in groupby_receiver.args:
-            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-                keys.append(arg.value)
+        if grouper == "group_by":
+            for arg in groupby_receiver.args:
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                    keys.append(arg.value)
+        else:
+            # group_by_dynamic / rolling: first positional / ``index_column`` is the time axis.
+            index_col: str | None = None
+            if groupby_receiver.args:
+                index_col = _str_constant(groupby_receiver.args[0])
+            for kw in groupby_receiver.keywords:
+                if kw.arg == "index_column":
+                    cand = _str_constant(kw.value)
+                    if cand is not None:
+                        index_col = cand
+                if kw.arg == "by" or kw.arg == "group_by":
+                    extra = _str_list_or_tuple(kw.value)
+                    single = _str_constant(kw.value)
+                    if extra is not None:
+                        keys.extend(extra)
+                    elif single is not None:
+                        keys.append(single)
+            if index_col is not None:
+                keys.insert(0, index_col)
 
         # Extract aggregation expressions
         expr_analyzer = ExpressionAnalyzer(input_frame)
@@ -1141,7 +1423,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         try:
             return infer_groupby_result(input_frame, keys, agg_exprs)
         except GroupByTypeError as e:
-            self.errors.append(str(e))
+            self.errors.append(tag(PLY011, str(e)))
             return None
 
     def _infer_select_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
@@ -1150,6 +1432,13 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         result_columns: dict[str, DataType] = {}
 
         for arg in node.args:
+            sel = _resolve_selector(arg, input_frame)
+            if sel is not None:
+                for c in sel:
+                    spec = input_frame.columns.get(c)
+                    if spec is not None:
+                        result_columns[c] = spec.dtype
+                continue
             name, dtype = expr_analyzer.analyze_select_expr(arg)
             if name and dtype:
                 result_columns[name] = dtype
@@ -1168,6 +1457,11 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         expr_analyzer = ExpressionAnalyzer(input_frame)
 
         for arg in node.args:
+            sel = _resolve_selector(arg, input_frame)
+            if sel is not None:
+                # cs.* selectors in with_columns are a no-op type-wise (re-include
+                # existing columns). Skip — keep the existing entries.
+                continue
             name, dtype = expr_analyzer.analyze_select_expr(arg)
             if name and dtype:
                 result_columns[name] = dtype
@@ -1178,11 +1472,14 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
 
     # -- M1 frame methods --------------------------------------------------
 
-    def _collect_drop_targets(self, node: ast.Call) -> list[str]:
+    def _collect_drop_targets(
+        self, node: ast.Call, input_frame: FrameType | None = None
+    ) -> list[str]:
         """Resolve column-name args for ``drop`` / ``drop_nulls(subset=...)``.
 
-        Supports both ``drop("a", "b")`` and ``drop(["a", "b"])``.
-        Returns column names in argument order (subset list flattened in).
+        Supports ``drop("a", "b")``, ``drop(["a", "b"])``, and ``drop(cs.numeric())``
+        when ``input_frame`` is supplied (selectors need a frame to resolve).
+        Returns column names in argument order (lists / selectors flattened in).
         """
         names: list[str] = []
         for arg in node.args:
@@ -1193,14 +1490,19 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             lst = _str_list_or_tuple(arg)
             if lst is not None:
                 names.extend(lst)
+                continue
+            if input_frame is not None:
+                sel = _resolve_selector(arg, input_frame)
+                if sel is not None:
+                    names.extend(sel)
         return names
 
     def _infer_drop_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
-        targets = self._collect_drop_targets(node)
+        targets = self._collect_drop_targets(node, input_frame)
         result_columns = dict(input_frame.columns)
         for name in targets:
             if name not in result_columns:
-                self.errors.append(f"drop: column '{name}' not found")
+                self.errors.append(tag(PLY002, f"drop: column '{name}' not found"))
                 continue
             del result_columns[name]
         return FrameType(columns=result_columns, strict=input_frame.strict, rest=input_frame.rest)
@@ -1225,7 +1527,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             result_columns[new_name] = spec
         for old in mapping:
             if old not in input_frame.columns:
-                self.errors.append(f"rename: column '{old}' not found")
+                self.errors.append(tag(PLY003, f"rename: column '{old}' not found"))
         return FrameType(columns=result_columns, strict=input_frame.strict, rest=input_frame.rest)
 
     def _infer_cast_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
@@ -1247,7 +1549,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 continue
             spec = result_columns.get(col)
             if spec is None:
-                self.errors.append(f"cast: column '{col}' not found")
+                self.errors.append(tag(PLY004, f"cast: column '{col}' not found"))
                 continue
             result_columns[col] = ColumnSpec(
                 dtype=_wrap_like(spec.dtype, target),
@@ -1275,7 +1577,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         for col_name, spec in input_frame.columns.items():
             if col_name in targets:
                 if col_name not in input_frame.columns and subset is not None:
-                    self.errors.append(f"drop_nulls: column '{col_name}' not found")
+                    self.errors.append(
+                        tag(PLY005, f"drop_nulls: column '{col_name}' not found")
+                    )
                 inner = spec.dtype.inner if isinstance(spec.dtype, Nullable) else spec.dtype
                 result_columns[col_name] = ColumnSpec(dtype=inner, required=spec.required)
             else:
@@ -1283,7 +1587,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         if subset is not None:
             for s in subset:
                 if s not in input_frame.columns:
-                    self.errors.append(f"drop_nulls: column '{s}' not found")
+                    self.errors.append(tag(PLY005, f"drop_nulls: column '{s}' not found"))
         return FrameType(columns=result_columns, strict=input_frame.strict, rest=input_frame.rest)
 
     def _collect_concat_frames(self, list_node: ast.expr) -> list[FrameType] | None:
@@ -1317,13 +1621,13 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             if how in ("diagonal", "diagonal_relaxed"):
                 return concat_diagonal(frames)
         except ReshapeError as e:
-            self.errors.append(str(e))
+            self.errors.append(tag(PLY020, str(e)))
             return None
         # Unsupported how — treat as vertical with a warning.
         try:
             return concat_vertical(frames)
         except ReshapeError as e:
-            self.errors.append(str(e))
+            self.errors.append(tag(PLY020, str(e)))
             return None
 
     def _infer_vstack_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
@@ -1335,7 +1639,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         try:
             return concat_vertical([input_frame, other])
         except ReshapeError as e:
-            self.errors.append(str(e))
+            self.errors.append(tag(PLY020, str(e)))
             return None
 
     def _infer_hstack_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
@@ -1347,7 +1651,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         try:
             return concat_horizontal([input_frame, other])
         except ReshapeError as e:
-            self.errors.append(str(e))
+            self.errors.append(tag(PLY020, str(e)))
             return None
 
     def _infer_explode_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
@@ -1367,14 +1671,16 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         for col in targets:
             spec = result_columns.get(col)
             if spec is None:
-                self.errors.append(f"explode: column '{col}' not found")
+                self.errors.append(tag(PLY021, f"explode: column '{col}' not found"))
                 continue
             inner = spec.dtype
             outer_nullable = isinstance(inner, Nullable)
             if outer_nullable:
                 inner = inner.inner  # type: ignore[union-attr]
             if not isinstance(inner, ListT):
-                self.errors.append(f"explode: column '{col}' is {spec.dtype}, not List[T]")
+                self.errors.append(
+                    tag(PLY021, f"explode: column '{col}' is {spec.dtype}, not List[T]")
+                )
                 continue
             elem_dtype: DataType = inner.inner
             if outer_nullable:
@@ -1419,7 +1725,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 value_name=value_name,
             )
         except ReshapeError as e:
-            self.errors.append(str(e))
+            self.errors.append(tag(PLY022, str(e)))
             return None
 
     def _infer_filter_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
@@ -1449,7 +1755,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         result_columns: dict[str, ColumnSpec] = {name: ColumnSpec(dtype=UInt32())}
         for col_name, spec in input_frame.columns.items():
             if col_name == name:
-                self.errors.append(f"with_row_index: column '{name}' already exists")
+                self.errors.append(
+                    tag(PLY006, f"with_row_index: column '{name}' already exists")
+                )
                 continue
             result_columns[col_name] = spec
         return FrameType(columns=result_columns, strict=input_frame.strict, rest=input_frame.rest)

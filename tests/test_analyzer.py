@@ -1558,6 +1558,376 @@ class TestM4Unpivot:
         assert results[0].has_errors is True
 
 
+class TestM5Cumulative:
+    """Cumulative methods preserve dtype; cum_count → UInt32."""
+
+    @pytest.mark.parametrize(
+        "method",
+        ["cum_sum", "cum_max", "cum_min", "cum_prod"],
+    )
+    def test_cum_method_preserves_dtype(self, method: str):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + f"""
+            class S(pa.DataFrameModel):
+                v: pl.Float64
+
+            def f(data: DataFrame[S]):
+                return data.select(pl.col("v").{method}().alias("v"))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["v"].dtype == Float64()
+
+    def test_cum_count_returns_uint32(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                v: pl.Float64
+
+            def f(data: DataFrame[S]):
+                return data.select(pl.col("v").cum_count().alias("n"))
+        """
+        )
+        results = analyze_source(source)
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["n"].dtype == UInt32()
+
+
+class TestM5ShiftDiff:
+    @pytest.mark.parametrize("method", ["shift", "diff", "pct_change"])
+    def test_shift_like_makes_nullable(self, method: str):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + f"""
+            class S(pa.DataFrameModel):
+                v: pl.Float64
+
+            def f(data: DataFrame[S]):
+                return data.select(pl.col("v").{method}(1).alias("v"))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["v"].dtype == Nullable(Float64())
+
+
+class TestM5Over:
+    def test_over_preserves_receiver_type(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                k: str
+                v: pl.Float64
+
+            def f(data: DataFrame[S]):
+                return data.with_columns(
+                    pl.col("v").mean().over("k").alias("v_mean"),
+                )
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["v_mean"].dtype == Float64()
+
+
+class TestM5Rolling:
+    @pytest.mark.parametrize("method", ["rolling_sum", "rolling_min", "rolling_max"])
+    def test_rolling_preserve_methods(self, method: str):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + f"""
+            class S(pa.DataFrameModel):
+                v: pl.Float64
+
+            def f(data: DataFrame[S]):
+                return data.select(pl.col("v").{method}(window_size=3).alias("v"))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["v"].dtype == Float64()
+
+    @pytest.mark.parametrize(
+        "method",
+        ["rolling_mean", "rolling_std", "rolling_var", "rolling_median"],
+    )
+    def test_rolling_float_methods(self, method: str):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + f"""
+            class S(pa.DataFrameModel):
+                v: int
+
+            def f(data: DataFrame[S]):
+                return data.select(pl.col("v").{method}(window_size=3).alias("v"))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["v"].dtype == Float64()
+
+
+class TestM5GroupByDynamic:
+    def test_group_by_dynamic_then_agg(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                ts: pl.Datetime
+                v: pl.Float64
+
+            def f(data: DataFrame[S]):
+                return data.group_by_dynamic("ts", every="1d").agg(
+                    pl.col("v").mean().alias("v_mean"),
+                )
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["ts"].dtype == Datetime()
+        assert ft.columns["v_mean"].dtype == Float64()
+
+    def test_rolling_then_agg(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                ts: pl.Datetime
+                v: pl.Float64
+
+            def f(data: DataFrame[S]):
+                return data.rolling("ts", period="1d").agg(
+                    pl.col("v").sum().alias("v_sum"),
+                )
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["v_sum"].dtype == Float64()
+
+
+class TestM5JoinAsof:
+    def test_join_asof_makes_right_nullable(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class L(pa.DataFrameModel):
+                ts: pl.Datetime
+                user_id: int
+
+            class R(pa.DataFrameModel):
+                ts: pl.Datetime
+                price: pl.Float64
+
+            def f(left: DataFrame[L], right: DataFrame[R]):
+                return left.join_asof(right, on="ts")
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        # right-side columns become Nullable (left-asof semantics)
+        assert ft.columns["price"].dtype == Nullable(Float64())
+        assert ft.columns["user_id"].dtype == Int64()
+
+
+class TestM6PlExprConstructors:
+    def test_pl_concat_str_returns_utf8(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                first: str
+                last: str
+
+            def f(data: DataFrame[S]):
+                return data.select(
+                    pl.concat_str([pl.col("first"), pl.col("last")], separator=" ").alias("full"),
+                )
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["full"].dtype == Utf8()
+
+    def test_pl_format_returns_utf8(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                v: int
+
+            def f(data: DataFrame[S]):
+                return data.select(pl.format("v={}", pl.col("v")).alias("s"))
+        """
+        )
+        results = analyze_source(source)
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["s"].dtype == Utf8()
+
+    def test_pl_coalesce_unifies(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                a: pl.Float64 = pa.Field(nullable=True)
+                b: pl.Float64
+
+            def f(data: DataFrame[S]):
+                return data.select(pl.coalesce(pl.col("a"), pl.col("b")).alias("c"))
+        """
+        )
+        results = analyze_source(source)
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        # b is non-null so the coalesced result is non-null Float64
+        assert ft.columns["c"].dtype == Float64()
+
+    def test_pl_struct_returns_struct(self):
+        from polypolarism.types import Struct
+
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                a: int
+                b: pl.Float64
+
+            def f(data: DataFrame[S]):
+                return data.select(
+                    pl.struct(pl.col("a"), pl.col("b")).alias("ab"),
+                )
+        """
+        )
+        results = analyze_source(source)
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["ab"].dtype == Struct({"a": Int64(), "b": Float64()})
+
+
+class TestM6Selectors:
+    def test_cs_numeric_in_select(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            import polars.selectors as cs
+
+            class S(pa.DataFrameModel):
+                id: int
+                value: pl.Float64
+                name: str
+
+            def f(data: DataFrame[S]):
+                return data.select(cs.numeric())
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert "id" in ft.columns and "value" in ft.columns
+        assert "name" not in ft.columns
+
+    def test_cs_by_dtype_in_drop(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            import polars.selectors as cs
+
+            class S(pa.DataFrameModel):
+                id: int
+                code: int
+                name: str
+
+            def f(data: DataFrame[S]):
+                return data.drop(cs.integer())
+        """
+        )
+        results = analyze_source(source)
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert "id" not in ft.columns
+        assert "code" not in ft.columns
+        assert "name" in ft.columns
+
+    def test_cs_starts_with(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            import polars.selectors as cs
+
+            class S(pa.DataFrameModel):
+                price_a: pl.Float64
+                price_b: pl.Float64
+                name: str
+
+            def f(data: DataFrame[S]):
+                return data.select(cs.starts_with("price_"))
+        """
+        )
+        results = analyze_source(source)
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert "price_a" in ft.columns
+        assert "price_b" in ft.columns
+        assert "name" not in ft.columns
+
+
+class TestM6DiagnosticCodes:
+    """Errors carry a stable PLY### prefix for IDE / CI consumption."""
+
+    def test_column_not_found_has_code(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                id: int
+
+            def f(data: DataFrame[S]):
+                return data.select(pl.col("missing"))
+        """
+        )
+        results = analyze_source(source)
+        assert any("[PLY001]" in e for e in results[0].errors)
+
+    def test_drop_unknown_has_code(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                id: int
+
+            def f(data: DataFrame[S]):
+                return data.drop("missing")
+        """
+        )
+        results = analyze_source(source)
+        assert any("[PLY002]" in e for e in results[0].errors)
+
+
 class TestFunctionAnalysisDataClass:
     """Test FunctionAnalysis data class."""
 
