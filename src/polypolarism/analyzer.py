@@ -8,6 +8,8 @@ from typing import Optional, TYPE_CHECKING
 
 from polypolarism.types import DataType, FrameType, Nullable
 from polypolarism.dsl import parse_schema, ParseError
+from polypolarism.pandera_annotation import extract_dataframe_annotation
+from polypolarism.pandera_schema import SchemaRegistry, collect_schemas
 from polypolarism.ops.join import infer_join, JoinError
 from polypolarism.ops.groupby import (
     infer_groupby_result,
@@ -172,6 +174,39 @@ def _parse_frame_type_with_error(
         return None, str(e)
 
 
+def _resolve_declared_type(
+    annotation: ast.expr,
+    schema_registry: SchemaRegistry,
+) -> tuple[Optional[FrameType], Optional[str]]:
+    """Resolve a declared FrameType from an annotation, trying Pandera first then DSL.
+
+    Returns ``(frame_type, error)``. ``frame_type`` is None if neither form
+    matched. ``error`` is a parse-error message when the DSL form was
+    detected but failed to parse.
+    """
+    # Pandera: DataFrame[Schema] / LazyFrame[Schema]
+    pandera_ft = extract_dataframe_annotation(annotation, schema_registry)
+    if pandera_ft is not None:
+        return pandera_ft, None
+
+    # DSL: DF["{...}"]
+    schema_str = _extract_df_schema(annotation)
+    if schema_str is not None:
+        return _parse_frame_type_with_error(schema_str)
+
+    return None, None
+
+
+def _annotation_declares_frame(
+    annotation: ast.expr,
+    schema_registry: SchemaRegistry,
+) -> bool:
+    """Return True if the annotation is a DF[...] or DataFrame[Schema]/LazyFrame[Schema] form."""
+    if extract_dataframe_annotation(annotation, schema_registry) is not None:
+        return True
+    return _extract_df_schema(annotation) is not None
+
+
 class ExpressionAnalyzer(ast.NodeVisitor):
     """Analyze expressions to infer their types and output column names."""
 
@@ -302,10 +337,12 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         input_types: dict[str, FrameType],
         errors: list[str],
         registry: Optional[FunctionRegistry] = None,
+        schema_registry: Optional[SchemaRegistry] = None,
     ):
         self.input_types = input_types
         self.errors = errors
         self.registry = registry or FunctionRegistry()
+        self.schema_registry = schema_registry or SchemaRegistry()
         # Track variable -> FrameType mapping
         self.var_types: dict[str, FrameType] = dict(input_types)
         self.return_type: Optional[FrameType] = None
@@ -325,16 +362,14 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
-        """Handle annotated assignments like: df: DF["{...}"] = expr."""
+        """Handle annotated assignments like: df: DataFrame[Schema] = expr."""
         if isinstance(node.target, ast.Name):
             var_name = node.target.id
-            # Try to get type from annotation
-            schema_str = _extract_df_schema(node.annotation)
-            if schema_str:
-                frame_type = _parse_frame_type(schema_str)
-                if frame_type:
-                    self.var_types[var_name] = frame_type
-                    return
+            # Try to get type from annotation (Pandera or DSL)
+            frame_type, _ = _resolve_declared_type(node.annotation, self.schema_registry)
+            if frame_type is not None:
+                self.var_types[var_name] = frame_type
+                return
             # Fall back to inference from value
             if node.value:
                 inferred = self._infer_expr_type(node.value)
@@ -454,7 +489,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
 
         # Analyze the function body
         errors: list[str] = []
-        body_analyzer = FunctionBodyAnalyzer(input_types, errors, self.registry)
+        body_analyzer = FunctionBodyAnalyzer(
+            input_types, errors, self.registry, self.schema_registry
+        )
         for stmt in func_node.body:
             body_analyzer.visit(stmt)
 
@@ -577,7 +614,10 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         return FrameType(columns=result_columns)
 
 
-def _extract_function_signature(func_node: ast.FunctionDef) -> Optional[FunctionSignature]:
+def _extract_function_signature(
+    func_node: ast.FunctionDef,
+    schema_registry: SchemaRegistry,
+) -> Optional[FunctionSignature]:
     """Extract type signature from a function definition."""
     parameters: dict[str, tuple[int, FrameType]] = {}
     return_type: Optional[FrameType] = None
@@ -585,19 +625,17 @@ def _extract_function_signature(func_node: ast.FunctionDef) -> Optional[Function
     # Extract parameter types
     for idx, arg in enumerate(func_node.args.args):
         if arg.annotation:
-            schema_str = _extract_df_schema(arg.annotation)
-            if schema_str:
-                frame_type = _parse_frame_type(schema_str)
-                if frame_type:
-                    parameters[arg.arg] = (idx, frame_type)
+            frame_type, _ = _resolve_declared_type(arg.annotation, schema_registry)
+            if frame_type is not None:
+                parameters[arg.arg] = (idx, frame_type)
 
     # Extract return type
     if func_node.returns:
-        schema_str = _extract_df_schema(func_node.returns)
-        if schema_str:
-            return_type = _parse_frame_type(schema_str)
+        frame_type, _ = _resolve_declared_type(func_node.returns, schema_registry)
+        if frame_type is not None:
+            return_type = frame_type
 
-    # Return None if no DF annotations found
+    # Return None if no DataFrame annotations found
     if not parameters and return_type is None:
         return None
 
@@ -612,8 +650,10 @@ def _extract_function_signature(func_node: ast.FunctionDef) -> Optional[Function
 def analyze_function(
     func_node: ast.FunctionDef,
     registry: Optional[FunctionRegistry] = None,
+    schema_registry: Optional[SchemaRegistry] = None,
 ) -> Optional[FunctionAnalysis]:
     """Analyze a single function definition."""
+    schema_registry = schema_registry or SchemaRegistry()
     input_types: dict[str, FrameType] = {}
     declared_return: Optional[FrameType] = None
     errors: list[str] = []
@@ -622,30 +662,32 @@ def analyze_function(
     # Extract input parameter types
     for arg in func_node.args.args:
         if arg.annotation:
-            schema_str = _extract_df_schema(arg.annotation)
-            if schema_str:
+            if _annotation_declares_frame(arg.annotation, schema_registry):
                 has_df_annotation = True
-                frame_type, parse_error = _parse_frame_type_with_error(schema_str)
-                if frame_type:
+                frame_type, parse_error = _resolve_declared_type(
+                    arg.annotation, schema_registry
+                )
+                if frame_type is not None:
                     input_types[arg.arg] = frame_type
                 elif parse_error:
                     errors.append(f"Parameter '{arg.arg}': {parse_error}")
 
     # Extract return type
     if func_node.returns:
-        schema_str = _extract_df_schema(func_node.returns)
-        if schema_str:
+        if _annotation_declares_frame(func_node.returns, schema_registry):
             has_df_annotation = True
-            declared_return, parse_error = _parse_frame_type_with_error(schema_str)
+            declared_return, parse_error = _resolve_declared_type(
+                func_node.returns, schema_registry
+            )
             if parse_error:
                 errors.append(f"Return type: {parse_error}")
 
-    # If no DF annotations found, skip this function
+    # If no DataFrame annotations found, skip this function
     if not has_df_annotation:
         return None
 
     # Analyze function body with registry
-    body_analyzer = FunctionBodyAnalyzer(input_types, errors, registry)
+    body_analyzer = FunctionBodyAnalyzer(input_types, errors, registry, schema_registry)
     for stmt in func_node.body:
         body_analyzer.visit(stmt)
 
@@ -677,6 +719,9 @@ def analyze_source(source: str) -> list[FunctionAnalysis]:
     """
     tree = ast.parse(source)
 
+    # Pass 0: Collect Pandera DataFrameModel schemas at top level
+    schema_registry = collect_schemas(tree)
+
     # Pass 1: Collect all function nodes
     func_nodes: list[ast.FunctionDef] = []
     for node in ast.walk(tree):
@@ -686,7 +731,7 @@ def analyze_source(source: str) -> list[FunctionAnalysis]:
     # Pass 2: Build registry with all functions
     registry = FunctionRegistry()
     for func_node in func_nodes:
-        signature = _extract_function_signature(func_node)
+        signature = _extract_function_signature(func_node, schema_registry)
         info = FunctionInfo(
             name=func_node.name,
             node=func_node,
@@ -698,7 +743,7 @@ def analyze_source(source: str) -> list[FunctionAnalysis]:
     # Pass 3: Analyze functions with registry
     results: list[FunctionAnalysis] = []
     for func_node in func_nodes:
-        analysis = analyze_function(func_node, registry)
+        analysis = analyze_function(func_node, registry, schema_registry)
         if analysis:
             results.append(analysis)
 
