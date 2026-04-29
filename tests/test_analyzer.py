@@ -10,6 +10,7 @@ from polypolarism.types import (
     Float64,
     Utf8,
     UInt32,
+    Boolean,
     Nullable,
 )
 from polypolarism.analyzer import (
@@ -716,6 +717,209 @@ class TestM1WithRowIndex:
         ft = results[0].inferred_return_type
         assert ft is not None
         assert "row_nr" in ft.columns
+
+
+class TestM2BooleanPredicates:
+    """`pl.col(...).is_*()` methods must produce Boolean."""
+
+    @pytest.mark.parametrize(
+        "method",
+        [
+            "is_null()",
+            "is_not_null()",
+            "is_nan()",
+            "is_not_nan()",
+            "is_finite()",
+            "is_infinite()",
+            "is_unique()",
+            "is_duplicated()",
+            "is_first_distinct()",
+            "is_last_distinct()",
+        ],
+    )
+    def test_unary_predicate_returns_boolean(self, method: str):
+        source = textwrap.dedent(PANDERA_HEADER + f'''
+            class In(pa.DataFrameModel):
+                value: pl.Float64
+
+            class Out(pa.DataFrameModel):
+                flag: bool
+
+            def f(data: DataFrame[In]) -> DataFrame[Out]:
+                return data.select(pl.col("value").{method}.alias("flag"))
+        ''')
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        assert results[0].inferred_return_type == FrameType({"flag": Boolean()})
+
+    def test_is_in_returns_boolean(self):
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class In(pa.DataFrameModel):
+                id: int
+
+            class Out(pa.DataFrameModel):
+                flag: bool
+
+            def f(data: DataFrame[In]) -> DataFrame[Out]:
+                return data.select(pl.col("id").is_in([1, 2, 3]).alias("flag"))
+        ''')
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        assert results[0].inferred_return_type == FrameType({"flag": Boolean()})
+
+    def test_is_between_returns_boolean(self):
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class In(pa.DataFrameModel):
+                value: pl.Float64
+
+            class Out(pa.DataFrameModel):
+                flag: bool
+
+            def f(data: DataFrame[In]) -> DataFrame[Out]:
+                return data.select(pl.col("value").is_between(0.0, 1.0).alias("flag"))
+        ''')
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+
+    def test_predicate_on_missing_column_errors(self):
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class S(pa.DataFrameModel):
+                id: int
+
+            def f(data: DataFrame[S]):
+                return data.select(pl.col("missing").is_null().alias("flag"))
+        ''')
+        results = analyze_source(source)
+        assert results[0].has_errors is True
+        assert any("missing" in e for e in results[0].errors)
+
+
+class TestM2CompareAndLogical:
+    """Comparison and logical operators must produce Boolean."""
+
+    @pytest.mark.parametrize(
+        "predicate",
+        [
+            'pl.col("v") > 0',
+            'pl.col("v") >= 0',
+            'pl.col("v") < 0',
+            'pl.col("v") <= 0',
+            'pl.col("v") == 0',
+            'pl.col("v") != 0',
+        ],
+    )
+    def test_compare_returns_boolean(self, predicate: str):
+        source = textwrap.dedent(PANDERA_HEADER + f'''
+            class In(pa.DataFrameModel):
+                v: pl.Float64
+
+            class Out(pa.DataFrameModel):
+                flag: bool
+
+            def f(data: DataFrame[In]) -> DataFrame[Out]:
+                return data.select(({predicate}).alias("flag"))
+        ''')
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        assert results[0].inferred_return_type == FrameType({"flag": Boolean()})
+
+    def test_and_or_invert_return_boolean(self):
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class In(pa.DataFrameModel):
+                v: pl.Float64
+                w: pl.Float64
+
+            class Out(pa.DataFrameModel):
+                a: bool
+                b: bool
+                c: bool
+
+            def f(data: DataFrame[In]) -> DataFrame[Out]:
+                return data.select(
+                    ((pl.col("v") > 0) & (pl.col("w") > 0)).alias("a"),
+                    ((pl.col("v") > 0) | (pl.col("w") > 0)).alias("b"),
+                    (~pl.col("v").is_null()).alias("c"),
+                )
+        ''')
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        assert results[0].inferred_return_type == FrameType({
+            "a": Boolean(),
+            "b": Boolean(),
+            "c": Boolean(),
+        })
+
+    def test_filter_predicate_validates_column(self):
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class S(pa.DataFrameModel):
+                id: int
+
+            def f(data: DataFrame[S]) -> DataFrame[S]:
+                return data.filter(pl.col("missing") > 0)
+        ''')
+        results = analyze_source(source)
+        assert results[0].has_errors is True
+        assert any("missing" in e for e in results[0].errors)
+
+
+class TestM2FillNull:
+    def test_fill_null_strips_nullable(self):
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class In(pa.DataFrameModel):
+                v: pl.Float64 = pa.Field(nullable=True)
+
+            class Out(pa.DataFrameModel):
+                v_clean: pl.Float64
+
+            def f(data: DataFrame[In]) -> DataFrame[Out]:
+                return data.select(pl.col("v").fill_null(0.0).alias("v_clean"))
+        ''')
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        assert results[0].inferred_return_type == FrameType({"v_clean": Float64()})
+
+
+class TestM2NewAggregations:
+    @pytest.mark.parametrize(
+        "agg, expected_type",
+        [
+            ("std", Float64()),
+            ("var", Float64()),
+            ("median", Float64()),
+            ("quantile", Float64()),
+        ],
+    )
+    def test_groupby_agg_float_result(self, agg: str, expected_type):
+        # quantile takes an arg; pad it for that case
+        call = f"{agg}(0.5)" if agg == "quantile" else f"{agg}()"
+        source = textwrap.dedent(PANDERA_HEADER + f'''
+            class In(pa.DataFrameModel):
+                k: str
+                v: pl.Float64
+
+            def f(data: DataFrame[In]):
+                return data.group_by("k").agg(pl.col("v").{call}.alias("agg"))
+        ''')
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["agg"].dtype == expected_type
+
+    def test_groupby_product_preserves_dtype(self):
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class In(pa.DataFrameModel):
+                k: str
+                v: int
+
+            def f(data: DataFrame[In]):
+                return data.group_by("k").agg(pl.col("v").product().alias("p"))
+        ''')
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["p"].dtype == Int64()
 
 
 class TestFunctionAnalysisDataClass:

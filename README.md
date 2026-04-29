@@ -7,7 +7,7 @@ Static type checker for Polars DataFrames based on row polymorphism.
 - **Static type checking** for Polars DataFrame operations without running your code
 - **Pandera schema declaration** with `pa.DataFrameModel` and `DataFrame[Schema]` annotations
 - **Validation-as-narrowing**: `Schema.validate(df)`, `df.pipe(Schema.validate)`, and `Schema.validate(lf).collect()` all narrow the static type downstream
-- **Operation support**: join, group_by, select, with_columns, filter, sort, head/tail/limit/slice, unique, drop, rename, cast, drop_nulls, with_row_index, plus identity passthrough for lazy/collect/clone/reverse/sample/set_sorted
+- **Operation support**: join, group_by, select, with_columns, filter (predicates type-checked), sort, head/tail/limit/slice, unique, drop, rename, cast, drop_nulls, with_row_index, plus identity passthrough for lazy/collect/clone/reverse/sample/set_sorted
 - **Error detection**:
   - Missing columns
   - Type mismatches in join keys
@@ -164,7 +164,10 @@ For invalid code:
 ### Group By + Aggregation
 
 Supported aggregation functions: `sum`, `mean`, `min`, `max`, `count`,
-`n_unique`, `first`, `last`, `list`.
+`n_unique`, `first`, `last`, `list`, `std`, `var`, `median`, `quantile`,
+`product`. `std`/`var`/`median`/`quantile` always return `Float64` (or
+`Nullable[Float64]` if the input is nullable); `product` preserves the
+numeric input dtype.
 
 ### Select / With Columns
 
@@ -187,6 +190,23 @@ literal expressions, `pl.col(...)` references, arithmetic, and
 `pl.<dtype>` literals recognised by `cast`: `Int32`, `Int64`, `UInt32`,
 `UInt64`, `Float32`, `Float64`, `Utf8` (alias `String`), `Boolean`,
 `Date`, `Datetime` (incl. `pl.Datetime("us", "UTC")`), `Duration`.
+
+### Expression predicates and narrowing (M2)
+
+| Form | Inferred type |
+|---|---|
+| `pl.col("x") > y`, `==`, `!=`, `<`, `<=`, `>=` | `Boolean` |
+| `expr1 & expr2`, `expr1 \| expr2`, `~expr` | `Boolean` |
+| `pl.col("x").is_null() / is_not_null() / is_nan() / is_not_nan() / is_finite() / is_infinite() / is_unique() / is_duplicated() / is_first_distinct() / is_last_distinct() / is_in([...]) / is_between(lo, hi) / has_nulls()` | `Boolean` |
+| `pl.col("x").fill_null(v)` / `fill_nan(v)` | strips `Nullable[...]` from the receiver |
+| `pl.col("x").abs() / round() / clip(...) / floor() / ceil() / sign() / neg()` | preserves the receiver's dtype |
+| `pl.col("x").log() / log10() / log1p() / exp() / sqrt() / cbrt() / entropy()` | `Float64` (`Nullable[Float64]` if input is nullable) |
+| `pl.col("x").std() / var() / median() / quantile(p)` (in select / agg) | `Float64` |
+| `pl.col("x").sum() / mean() / min() / max() / first() / last() / count() / n_unique() / product()` (in select / agg) | reduction result dtype |
+
+`df.filter(pred)` is identity-typed but the predicate is walked through
+the same expression analyser, so referencing a missing column produces a
+`Column 'X' not found` error.
 
 ## Development
 

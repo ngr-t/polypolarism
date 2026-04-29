@@ -46,7 +46,6 @@ class AnalysisError(Exception):
 # `lazy()` and `collect()` cross between DataFrame/LazyFrame, but in our
 # static type system both are identity. `set_sorted` mutates only metadata.
 _IDENTITY_FRAME_METHODS: frozenset[str] = frozenset({
-    "filter",
     "sort",
     "head",
     "tail",
@@ -315,6 +314,11 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                     "last": AggFunction.LAST,
                     "min": AggFunction.MIN,
                     "max": AggFunction.MAX,
+                    "std": AggFunction.STD,
+                    "var": AggFunction.VAR,
+                    "median": AggFunction.MEDIAN,
+                    "quantile": AggFunction.QUANTILE,
+                    "product": AggFunction.PRODUCT,
                 }
 
                 if agg_func_name in func_map:
@@ -339,6 +343,48 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                             return node.args[0].value
         return None
 
+    # Methods on a column expression that always produce Boolean.
+    _BOOLEAN_PREDICATE_METHODS = frozenset({
+        "is_null",
+        "is_not_null",
+        "is_nan",
+        "is_not_nan",
+        "is_finite",
+        "is_infinite",
+        "is_unique",
+        "is_duplicated",
+        "is_first_distinct",
+        "is_last_distinct",
+        "is_in",
+        "is_between",
+        "has_nulls",
+        "not_",
+    })
+
+    # Methods that return Float64 from any numeric receiver.
+    _FLOAT_RETURN_METHODS = frozenset({
+        "log",
+        "log10",
+        "log1p",
+        "exp",
+        "sqrt",
+        "cbrt",
+        "entropy",
+    })
+
+    # Methods that preserve the receiver's dtype (numeric mostly).
+    _DTYPE_PRESERVING_METHODS = frozenset({
+        "abs",
+        "round",
+        "clip",
+        "floor",
+        "ceil",
+        "sign",
+        "neg",
+        "shrink_dtype",
+        "rechunk",
+    })
+
     def analyze_select_expr(self, node: ast.expr) -> tuple[Optional[str], Optional[DataType]]:
         """Analyze a select expression, return (output_name, type)."""
         # Check for .alias() wrapper
@@ -351,13 +397,42 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                     alias = node.args[0].value
                     inner_node = node.func.value
 
-        # Check for binary operations like pl.col("x") * 2
+        # Comparison expressions (==, !=, <, <=, >, >=) -> Boolean
+        if isinstance(inner_node, ast.Compare):
+            self._validate_subexpr(inner_node.left)
+            for cmp in inner_node.comparators:
+                self._validate_subexpr(cmp)
+            return alias, Boolean()
+
+        # Logical operators expressed as bitwise: a & b, a | b, a ^ b -> Boolean
+        if isinstance(inner_node, ast.BinOp) and isinstance(
+            inner_node.op, (ast.BitAnd, ast.BitOr, ast.BitXor)
+        ):
+            self._validate_subexpr(inner_node.left)
+            self._validate_subexpr(inner_node.right)
+            return alias, Boolean()
+
+        # Logical NOT: ~expr or `not expr` -> Boolean (when receiver is boolean-like)
+        if isinstance(inner_node, ast.UnaryOp) and isinstance(
+            inner_node.op, (ast.Invert, ast.Not)
+        ):
+            self._validate_subexpr(inner_node.operand)
+            return alias, Boolean()
+
+        # Arithmetic binary operations like pl.col("x") * 2
         if isinstance(inner_node, ast.BinOp):
             # For binary ops, try to infer the type from the left operand
             left_name, left_type = self.analyze_select_expr(inner_node.left)
             if left_type:
                 output_name = alias if alias else left_name
                 return output_name, left_type
+
+        # Method-chain on a column expression (is_null, fill_null, std, abs, ...)
+        chain_result = self._analyze_method_chain(inner_node)
+        if chain_result is not None:
+            chain_name, chain_type = chain_result
+            output_name = alias if alias else chain_name
+            return output_name, chain_type
 
         # Check for pl.col("name")
         col_name = self._extract_col_name(inner_node)
@@ -376,6 +451,95 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             return alias, lit_type
 
         return None, None
+
+    def _validate_subexpr(self, node: ast.expr) -> None:
+        """Run a sub-expression through analyze_select_expr to surface column errors.
+
+        We discard the type/name; the only side-effect of interest is appending
+        to ``self.errors`` when ``pl.col("missing")`` shows up.
+        """
+        self.analyze_select_expr(node)
+
+    def _analyze_method_chain(
+        self, node: ast.expr
+    ) -> Optional[tuple[Optional[str], DataType]]:
+        """Analyze ``pl.col("x").<method>(...)`` style chains.
+
+        Returns ``(default_name, dtype)`` or ``None`` if the node isn't a
+        recognised method chain.
+        """
+        if not isinstance(node, ast.Call):
+            return None
+        if not isinstance(node.func, ast.Attribute):
+            return None
+        method = node.func.attr
+        receiver = node.func.value
+        receiver_result = self.analyze_select_expr(receiver)
+        receiver_name, receiver_type = receiver_result
+        if receiver_type is None and receiver_name is None:
+            # Receiver wasn't recognised — bail out.
+            return None
+
+        # Boolean predicates always produce Boolean; column name carried through.
+        if method in self._BOOLEAN_PREDICATE_METHODS:
+            return receiver_name, Boolean()
+
+        # fill_null / fill_nan strip the Nullable wrapper.
+        if method in ("fill_null", "fill_nan"):
+            inner_dtype = receiver_type
+            if isinstance(receiver_type, Nullable):
+                inner_dtype = receiver_type.inner
+            return receiver_name, inner_dtype if inner_dtype is not None else Boolean()
+
+        # Float-returning numeric methods.
+        if method in self._FLOAT_RETURN_METHODS:
+            base = (
+                receiver_type.inner
+                if isinstance(receiver_type, Nullable)
+                else receiver_type
+            )
+            result: DataType = Float64()
+            if isinstance(receiver_type, Nullable):
+                result = Nullable(Float64())
+            return receiver_name, result
+
+        # Dtype-preserving methods.
+        if method in self._DTYPE_PRESERVING_METHODS and receiver_type is not None:
+            return receiver_name, receiver_type
+
+        # Aggregation-style methods used outside of group_by — return reduction dtype.
+        # Reuses the same map as analyze_agg_expr.
+        agg_map: dict[str, AggFunction] = {
+            "sum": AggFunction.SUM,
+            "mean": AggFunction.MEAN,
+            "count": AggFunction.COUNT,
+            "n_unique": AggFunction.N_UNIQUE,
+            "first": AggFunction.FIRST,
+            "last": AggFunction.LAST,
+            "min": AggFunction.MIN,
+            "max": AggFunction.MAX,
+            "std": AggFunction.STD,
+            "var": AggFunction.VAR,
+            "median": AggFunction.MEDIAN,
+            "quantile": AggFunction.QUANTILE,
+            "product": AggFunction.PRODUCT,
+        }
+        if method in agg_map and receiver_type is not None:
+            try:
+                return receiver_name, infer_agg_result_type(
+                    agg_map[method], receiver_type
+                )
+            except GroupByTypeError as e:
+                self.errors.append(str(e))
+                return receiver_name, receiver_type
+
+        # ``cast(pl.<dtype>)`` chained directly on column.
+        if method == "cast" and node.args:
+            target = _resolve_pl_dtype(node.args[0])
+            if target is not None and receiver_type is not None:
+                return receiver_name, _wrap_like(receiver_type, target)
+
+        return None
 
     def _extract_lit_type(self, node: ast.expr) -> Optional[DataType]:
         """Extract type from pl.lit(value) expression."""
@@ -572,6 +736,8 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     return self._infer_drop_nulls_call(receiver_type, node)
                 elif method_name == "with_row_index":
                     return self._infer_with_row_index_call(receiver_type, node)
+                elif method_name == "filter":
+                    return self._infer_filter_call(receiver_type, node)
                 elif method_name in _IDENTITY_FRAME_METHODS:
                     return receiver_type
 
@@ -924,6 +1090,18 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         return FrameType(
             columns=result_columns, strict=input_frame.strict, rest=input_frame.rest
         )
+
+    def _infer_filter_call(
+        self, input_frame: FrameType, node: ast.Call
+    ) -> Optional[FrameType]:
+        """Identity-typed, but walk every predicate sub-expression to validate columns."""
+        expr_analyzer = ExpressionAnalyzer(input_frame)
+        for arg in node.args:
+            expr_analyzer.analyze_select_expr(arg)
+        for kw in node.keywords:
+            expr_analyzer.analyze_select_expr(kw.value)
+        self.errors.extend(expr_analyzer.errors)
+        return input_frame
 
     def _infer_with_row_index_call(
         self, input_frame: FrameType, node: ast.Call

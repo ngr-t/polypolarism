@@ -40,6 +40,11 @@ class AggFunction(Enum):
     LAST = auto()
     MIN = auto()
     MAX = auto()
+    STD = auto()
+    VAR = auto()
+    MEDIAN = auto()
+    QUANTILE = auto()
+    PRODUCT = auto()
 
 
 @dataclass
@@ -152,6 +157,30 @@ def _infer_max(dtype: DataType) -> DataType:
     return dtype
 
 
+def _infer_float_reduction(name: str):
+    """Build an inference fn for numeric -> Float64 reductions (std/var/median/quantile)."""
+
+    def _infer(dtype: DataType) -> DataType:
+        inner, is_nullable = _unwrap_nullable(dtype)
+        if not isinstance(inner, NUMERIC_TYPES):
+            raise GroupByTypeError(
+                f"Cannot apply {name} to type {dtype}: {name} requires numeric type"
+            )
+        return _wrap_nullable(Float64(), is_nullable)
+
+    return _infer
+
+
+def _infer_product(dtype: DataType) -> DataType:
+    """product(T) -> T for numeric types."""
+    inner, is_nullable = _unwrap_nullable(dtype)
+    if not isinstance(inner, NUMERIC_TYPES):
+        raise GroupByTypeError(
+            f"Cannot apply product to type {dtype}: product requires numeric type"
+        )
+    return _wrap_nullable(inner, is_nullable)
+
+
 # Mapping from AggFunction to inference function
 _AGG_INFER_MAP: dict[AggFunction, Callable[[DataType], DataType]] = {
     AggFunction.SUM: _infer_sum,
@@ -163,6 +192,11 @@ _AGG_INFER_MAP: dict[AggFunction, Callable[[DataType], DataType]] = {
     AggFunction.LAST: _infer_last,
     AggFunction.MIN: _infer_min,
     AggFunction.MAX: _infer_max,
+    AggFunction.STD: _infer_float_reduction("std"),
+    AggFunction.VAR: _infer_float_reduction("var"),
+    AggFunction.MEDIAN: _infer_float_reduction("median"),
+    AggFunction.QUANTILE: _infer_float_reduction("quantile"),
+    AggFunction.PRODUCT: _infer_product,
 }
 
 
