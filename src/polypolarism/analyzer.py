@@ -11,8 +11,12 @@ from polypolarism.types import (
     FrameType,
     Nullable,
     ColumnSpec,
+    Int8,
+    Int16,
     Int32,
     Int64,
+    UInt8,
+    UInt16,
     UInt32,
     UInt64,
     Float32,
@@ -22,6 +26,7 @@ from polypolarism.types import (
     Date,
     Datetime,
     Duration,
+    List as ListT,
 )
 from polypolarism.pandera_annotation import extract_dataframe_annotation
 from polypolarism.pandera_schema import SchemaRegistry, collect_schemas
@@ -65,8 +70,12 @@ _IDENTITY_FRAME_METHODS: frozenset[str] = frozenset({
 # Map ``pl.<Name>`` attribute references and call expressions to our DataType.
 # Datetime/Duration with parameters are handled via Call form.
 _PL_DTYPE_NAME_MAP: dict[str, DataType] = {
+    "Int8": Int8(),
+    "Int16": Int16(),
     "Int32": Int32(),
     "Int64": Int64(),
+    "UInt8": UInt8(),
+    "UInt16": UInt16(),
     "UInt32": UInt32(),
     "UInt64": UInt64(),
     "Float32": Float32(),
@@ -385,6 +394,118 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         "rechunk",
     })
 
+    # ---- sub-namespace return type tables ----------------------------------
+
+    # ``pl.col("x").str.<method>(...)``. Values are either a fixed DataType or
+    # a callable that takes the receiver dtype.
+    _STR_RETURN: dict[str, DataType] = {
+        # Boolean predicates
+        "contains": Boolean(),
+        "contains_any": Boolean(),
+        "starts_with": Boolean(),
+        "ends_with": Boolean(),
+        "is_empty": Boolean(),
+        # Utf8-returning transformations
+        "lower": Utf8(),
+        "upper": Utf8(),
+        "to_lowercase": Utf8(),
+        "to_uppercase": Utf8(),
+        "to_titlecase": Utf8(),
+        "strip": Utf8(),
+        "strip_chars": Utf8(),
+        "strip_chars_start": Utf8(),
+        "strip_chars_end": Utf8(),
+        "lstrip": Utf8(),
+        "rstrip": Utf8(),
+        "replace": Utf8(),
+        "replace_all": Utf8(),
+        "replace_many": Utf8(),
+        "pad_start": Utf8(),
+        "pad_end": Utf8(),
+        "zfill": Utf8(),
+        "slice": Utf8(),
+        "head": Utf8(),
+        "tail": Utf8(),
+        "reverse": Utf8(),
+        "concat": Utf8(),
+        "join": Utf8(),
+        # Length / counts
+        "len_chars": UInt32(),
+        "len_bytes": UInt32(),
+        "count_matches": UInt32(),
+        # Splitting
+        "split": ListT(Utf8()),
+        # Parsing
+        "to_date": Date(),
+        "to_datetime": Datetime(),
+    }
+
+    # ``pl.col("ts").dt.<method>()``. Datetime → various integer parts; some
+    # methods preserve the receiver dtype (truncate / round / offset_by /
+    # replace_time_zone / convert_time_zone).
+    _DT_RETURN: dict[str, DataType] = {
+        "year": Int32(),
+        "iso_year": Int32(),
+        "month": Int8(),
+        "day": Int8(),
+        "hour": Int8(),
+        "minute": Int8(),
+        "second": Int8(),
+        "millisecond": Int32(),
+        "microsecond": Int32(),
+        "nanosecond": Int32(),
+        "weekday": Int8(),
+        "quarter": Int8(),
+        "week": Int8(),
+        "ordinal_day": Int16(),
+        "date": Date(),
+        "epoch": Int64(),
+        "timestamp": Int64(),
+        "total_days": Int64(),
+        "total_hours": Int64(),
+        "total_minutes": Int64(),
+        "total_seconds": Int64(),
+        "total_milliseconds": Int64(),
+        "total_microseconds": Int64(),
+        "total_nanoseconds": Int64(),
+    }
+
+    # Methods on ``pl.col("ts").dt`` that preserve the receiver dtype.
+    _DT_PRESERVING: frozenset[str] = frozenset({
+        "truncate",
+        "round",
+        "offset_by",
+        "replace_time_zone",
+        "convert_time_zone",
+        "month_start",
+        "month_end",
+    })
+
+    # Methods on ``pl.col("xs").list`` that preserve the receiver dtype.
+    _LIST_PRESERVING: frozenset[str] = frozenset({
+        "unique",
+        "sort",
+        "reverse",
+        "head",
+        "tail",
+        "slice",
+        "drop_nulls",
+        "sample",
+        "shift",
+    })
+
+    # Methods on ``pl.col("xs").list`` that return the element dtype.
+    _LIST_ELEMENT_RETURN: frozenset[str] = frozenset({
+        "get",
+        "first",
+        "last",
+        "sum",
+        "mean",
+        "min",
+        "max",
+        "median",
+    })
+
     def analyze_select_expr(self, node: ast.expr) -> tuple[Optional[str], Optional[DataType]]:
         """Analyze a select expression, return (output_name, type)."""
         # Check for .alias() wrapper
@@ -452,6 +573,49 @@ class ExpressionAnalyzer(ast.NodeVisitor):
 
         return None, None
 
+    def _dispatch_namespace_method(
+        self,
+        namespace: str,
+        method: str,
+        receiver_type: Optional[DataType],
+    ) -> Optional[DataType]:
+        """Resolve ``<col_expr>.<namespace>.<method>(...)`` to a DataType.
+
+        ``receiver_type`` is the dtype of the column the namespace was attached
+        to (``None`` if it couldn't be resolved). The receiver's nullability
+        is preserved on the result for almost all of these methods.
+        """
+        receiver_inner = receiver_type
+        receiver_is_nullable = False
+        if isinstance(receiver_type, Nullable):
+            receiver_inner = receiver_type.inner
+            receiver_is_nullable = True
+
+        result: Optional[DataType] = None
+
+        if namespace == "str":
+            result = self._STR_RETURN.get(method)
+        elif namespace == "dt":
+            if method in self._DT_RETURN:
+                result = self._DT_RETURN[method]
+            elif method in self._DT_PRESERVING and receiver_inner is not None:
+                result = receiver_inner
+        elif namespace in ("list", "arr"):
+            if method == "len":
+                result = UInt32()
+            elif method in self._LIST_PRESERVING and receiver_inner is not None:
+                result = receiver_inner
+            elif method in self._LIST_ELEMENT_RETURN and isinstance(
+                receiver_inner, ListT
+            ):
+                result = receiver_inner.inner
+
+        if result is None:
+            return None
+        if receiver_is_nullable and not isinstance(result, Nullable):
+            return Nullable(result)
+        return result
+
     def _validate_subexpr(self, node: ast.expr) -> None:
         """Run a sub-expression through analyze_select_expr to surface column errors.
 
@@ -474,6 +638,22 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             return None
         method = node.func.attr
         receiver = node.func.value
+
+        # Sub-namespace: ``pl.col("x").str.contains(...)``,
+        # ``pl.col("ts").dt.year()``, ``pl.col("xs").list.get(0)`` etc.
+        if isinstance(receiver, ast.Attribute) and receiver.attr in (
+            "str",
+            "dt",
+            "list",
+            "arr",
+        ):
+            ns = receiver.attr
+            col_name, col_type = self.analyze_select_expr(receiver.value)
+            ns_result = self._dispatch_namespace_method(ns, method, col_type)
+            if ns_result is None:
+                return None
+            return col_name, ns_result
+
         receiver_result = self.analyze_select_expr(receiver)
         receiver_name, receiver_type = receiver_result
         if receiver_type is None and receiver_name is None:

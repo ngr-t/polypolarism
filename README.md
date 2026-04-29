@@ -208,6 +208,41 @@ literal expressions, `pl.col(...)` references, arithmetic, and
 the same expression analyser, so referencing a missing column produces a
 `Column 'X' not found` error.
 
+### Sub-namespaces (M3)
+
+Method chains on `.str` / `.dt` / `.list` (alias `.arr`) are dispatched
+to per-namespace return-type tables. The receiver's `Nullable[...]`
+wrapper is preserved on the result.
+
+**`pl.col("s").str.<m>(...)`**
+
+| Methods | Return |
+|---|---|
+| `contains`, `contains_any`, `starts_with`, `ends_with`, `is_empty` | `Boolean` |
+| `lower`, `upper`, `to_lowercase`, `to_uppercase`, `to_titlecase`, `strip*`, `lstrip`, `rstrip`, `replace*`, `replace_many`, `pad_start`, `pad_end`, `zfill`, `slice`, `head`, `tail`, `reverse`, `concat`, `join` | `Utf8` |
+| `len_chars`, `len_bytes`, `count_matches` | `UInt32` |
+| `split` | `List[Utf8]` |
+| `to_date` / `to_datetime` | `Date` / `Datetime` |
+
+**`pl.col("ts").dt.<m>(...)`**
+
+| Methods | Return |
+|---|---|
+| `year`, `iso_year`, `millisecond`, `microsecond`, `nanosecond` | `Int32` |
+| `month`, `day`, `hour`, `minute`, `second`, `weekday`, `quarter`, `week` | `Int8` |
+| `ordinal_day` | `Int16` |
+| `epoch`, `timestamp`, `total_*` | `Int64` |
+| `date()` | `Date` |
+| `truncate`, `round`, `offset_by`, `replace_time_zone`, `convert_time_zone`, `month_start`, `month_end` | preserves receiver dtype |
+
+**`pl.col("xs").list.<m>(...)`** (also exposed as `.arr`)
+
+| Methods | Return |
+|---|---|
+| `len` | `UInt32` |
+| `unique`, `sort`, `reverse`, `head`, `tail`, `slice`, `drop_nulls`, `sample`, `shift` | preserves receiver dtype |
+| `get(i)`, `first`, `last`, `sum`, `mean`, `min`, `max`, `median` | element dtype (requires `List[T]` receiver) |
+
 ## Development
 
 ```bash

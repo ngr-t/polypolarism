@@ -7,10 +7,15 @@ from polypolarism.types import (
     FrameType,
     Int64,
     Int32,
+    Int16,
+    Int8,
     Float64,
     Utf8,
     UInt32,
     Boolean,
+    Date,
+    Datetime,
+    List as ListT,
     Nullable,
 )
 from polypolarism.analyzer import (
@@ -920,6 +925,173 @@ class TestM2NewAggregations:
         ft = results[0].inferred_return_type
         assert ft is not None
         assert ft.columns["p"].dtype == Int64()
+
+
+class TestM3StrNamespace:
+    """`pl.col("x").str.<method>(...)` dispatch tables."""
+
+    @pytest.mark.parametrize(
+        "expr, expected_type",
+        [
+            ('pl.col("name").str.contains("a")', Boolean()),
+            ('pl.col("name").str.starts_with("a")', Boolean()),
+            ('pl.col("name").str.ends_with("a")', Boolean()),
+            ('pl.col("name").str.is_empty()', Boolean()),
+            ('pl.col("name").str.lower()', Utf8()),
+            ('pl.col("name").str.upper()', Utf8()),
+            ('pl.col("name").str.to_lowercase()', Utf8()),
+            ('pl.col("name").str.to_uppercase()', Utf8()),
+            ('pl.col("name").str.strip_chars()', Utf8()),
+            ('pl.col("name").str.replace("a", "b")', Utf8()),
+            ('pl.col("name").str.replace_all("a", "b")', Utf8()),
+            ('pl.col("name").str.zfill(3)', Utf8()),
+            ('pl.col("name").str.len_chars()', UInt32()),
+            ('pl.col("name").str.len_bytes()', UInt32()),
+            ('pl.col("name").str.count_matches("a")', UInt32()),
+            ('pl.col("name").str.split(",")', ListT(Utf8())),
+            ('pl.col("name").str.to_date()', Date()),
+            ('pl.col("name").str.to_datetime()', Datetime()),
+        ],
+    )
+    def test_str_method_return_type(self, expr: str, expected_type):
+        source = textwrap.dedent(PANDERA_HEADER + f'''
+            class S(pa.DataFrameModel):
+                name: str
+
+            def f(data: DataFrame[S]):
+                return data.select(({expr}).alias("out"))
+        ''')
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["out"].dtype == expected_type, expr
+
+    def test_str_method_on_missing_column_errors(self):
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class S(pa.DataFrameModel):
+                name: str
+
+            def f(data: DataFrame[S]):
+                return data.select(pl.col("missing").str.lower().alias("x"))
+        ''')
+        results = analyze_source(source)
+        assert results[0].has_errors is True
+        assert any("missing" in e for e in results[0].errors)
+
+
+class TestM3DtNamespace:
+    """`pl.col("ts").dt.<method>(...)` dispatch tables."""
+
+    @pytest.mark.parametrize(
+        "expr, expected_type",
+        [
+            ('pl.col("ts").dt.year()', Int32()),
+            ('pl.col("ts").dt.iso_year()', Int32()),
+            ('pl.col("ts").dt.month()', Int8()),
+            ('pl.col("ts").dt.day()', Int8()),
+            ('pl.col("ts").dt.hour()', Int8()),
+            ('pl.col("ts").dt.minute()', Int8()),
+            ('pl.col("ts").dt.second()', Int8()),
+            ('pl.col("ts").dt.weekday()', Int8()),
+            ('pl.col("ts").dt.quarter()', Int8()),
+            ('pl.col("ts").dt.week()', Int8()),
+            ('pl.col("ts").dt.ordinal_day()', Int16()),
+            ('pl.col("ts").dt.date()', Date()),
+        ],
+    )
+    def test_dt_method_return_type(self, expr: str, expected_type):
+        source = textwrap.dedent(PANDERA_HEADER + f'''
+            class S(pa.DataFrameModel):
+                ts: pl.Datetime
+
+            def f(data: DataFrame[S]):
+                return data.select(({expr}).alias("out"))
+        ''')
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["out"].dtype == expected_type, expr
+
+    def test_dt_truncate_preserves_receiver_type(self):
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class S(pa.DataFrameModel):
+                ts: pl.Datetime
+
+            def f(data: DataFrame[S]):
+                return data.select(pl.col("ts").dt.truncate("1d").alias("ts"))
+        ''')
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["ts"].dtype == Datetime()
+
+
+class TestM3ListNamespace:
+    """`pl.col("xs").list.<method>(...)` requires List receiver."""
+
+    def test_list_get_returns_element_type(self):
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            from typing import Annotated
+
+            class S(pa.DataFrameModel):
+                xs: Annotated[pl.List, pl.Int64()]
+
+            def f(data: DataFrame[S]):
+                return data.select(pl.col("xs").list.get(0).alias("first"))
+        ''')
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["first"].dtype == Int64()
+
+    def test_list_len_returns_uint32(self):
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            from typing import Annotated
+
+            class S(pa.DataFrameModel):
+                xs: Annotated[pl.List, pl.Int64()]
+
+            def f(data: DataFrame[S]):
+                return data.select(pl.col("xs").list.len().alias("n"))
+        ''')
+        results = analyze_source(source)
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["n"].dtype == UInt32()
+
+    def test_list_sum_returns_element_type(self):
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            from typing import Annotated
+
+            class S(pa.DataFrameModel):
+                xs: Annotated[pl.List, pl.Float64()]
+
+            def f(data: DataFrame[S]):
+                return data.select(pl.col("xs").list.sum().alias("total"))
+        ''')
+        results = analyze_source(source)
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["total"].dtype == Float64()
+
+    def test_list_unique_preserves(self):
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            from typing import Annotated
+
+            class S(pa.DataFrameModel):
+                xs: Annotated[pl.List, pl.Int64()]
+
+            def f(data: DataFrame[S]):
+                return data.select(pl.col("xs").list.unique().alias("u"))
+        ''')
+        results = analyze_source(source)
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["u"].dtype == ListT(Int64())
 
 
 class TestFunctionAnalysisDataClass:

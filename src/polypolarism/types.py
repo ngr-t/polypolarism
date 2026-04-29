@@ -52,6 +52,34 @@ class Int32(DataType):
 
 
 @dataclass(frozen=True)
+class Int16(DataType):
+    """16-bit signed integer."""
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, Int16)
+
+    def __hash__(self) -> int:
+        return hash("Int16")
+
+    def __str__(self) -> str:
+        return "Int16"
+
+
+@dataclass(frozen=True)
+class Int8(DataType):
+    """8-bit signed integer."""
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, Int8)
+
+    def __hash__(self) -> int:
+        return hash("Int8")
+
+    def __str__(self) -> str:
+        return "Int8"
+
+
+@dataclass(frozen=True)
 class UInt32(DataType):
     """32-bit unsigned integer."""
 
@@ -63,6 +91,34 @@ class UInt32(DataType):
 
     def __str__(self) -> str:
         return "UInt32"
+
+
+@dataclass(frozen=True)
+class UInt16(DataType):
+    """16-bit unsigned integer."""
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, UInt16)
+
+    def __hash__(self) -> int:
+        return hash("UInt16")
+
+    def __str__(self) -> str:
+        return "UInt16"
+
+
+@dataclass(frozen=True)
+class UInt8(DataType):
+    """8-bit unsigned integer."""
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, UInt8)
+
+    def __hash__(self) -> int:
+        return hash("UInt8")
+
+    def __str__(self) -> str:
+        return "UInt8"
 
 
 @dataclass(frozen=True)
