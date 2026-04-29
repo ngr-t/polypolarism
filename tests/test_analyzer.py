@@ -448,7 +448,7 @@ class TestParseErrorReporting:
         assert results[0].declared_return_type is not None
         assert "name" in results[0].declared_return_type.columns
         # String should be parsed as Utf8
-        assert results[0].declared_return_type.columns["name"] == Utf8()
+        assert results[0].declared_return_type.columns["name"].dtype == Utf8()
 
 
 class TestSourceLocation:

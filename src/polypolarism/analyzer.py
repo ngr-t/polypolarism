@@ -108,11 +108,11 @@ def _is_frame_subtype(actual: FrameType, expected: FrameType) -> bool:
     - Each column type must be a subtype
     - actual may have extra columns (structural subtyping)
     """
-    for col_name, expected_type in expected.columns.items():
+    for col_name, expected_spec in expected.columns.items():
         if col_name not in actual.columns:
             return False
-        actual_type = actual.columns[col_name]
-        if not _is_column_subtype(actual_type, expected_type):
+        actual_type = actual.columns[col_name].dtype
+        if not _is_column_subtype(actual_type, expected_spec.dtype):
             return False
     return True
 
@@ -416,18 +416,19 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 param_name, expected_type = param_info
                 if not _is_frame_subtype(arg_type, expected_type):
                     # Generate detailed error
-                    for col_name, expected_col_type in expected_type.columns.items():
+                    for col_name, expected_col_spec in expected_type.columns.items():
                         if col_name not in arg_type.columns:
                             self.errors.append(
                                 f"Argument '{param_name}' is missing column '{col_name}'"
                             )
-                        elif not _is_column_subtype(
-                            arg_type.columns[col_name], expected_col_type
-                        ):
-                            self.errors.append(
-                                f"Argument '{param_name}' column '{col_name}' has type "
-                                f"{arg_type.columns[col_name]} but expected {expected_col_type}"
-                            )
+                        else:
+                            actual_col_dtype = arg_type.columns[col_name].dtype
+                            expected_col_dtype = expected_col_spec.dtype
+                            if not _is_column_subtype(actual_col_dtype, expected_col_dtype):
+                                self.errors.append(
+                                    f"Argument '{param_name}' column '{col_name}' has type "
+                                    f"{actual_col_dtype} but expected {expected_col_dtype}"
+                                )
             return sig.return_type
 
         # Untyped function - analyze body with propagated argument types

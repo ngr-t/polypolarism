@@ -279,25 +279,66 @@ class Struct(DataType):
         return f"Struct{{{fields_str}}}"
 
 
+@dataclass(frozen=True)
+class ColumnSpec:
+    """Per-column metadata: dtype + presence semantics.
+
+    `required=True` means the column must exist in the frame.
+    `required=False` means the column may be absent (Pandera `Optional[T]`).
+    Value-level nullability is encoded by wrapping `dtype` in `Nullable(...)`.
+    """
+
+    dtype: DataType
+    required: bool = True
+
+    def __str__(self) -> str:
+        marker = "" if self.required else "?"
+        return f"{self.dtype}{marker}"
+
+
 @dataclass
 class FrameType:
     """Type representation for a DataFrame with known columns."""
 
-    columns: dict[str, DataType] = field(default_factory=dict)
+    columns: dict[str, ColumnSpec] = field(default_factory=dict)
+    strict: bool = False
     rest: Optional["RowVar"] = None  # For future row polymorphism extension
+
+    def __post_init__(self) -> None:
+        # Allow construction with dict[str, DataType] for ergonomics; normalize to ColumnSpec.
+        normalized: dict[str, ColumnSpec] = {}
+        for name, val in self.columns.items():
+            if isinstance(val, ColumnSpec):
+                normalized[name] = val
+            elif isinstance(val, DataType):
+                normalized[name] = ColumnSpec(dtype=val)
+            else:
+                raise TypeError(
+                    f"FrameType column {name!r} must be ColumnSpec or DataType, got {type(val).__name__}"
+                )
+        self.columns = normalized
 
     def has_column(self, name: str) -> bool:
         """Check if a column exists."""
         return name in self.columns
 
     def get_column_type(self, name: str) -> Optional[DataType]:
-        """Get the type of a column, or None if not found."""
+        """Get the dtype of a column, or None if not found."""
+        spec = self.columns.get(name)
+        return spec.dtype if spec is not None else None
+
+    def get_column_spec(self, name: str) -> Optional[ColumnSpec]:
+        """Get the full ColumnSpec for a column, or None if not found."""
         return self.columns.get(name)
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, FrameType):
             return False
-        return self.columns == other.columns and self.rest == other.rest
+        return (
+            self.columns == other.columns
+            and self.strict == other.strict
+            and self.rest == other.rest
+        )
 
 
 @dataclass

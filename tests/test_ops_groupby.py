@@ -250,7 +250,7 @@ class TestDefaultAliasNaming:
 
         # Polars default: column name is used as-is for most aggregations
         assert "amount" in result.columns
-        assert result.columns["amount"] == Float64()
+        assert result.columns["amount"].dtype == Float64()
 
     def test_count_default_alias(self):
         """Default alias for count is column name."""
@@ -264,7 +264,7 @@ class TestDefaultAliasNaming:
         result = infer_groupby_result(input_frame, ["category"], agg_exprs)
 
         assert "value" in result.columns
-        assert result.columns["value"] == UInt32()
+        assert result.columns["value"].dtype == UInt32()
 
 
 class TestAggExprDataClass:

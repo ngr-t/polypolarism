@@ -141,20 +141,20 @@ def check_function(analysis: FunctionAnalysis) -> CheckResult:
     inferred = analysis.inferred_return_type
 
     # Check for missing columns (in declared but not in inferred)
-    for col_name, col_type in declared.columns.items():
+    for col_name, col_spec in declared.columns.items():
         if col_name not in inferred.columns:
-            errors.append(MissingColumn(col_name, col_type))
+            errors.append(MissingColumn(col_name, col_spec.dtype))
 
     # Check for extra columns (in inferred but not in declared)
-    for col_name, col_type in inferred.columns.items():
+    for col_name, col_spec in inferred.columns.items():
         if col_name not in declared.columns:
-            errors.append(ExtraColumn(col_name, col_type))
+            errors.append(ExtraColumn(col_name, col_spec.dtype))
 
     # Check for type differences in common columns
     for col_name in declared.columns:
         if col_name in inferred.columns:
-            declared_type = declared.columns[col_name]
-            inferred_type = inferred.columns[col_name]
+            declared_type = declared.columns[col_name].dtype
+            inferred_type = inferred.columns[col_name].dtype
 
             if not _is_subtype(inferred_type, declared_type):
                 errors.append(TypeDifference(col_name, declared_type, inferred_type))

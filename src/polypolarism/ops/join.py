@@ -107,7 +107,8 @@ def infer_join(
     key_from_right = how == "right"
 
     # Add left columns
-    for col_name, col_type in left.columns.items():
+    for col_name, col_spec in left.columns.items():
+        col_type = col_spec.dtype
         # Special handling for key column when using 'on'
         if skip_right_key and col_name == left_key:
             if how == "full":
@@ -124,7 +125,8 @@ def infer_join(
             result_columns[col_name] = col_type
 
     # Add right columns
-    for col_name, col_type in right.columns.items():
+    for col_name, col_spec in right.columns.items():
+        col_type = col_spec.dtype
         # Skip the key column if using 'on'
         if skip_right_key and col_name == right_key:
             continue

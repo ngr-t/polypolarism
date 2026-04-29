@@ -134,9 +134,9 @@ class TestFrameType:
             "name": Utf8(),
             "score": Float64(),
         })
-        assert ft.columns["id"] == Int64()
-        assert ft.columns["name"] == Utf8()
-        assert ft.columns["score"] == Float64()
+        assert ft.columns["id"].dtype == Int64()
+        assert ft.columns["name"].dtype == Utf8()
+        assert ft.columns["score"].dtype == Float64()
 
     def test_frame_type_has_column(self):
         ft = FrameType({"id": Int64(), "name": Utf8()})
@@ -160,7 +160,7 @@ class TestFrameType:
             "id": Int64(),
             "score": Nullable(Float64()),
         })
-        assert ft.columns["score"] == Nullable(Float64())
+        assert ft.columns["score"].dtype == Nullable(Float64())
 
 
 class TestDataTypeStr:

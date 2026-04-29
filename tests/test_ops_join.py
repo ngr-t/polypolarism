@@ -22,9 +22,9 @@ class TestInferJoinBasic:
 
         result = infer_join(left, right, on="id", how="inner")
 
-        assert result.columns["id"] == Int64()
-        assert result.columns["name"] == Utf8()
-        assert result.columns["value"] == Float64()
+        assert result.columns["id"].dtype == Int64()
+        assert result.columns["name"].dtype == Utf8()
+        assert result.columns["value"].dtype == Float64()
 
     def test_inner_join_columns_not_nullable(self):
         """Inner join columns remain non-nullable."""
@@ -34,8 +34,8 @@ class TestInferJoinBasic:
         result = infer_join(left, right, on="id", how="inner")
 
         # All columns should be non-nullable
-        assert result.columns["name"] == Utf8()
-        assert result.columns["score"] == Float64()
+        assert result.columns["name"].dtype == Utf8()
+        assert result.columns["score"].dtype == Float64()
 
 
 class TestLeftJoin:
@@ -49,10 +49,10 @@ class TestLeftJoin:
         result = infer_join(left, right, on="id", how="left")
 
         # Left columns remain as-is
-        assert result.columns["id"] == Int64()
-        assert result.columns["name"] == Utf8()
+        assert result.columns["id"].dtype == Int64()
+        assert result.columns["name"].dtype == Utf8()
         # Right columns become nullable
-        assert result.columns["value"] == Nullable(Float64())
+        assert result.columns["value"].dtype == Nullable(Float64())
 
     def test_left_join_preserves_left_nullability(self):
         """Left join preserves left-side column nullability."""
@@ -61,7 +61,7 @@ class TestLeftJoin:
 
         result = infer_join(left, right, on="id", how="left")
 
-        assert result.columns["name"] == Nullable(Utf8())
+        assert result.columns["name"].dtype == Nullable(Utf8())
 
     def test_left_join_already_nullable_right(self):
         """Left join keeps right columns nullable (no double wrapping)."""
@@ -71,7 +71,7 @@ class TestLeftJoin:
         result = infer_join(left, right, on="id", how="left")
 
         # Should remain Nullable(Float64), not Nullable(Nullable(Float64))
-        assert result.columns["value"] == Nullable(Float64())
+        assert result.columns["value"].dtype == Nullable(Float64())
 
 
 class TestRightJoin:
@@ -85,10 +85,10 @@ class TestRightJoin:
         result = infer_join(left, right, on="id", how="right")
 
         # Left columns become nullable
-        assert result.columns["name"] == Nullable(Utf8())
+        assert result.columns["name"].dtype == Nullable(Utf8())
         # Right columns remain as-is
-        assert result.columns["id"] == Int64()
-        assert result.columns["value"] == Float64()
+        assert result.columns["id"].dtype == Int64()
+        assert result.columns["value"].dtype == Float64()
 
 
 class TestFullJoin:
@@ -102,10 +102,10 @@ class TestFullJoin:
         result = infer_join(left, right, on="id", how="full")
 
         # Key column becomes nullable in full join
-        assert result.columns["id"] == Nullable(Int64())
+        assert result.columns["id"].dtype == Nullable(Int64())
         # Both sides become nullable
-        assert result.columns["name"] == Nullable(Utf8())
-        assert result.columns["value"] == Nullable(Float64())
+        assert result.columns["name"].dtype == Nullable(Utf8())
+        assert result.columns["value"].dtype == Nullable(Float64())
 
 
 class TestJoinColumnConflict:
@@ -118,8 +118,8 @@ class TestJoinColumnConflict:
 
         result = infer_join(left, right, on="id", how="inner")
 
-        assert result.columns["value"] == Utf8()
-        assert result.columns["value_right"] == Float64()
+        assert result.columns["value"].dtype == Utf8()
+        assert result.columns["value_right"].dtype == Float64()
 
     def test_key_column_not_duplicated(self):
         """Join key column appears only once (from left)."""
@@ -144,10 +144,10 @@ class TestJoinWithLeftOnRightOn:
         result = infer_join(left, right, left_on="user_id", right_on="id", how="inner")
 
         # Both key columns preserved
-        assert result.columns["user_id"] == Int64()
-        assert result.columns["name"] == Utf8()
-        assert result.columns["id"] == Int64()
-        assert result.columns["value"] == Float64()
+        assert result.columns["user_id"].dtype == Int64()
+        assert result.columns["name"].dtype == Utf8()
+        assert result.columns["id"].dtype == Int64()
+        assert result.columns["value"].dtype == Float64()
 
 
 class TestJoinErrors:
