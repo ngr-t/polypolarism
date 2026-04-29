@@ -1,7 +1,7 @@
 """M3: pl.col(...).str methods are dispatched to the correct return type."""
 
-import polars as pl
 import pandera.polars as pa
+import polars as pl
 from pandera.typing.polars import DataFrame
 
 

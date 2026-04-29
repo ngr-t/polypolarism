@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Optional
-
+from polypolarism.expr_infer import TypeUnificationError, unify_types
 from polypolarism.types import (
     ColumnSpec,
     DataType,
@@ -11,7 +10,6 @@ from polypolarism.types import (
     Nullable,
     Utf8,
 )
-from polypolarism.expr_infer import unify_types, TypeUnificationError
 
 
 class ReshapeError(Exception):
@@ -41,9 +39,7 @@ def concat_vertical(frames: list[FrameType]) -> FrameType:
                 parts.append(f"first frame has {sorted(extra_left)} not in another")
             if extra_right:
                 parts.append(f"another frame has {sorted(extra_right)} not in first")
-            raise ReshapeError(
-                "concat(how='vertical'): column sets differ — " + "; ".join(parts)
-            )
+            raise ReshapeError("concat(how='vertical'): column sets differ — " + "; ".join(parts))
 
     merged: dict[str, ColumnSpec] = {}
     for col_name, base_spec in base.columns.items():
@@ -86,7 +82,7 @@ def concat_diagonal(frames: list[FrameType]) -> FrameType:
     merged: dict[str, ColumnSpec] = {}
     for name in all_names:
         present_in_all = True
-        cur_dtype: Optional[DataType] = None
+        cur_dtype: DataType | None = None
         cur_required = True
         for ft in frames:
             spec = ft.columns.get(name)
@@ -99,9 +95,7 @@ def concat_diagonal(frames: list[FrameType]) -> FrameType:
                 try:
                     cur_dtype = unify_types(cur_dtype, spec.dtype)
                 except TypeUnificationError as e:
-                    raise ReshapeError(
-                        f"concat(how='diagonal'): column '{name}' — {e}"
-                    ) from e
+                    raise ReshapeError(f"concat(how='diagonal'): column '{name}' — {e}") from e
             cur_required = cur_required and spec.required
         assert cur_dtype is not None
         if not present_in_all:
@@ -138,9 +132,7 @@ def unpivot(
         try:
             value_dtype = unify_types(value_dtype, spec.dtype)
         except TypeUnificationError as e:
-            raise ReshapeError(
-                f"unpivot: value columns {on} have incompatible dtypes — {e}"
-            ) from e
+            raise ReshapeError(f"unpivot: value columns {on} have incompatible dtypes — {e}") from e
 
     out: dict[str, ColumnSpec] = {}
     for col in index:

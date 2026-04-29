@@ -10,11 +10,9 @@ from __future__ import annotations
 
 import ast
 from dataclasses import dataclass, field
-from typing import Optional
 
 from polypolarism.pandera_dtype import parse_field_annotation
 from polypolarism.types import ColumnSpec, FrameType
-
 
 # Class names treated as the Pandera schema base. Qualified forms (pa.DataFrameModel,
 # pandera.polars.DataFrameModel) are matched on the trailing attribute name.
@@ -40,10 +38,10 @@ class SchemaRegistry:
 
     schemas: dict[str, Schema] = field(default_factory=dict)
 
-    def get(self, name: str) -> Optional[Schema]:
+    def get(self, name: str) -> Schema | None:
         return self.schemas.get(name)
 
-    def to_frame_type(self, name: str) -> Optional[FrameType]:
+    def to_frame_type(self, name: str) -> FrameType | None:
         schema = self.schemas.get(name)
         if schema is None:
             return None
@@ -127,9 +125,7 @@ def _apply_config(schema: Schema, config_node: ast.ClassDef) -> None:
         if isinstance(stmt, ast.Assign):
             for target in stmt.targets:
                 if isinstance(target, ast.Name) and target.id == "strict":
-                    if isinstance(stmt.value, ast.Constant) and isinstance(
-                        stmt.value.value, bool
-                    ):
+                    if isinstance(stmt.value, ast.Constant) and isinstance(stmt.value.value, bool):
                         schema.strict = stmt.value.value
 
 

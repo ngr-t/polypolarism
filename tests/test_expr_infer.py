@@ -2,9 +2,19 @@
 
 import pytest
 
+from polypolarism.expr_infer import (
+    ColumnNotFoundError,
+    TypePromotionError,
+    TypeUnificationError,
+    infer_cast,
+    infer_col,
+    infer_lit,
+    infer_when_then_otherwise,
+    promote_types,
+    unify_types,
+)
 from polypolarism.types import (
     Boolean,
-    DataType,
     Float32,
     Float64,
     FrameType,
@@ -13,17 +23,6 @@ from polypolarism.types import (
     Null,
     Nullable,
     Utf8,
-)
-from polypolarism.expr_infer import (
-    infer_col,
-    infer_lit,
-    infer_cast,
-    infer_when_then_otherwise,
-    promote_types,
-    unify_types,
-    ColumnNotFoundError,
-    TypePromotionError,
-    TypeUnificationError,
 )
 
 

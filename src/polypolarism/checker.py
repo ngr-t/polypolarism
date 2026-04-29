@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Union
 
-from polypolarism.types import DataType, FrameType, Nullable
-from polypolarism.analyzer import analyze_source, FunctionAnalysis
+from polypolarism.analyzer import FunctionAnalysis, analyze_source
+from polypolarism.types import DataType, Nullable
 
 
 class TypeMismatch:
@@ -34,7 +33,9 @@ class ExtraColumn(TypeMismatch):
     inferred_type: DataType
 
     def __str__(self) -> str:
-        return f"Extra column '{self.column}' of type {self.inferred_type} not in declared return type"
+        return (
+            f"Extra column '{self.column}' of type {self.inferred_type} not in declared return type"
+        )
 
 
 @dataclass
@@ -47,8 +48,7 @@ class TypeDifference(TypeMismatch):
 
     def __str__(self) -> str:
         return (
-            f"Column '{self.column}' has type {self.inferred}, "
-            f"but declared type is {self.declared}"
+            f"Column '{self.column}' has type {self.inferred}, but declared type is {self.declared}"
         )
 
 
@@ -62,7 +62,7 @@ class InferenceFailure:
         return self.message
 
 
-CheckError = Union[TypeMismatch, InferenceFailure, str]
+CheckError = TypeMismatch | InferenceFailure | str
 
 
 @dataclass
@@ -153,9 +153,7 @@ def check_function(analysis: FunctionAnalysis) -> CheckResult:
             errors.append(MissingColumn(col_name, declared_spec.dtype))
             continue
         if not _is_subtype(inferred_spec.dtype, declared_spec.dtype):
-            errors.append(
-                TypeDifference(col_name, declared_spec.dtype, inferred_spec.dtype)
-            )
+            errors.append(TypeDifference(col_name, declared_spec.dtype, inferred_spec.dtype))
 
     # Extra columns (only flagged for strict declared schemas)
     if declared.strict:

@@ -2,22 +2,21 @@
 
 import pytest
 
-from polypolarism.types import (
-    DataType,
-    Int64,
-    Float64,
-    Utf8,
-    UInt32,
-    Nullable,
-    List,
-    FrameType,
-)
 from polypolarism.ops.groupby import (
-    infer_agg_result_type,
-    infer_groupby_result,
     AggExpr,
     AggFunction,
     GroupByTypeError,
+    infer_agg_result_type,
+    infer_groupby_result,
+)
+from polypolarism.types import (
+    Float64,
+    FrameType,
+    Int64,
+    List,
+    Nullable,
+    UInt32,
+    Utf8,
 )
 
 
@@ -151,28 +150,34 @@ class TestInferGroupByResult:
 
     def test_single_key_single_agg(self):
         """Basic group_by with one key and one aggregation."""
-        input_frame = FrameType({
-            "country": Utf8(),
-            "amount": Float64(),
-        })
+        input_frame = FrameType(
+            {
+                "country": Utf8(),
+                "amount": Float64(),
+            }
+        )
         agg_exprs = [
             AggExpr(column="amount", function=AggFunction.SUM, alias="total_amount"),
         ]
         result = infer_groupby_result(input_frame, ["country"], agg_exprs)
 
-        expected = FrameType({
-            "country": Utf8(),
-            "total_amount": Float64(),
-        })
+        expected = FrameType(
+            {
+                "country": Utf8(),
+                "total_amount": Float64(),
+            }
+        )
         assert result == expected
 
     def test_single_key_multiple_agg(self):
         """Group by with multiple aggregations."""
-        input_frame = FrameType({
-            "product_id": Int64(),
-            "quantity": Int64(),
-            "price": Float64(),
-        })
+        input_frame = FrameType(
+            {
+                "product_id": Int64(),
+                "quantity": Int64(),
+                "price": Float64(),
+            }
+        )
         agg_exprs = [
             AggExpr(column="quantity", function=AggFunction.SUM, alias="total_qty"),
             AggExpr(column="price", function=AggFunction.MEAN, alias="avg_price"),
@@ -180,39 +185,47 @@ class TestInferGroupByResult:
         ]
         result = infer_groupby_result(input_frame, ["product_id"], agg_exprs)
 
-        expected = FrameType({
-            "product_id": Int64(),
-            "total_qty": Int64(),
-            "avg_price": Float64(),
-            "order_count": UInt32(),
-        })
+        expected = FrameType(
+            {
+                "product_id": Int64(),
+                "total_qty": Int64(),
+                "avg_price": Float64(),
+                "order_count": UInt32(),
+            }
+        )
         assert result == expected
 
     def test_multiple_keys(self):
         """Group by with multiple keys."""
-        input_frame = FrameType({
-            "country": Utf8(),
-            "year": Int64(),
-            "sales": Float64(),
-        })
+        input_frame = FrameType(
+            {
+                "country": Utf8(),
+                "year": Int64(),
+                "sales": Float64(),
+            }
+        )
         agg_exprs = [
             AggExpr(column="sales", function=AggFunction.SUM, alias="total_sales"),
         ]
         result = infer_groupby_result(input_frame, ["country", "year"], agg_exprs)
 
-        expected = FrameType({
-            "country": Utf8(),
-            "year": Int64(),
-            "total_sales": Float64(),
-        })
+        expected = FrameType(
+            {
+                "country": Utf8(),
+                "year": Int64(),
+                "total_sales": Float64(),
+            }
+        )
         assert result == expected
 
     def test_key_column_not_found_raises_error(self):
         """Raises error when group by key column doesn't exist."""
-        input_frame = FrameType({
-            "product": Utf8(),
-            "amount": Float64(),
-        })
+        input_frame = FrameType(
+            {
+                "product": Utf8(),
+                "amount": Float64(),
+            }
+        )
         agg_exprs = [
             AggExpr(column="amount", function=AggFunction.SUM, alias="total"),
         ]
@@ -222,10 +235,12 @@ class TestInferGroupByResult:
 
     def test_agg_column_not_found_raises_error(self):
         """Raises error when aggregation column doesn't exist."""
-        input_frame = FrameType({
-            "category": Utf8(),
-            "amount": Float64(),
-        })
+        input_frame = FrameType(
+            {
+                "category": Utf8(),
+                "amount": Float64(),
+            }
+        )
         agg_exprs = [
             AggExpr(column="price", function=AggFunction.SUM, alias="total"),
         ]
@@ -239,10 +254,12 @@ class TestDefaultAliasNaming:
 
     def test_sum_default_alias(self):
         """Default alias for sum is column name."""
-        input_frame = FrameType({
-            "category": Utf8(),
-            "amount": Float64(),
-        })
+        input_frame = FrameType(
+            {
+                "category": Utf8(),
+                "amount": Float64(),
+            }
+        )
         agg_exprs = [
             AggExpr(column="amount", function=AggFunction.SUM, alias=None),
         ]
@@ -254,10 +271,12 @@ class TestDefaultAliasNaming:
 
     def test_count_default_alias(self):
         """Default alias for count is column name."""
-        input_frame = FrameType({
-            "category": Utf8(),
-            "value": Int64(),
-        })
+        input_frame = FrameType(
+            {
+                "category": Utf8(),
+                "value": Int64(),
+            }
+        )
         agg_exprs = [
             AggExpr(column="value", function=AggFunction.COUNT, alias=None),
         ]

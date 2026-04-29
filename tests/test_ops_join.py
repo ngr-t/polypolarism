@@ -2,14 +2,14 @@
 
 import pytest
 
+from polypolarism.ops.join import JoinError, infer_join
 from polypolarism.types import (
+    Float64,
     FrameType,
     Int64,
-    Utf8,
-    Float64,
     Nullable,
+    Utf8,
 )
-from polypolarism.ops.join import infer_join, JoinError
 
 
 class TestInferJoinBasic:

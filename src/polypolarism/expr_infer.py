@@ -244,9 +244,7 @@ def unify_types(left: DataType, right: DataType) -> DataType:
         return promoted
 
     # Types cannot be unified
-    raise TypeUnificationError(
-        f"Cannot unify types {left} and {right}"
-    )
+    raise TypeUnificationError(f"Cannot unify types {left} and {right}")
 
 
 def infer_when_then_otherwise(
@@ -271,9 +269,7 @@ def infer_when_then_otherwise(
     # Validate condition type
     condition_inner, condition_nullable = _unwrap_nullable(condition)
     if not isinstance(condition_inner, Boolean):
-        raise TypeError(
-            f"Condition must be Boolean, got {condition}"
-        )
+        raise TypeError(f"Condition must be Boolean, got {condition}")
 
     # Unify then and otherwise types
     unified = unify_types(then_type, otherwise_type)

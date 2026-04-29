@@ -1,7 +1,7 @@
 """M2: filter predicates with is_not_null, comparison and logical ops are typed."""
 
-import polars as pl
 import pandera.polars as pa
+import polars as pl
 from pandera.typing.polars import DataFrame
 
 

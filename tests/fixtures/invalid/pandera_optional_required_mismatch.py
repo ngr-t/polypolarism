@@ -1,14 +1,12 @@
 """Declared return requires a column that is only optional in the input."""
 
-from typing import Optional
-import polars as pl
 import pandera.polars as pa
 from pandera.typing.polars import DataFrame
 
 
 class InSchema(pa.DataFrameModel):
     id: int
-    age: Optional[int]
+    age: int | None
 
 
 class OutSchema(pa.DataFrameModel):

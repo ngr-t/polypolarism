@@ -1,12 +1,12 @@
 """Tests for function call type inference."""
 
+import ast
 import textwrap
+from typing import cast
 
-import pytest
+from polypolarism.analyzer import FunctionInfo, FunctionRegistry, analyze_source
 
-from polypolarism.analyzer import analyze_source, FunctionRegistry, FunctionInfo
-from polypolarism.types import FrameType, Int64, Float64, Utf8, Nullable
-
+_DUMMY_FUNCTION_NODE = cast(ast.FunctionDef, None)
 
 PANDERA_HEADER = """
             import polars as pl
@@ -23,7 +23,7 @@ class TestFunctionRegistry:
         registry = FunctionRegistry()
         info = FunctionInfo(
             name="test_func",
-            node=None,  # Simplified for test
+            node=_DUMMY_FUNCTION_NODE,  # type stub: registry tests don't introspect the node
             signature=None,
             inferred_returns={},
         )
@@ -41,7 +41,7 @@ class TestFunctionRegistry:
         # Without signature
         info_no_sig = FunctionInfo(
             name="untyped",
-            node=None,
+            node=_DUMMY_FUNCTION_NODE,
             signature=None,
             inferred_returns={},
         )
@@ -54,7 +54,9 @@ class TestBasicFunctionCall:
 
     def test_call_typed_function(self):
         """Calling a typed function infers return type from signature."""
-        source = textwrap.dedent(PANDERA_HEADER + '''
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
             class IdSchema(pa.DataFrameModel):
                 id: int
 
@@ -67,7 +69,8 @@ class TestBasicFunctionCall:
 
             def caller(data: DataFrame[IdSchema]) -> DataFrame[IdDoubledSchema]:
                 return helper(data)
-        ''')
+        """
+        )
         results = analyze_source(source)
 
         caller_analysis = next(r for r in results if r.name == "caller")
@@ -77,7 +80,9 @@ class TestBasicFunctionCall:
 
     def test_call_typed_function_chained(self):
         """Chained function calls propagate types correctly."""
-        source = textwrap.dedent(PANDERA_HEADER + '''
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
             class A(pa.DataFrameModel):
                 a: int
 
@@ -100,7 +105,8 @@ class TestBasicFunctionCall:
                 temp = add_b(data)
                 result = add_c(temp)
                 return result
-        ''')
+        """
+        )
         results = analyze_source(source)
 
         pipeline_analysis = next(r for r in results if r.name == "pipeline")
@@ -109,7 +115,9 @@ class TestBasicFunctionCall:
 
     def test_forward_reference(self):
         """Can call function defined later in the file."""
-        source = textwrap.dedent(PANDERA_HEADER + '''
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
             class XSchema(pa.DataFrameModel):
                 x: int
 
@@ -122,7 +130,8 @@ class TestBasicFunctionCall:
 
             def helper(df: DataFrame[XSchema]) -> DataFrame[XYSchema]:
                 return df.with_columns((pl.col("x") * 2).alias("y"))
-        ''')
+        """
+        )
         results = analyze_source(source)
 
         caller_analysis = next(r for r in results if r.name == "caller")
@@ -135,7 +144,9 @@ class TestUntypedFunctionCall:
 
     def test_untyped_passthrough(self):
         """Untyped function that passes through infers correct type."""
-        source = textwrap.dedent(PANDERA_HEADER + '''
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
             class IdSchema(pa.DataFrameModel):
                 id: int
 
@@ -144,7 +155,8 @@ class TestUntypedFunctionCall:
 
             def caller(data: DataFrame[IdSchema]) -> DataFrame[IdSchema]:
                 return untyped_passthrough(data)
-        ''')
+        """
+        )
         results = analyze_source(source)
 
         caller_analysis = next(r for r in results if r.name == "caller")
@@ -153,7 +165,9 @@ class TestUntypedFunctionCall:
 
     def test_untyped_with_transform(self):
         """Untyped function that transforms infers correct type."""
-        source = textwrap.dedent(PANDERA_HEADER + '''
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
             class IdSchema(pa.DataFrameModel):
                 id: int
 
@@ -166,7 +180,8 @@ class TestUntypedFunctionCall:
 
             def caller(data: DataFrame[IdSchema]) -> DataFrame[IdNewSchema]:
                 return untyped_add_column(data)
-        ''')
+        """
+        )
         results = analyze_source(source)
 
         caller_analysis = next(r for r in results if r.name == "caller")
@@ -180,7 +195,9 @@ class TestVariableAnnotation:
 
     def test_variable_annotation_basic(self):
         """Variable annotation provides type for unknown source."""
-        source = textwrap.dedent(PANDERA_HEADER + '''
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
             class IdName(pa.DataFrameModel):
                 id: int
                 name: str
@@ -188,7 +205,8 @@ class TestVariableAnnotation:
             def process() -> DataFrame[IdName]:
                 df: DataFrame[IdName] = get_data()
                 return df
-        ''')
+        """
+        )
         results = analyze_source(source)
 
         process_analysis = next(r for r in results if r.name == "process")
@@ -198,7 +216,9 @@ class TestVariableAnnotation:
 
     def test_variable_annotation_with_chain(self):
         """Variable annotation followed by method chain."""
-        source = textwrap.dedent(PANDERA_HEADER + '''
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
             class InSchema(pa.DataFrameModel):
                 id: int
                 value: int
@@ -214,7 +234,8 @@ class TestVariableAnnotation:
                     (pl.col("value") * 2).alias("doubled"),
                 )
                 return result
-        ''')
+        """
+        )
         results = analyze_source(source)
 
         process_analysis = next(r for r in results if r.name == "process")
@@ -228,7 +249,9 @@ class TestArgumentTypeCheck:
 
     def test_missing_column_error(self):
         """Error when argument is missing required column."""
-        source = textwrap.dedent(PANDERA_HEADER + '''
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
             class TwoColSchema(pa.DataFrameModel):
                 id: int
                 name: str
@@ -241,7 +264,8 @@ class TestArgumentTypeCheck:
 
             def caller(data: DataFrame[IdOnlySchema]) -> DataFrame[TwoColSchema]:
                 return requires_two(data)
-        ''')
+        """
+        )
         results = analyze_source(source)
 
         caller_analysis = next(r for r in results if r.name == "caller")
@@ -250,7 +274,9 @@ class TestArgumentTypeCheck:
 
     def test_type_mismatch_error(self):
         """Error when argument column has wrong type."""
-        source = textwrap.dedent(PANDERA_HEADER + '''
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
             class IntSchema(pa.DataFrameModel):
                 id: int
 
@@ -262,7 +288,8 @@ class TestArgumentTypeCheck:
 
             def caller(data: DataFrame[StrSchema]) -> DataFrame[IntSchema]:
                 return expects_int(data)
-        ''')
+        """
+        )
         results = analyze_source(source)
 
         caller_analysis = next(r for r in results if r.name == "caller")
@@ -271,7 +298,9 @@ class TestArgumentTypeCheck:
 
     def test_nullable_mismatch_error(self):
         """Error when nullable passed where non-nullable expected."""
-        source = textwrap.dedent(PANDERA_HEADER + '''
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
             class NonNull(pa.DataFrameModel):
                 value: int
 
@@ -283,7 +312,8 @@ class TestArgumentTypeCheck:
 
             def caller(data: DataFrame[WithNull]) -> DataFrame[NonNull]:
                 return expects_non_nullable(data)
-        ''')
+        """
+        )
         results = analyze_source(source)
 
         caller_analysis = next(r for r in results if r.name == "caller")

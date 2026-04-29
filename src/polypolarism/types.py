@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Optional
 
 
 class DataType(ABC):
@@ -209,7 +209,7 @@ class Date(DataType):
 class Datetime(DataType):
     """Datetime type with optional timezone."""
 
-    tz: Optional[str] = None
+    tz: str | None = None
 
     def __eq__(self, other: object) -> bool:
         return isinstance(other, Datetime) and self.tz == other.tz
@@ -352,38 +352,51 @@ class ColumnSpec:
         return f"{self.dtype}{marker}"
 
 
-@dataclass
+@dataclass(init=False)
 class FrameType:
-    """Type representation for a DataFrame with known columns."""
+    """Type representation for a DataFrame with known columns.
 
-    columns: dict[str, ColumnSpec] = field(default_factory=dict)
-    strict: bool = False
-    rest: Optional["RowVar"] = None  # For future row polymorphism extension
+    The constructor accepts ``dict[str, ColumnSpec | DataType]`` for ergonomics
+    — bare DataType values are wrapped in ``ColumnSpec(dtype=val)`` — but the
+    stored ``columns`` field is always ``dict[str, ColumnSpec]``.
+    """
 
-    def __post_init__(self) -> None:
-        # Allow construction with dict[str, DataType] for ergonomics; normalize to ColumnSpec.
+    columns: dict[str, ColumnSpec]
+    strict: bool
+    rest: RowVar | None  # For future row polymorphism extension
+
+    def __init__(
+        self,
+        columns: Mapping[str, ColumnSpec | DataType] | None = None,
+        strict: bool = False,
+        rest: RowVar | None = None,
+    ) -> None:
         normalized: dict[str, ColumnSpec] = {}
-        for name, val in self.columns.items():
-            if isinstance(val, ColumnSpec):
-                normalized[name] = val
-            elif isinstance(val, DataType):
-                normalized[name] = ColumnSpec(dtype=val)
-            else:
-                raise TypeError(
-                    f"FrameType column {name!r} must be ColumnSpec or DataType, got {type(val).__name__}"
-                )
+        if columns:
+            for name, val in columns.items():
+                if isinstance(val, ColumnSpec):
+                    normalized[name] = val
+                elif isinstance(val, DataType):
+                    normalized[name] = ColumnSpec(dtype=val)
+                else:
+                    raise TypeError(
+                        f"FrameType column {name!r} must be ColumnSpec or DataType, "
+                        f"got {type(val).__name__}"
+                    )
         self.columns = normalized
+        self.strict = strict
+        self.rest = rest
 
     def has_column(self, name: str) -> bool:
         """Check if a column exists."""
         return name in self.columns
 
-    def get_column_type(self, name: str) -> Optional[DataType]:
+    def get_column_type(self, name: str) -> DataType | None:
         """Get the dtype of a column, or None if not found."""
         spec = self.columns.get(name)
         return spec.dtype if spec is not None else None
 
-    def get_column_spec(self, name: str) -> Optional[ColumnSpec]:
+    def get_column_spec(self, name: str) -> ColumnSpec | None:
         """Get the full ColumnSpec for a column, or None if not found."""
         return self.columns.get(name)
 

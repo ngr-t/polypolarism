@@ -3,26 +3,21 @@
 from __future__ import annotations
 
 import ast
-from typing import Optional
-
-import pytest
 
 from polypolarism.pandera_dtype import parse_field_annotation
 from polypolarism.types import (
     Boolean,
     ColumnSpec,
     Float64,
-    Int32,
     Int64,
     List,
     Nullable,
     Struct,
-    UInt32,
     Utf8,
 )
 
 
-def _parse(annotation_src: str, value_src: Optional[str] = None) -> Optional[ColumnSpec]:
+def _parse(annotation_src: str, value_src: str | None = None) -> ColumnSpec | None:
     """Helper: build a class with a single field and parse it."""
     class_src = f"class S:\n    x: {annotation_src}"
     if value_src is not None:
@@ -90,14 +85,10 @@ class TestFieldNullable:
         )
 
     def test_field_nullable_unqualified(self):
-        assert _parse("str", "Field(nullable=True)") == ColumnSpec(
-            Nullable(Utf8()), required=True
-        )
+        assert _parse("str", "Field(nullable=True)") == ColumnSpec(Nullable(Utf8()), required=True)
 
     def test_field_without_nullable(self):
-        assert _parse("int", "pa.Field(unique=True)") == ColumnSpec(
-            Int64(), required=True
-        )
+        assert _parse("int", "pa.Field(unique=True)") == ColumnSpec(Int64(), required=True)
 
     def test_optional_with_nullable_field(self):
         # Optional[T] (column may be absent) AND nullable values
@@ -114,14 +105,10 @@ class TestFieldNullable:
 
 class TestAnnotatedList:
     def test_annotated_list_int(self):
-        assert _parse("Annotated[pl.List, pl.Int64()]") == ColumnSpec(
-            List(Int64()), required=True
-        )
+        assert _parse("Annotated[pl.List, pl.Int64()]") == ColumnSpec(List(Int64()), required=True)
 
     def test_annotated_list_utf8(self):
-        assert _parse("Annotated[pl.List, pl.Utf8()]") == ColumnSpec(
-            List(Utf8()), required=True
-        )
+        assert _parse("Annotated[pl.List, pl.Utf8()]") == ColumnSpec(List(Utf8()), required=True)
 
     def test_annotated_array_treated_as_list(self):
         # Width is ignored for our purposes
@@ -132,17 +119,11 @@ class TestAnnotatedList:
 
 class TestAnnotatedStruct:
     def test_annotated_struct(self):
-        result = _parse(
-            'Annotated[pl.Struct, {"a": pl.Utf8(), "b": pl.Float64()}]'
-        )
-        assert result == ColumnSpec(
-            Struct({"a": Utf8(), "b": Float64()}), required=True
-        )
+        result = _parse('Annotated[pl.Struct, {"a": pl.Utf8(), "b": pl.Float64()}]')
+        assert result == ColumnSpec(Struct({"a": Utf8(), "b": Float64()}), required=True)
 
     def test_annotated_struct_optional(self):
-        result = _parse(
-            'Optional[Annotated[pl.Struct, {"a": pl.Utf8()}]]'
-        )
+        result = _parse('Optional[Annotated[pl.Struct, {"a": pl.Utf8()}]]')
         assert result == ColumnSpec(Struct({"a": Utf8()}), required=False)
 
 

@@ -1,6 +1,5 @@
 """Untyped function passthrough: body analysis infers return type."""
 
-import polars as pl
 import pandera.polars as pa
 from pandera.typing.polars import DataFrame
 

@@ -1,7 +1,7 @@
 """Error: Column type mismatch in function argument."""
 
-import polars as pl
 import pandera.polars as pa
+import polars as pl
 from pandera.typing.polars import DataFrame
 
 

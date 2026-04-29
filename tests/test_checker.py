@@ -1,25 +1,21 @@
 """Tests for checker."""
 
-import pytest
 import textwrap
 
-from polypolarism.types import (
-    FrameType,
-    Int64,
-    Float64,
-    Utf8,
-    UInt32,
-    Nullable,
-)
 from polypolarism.analyzer import FunctionAnalysis
 from polypolarism.checker import (
+    ExtraColumn,
+    MissingColumn,
+    TypeDifference,
     check_function,
     check_source,
-    CheckResult,
-    TypeMismatch,
-    MissingColumn,
-    ExtraColumn,
-    TypeDifference,
+)
+from polypolarism.types import (
+    Float64,
+    FrameType,
+    Int64,
+    Nullable,
+    Utf8,
 )
 
 
@@ -235,7 +231,7 @@ class TestCheckSource:
 
     def test_check_valid_source(self):
         """Check source with valid function."""
-        source = textwrap.dedent('''
+        source = textwrap.dedent("""
             import pandera.polars as pa
             from pandera.typing.polars import DataFrame
 
@@ -247,7 +243,7 @@ class TestCheckSource:
                 data: DataFrame[IdName],
             ) -> DataFrame[IdName]:
                 return data
-        ''')
+        """)
 
         results = check_source(source)
 
@@ -256,7 +252,7 @@ class TestCheckSource:
 
     def test_check_invalid_source_detects_mismatch(self):
         """Check source detects type mismatch."""
-        source = textwrap.dedent('''
+        source = textwrap.dedent("""
             import pandera.polars as pa
             from pandera.typing.polars import DataFrame
 
@@ -271,7 +267,7 @@ class TestCheckSource:
                 data: DataFrame[InSchema],
             ) -> DataFrame[OutSchema]:
                 return data
-        ''')
+        """)
 
         results = check_source(source)
 
@@ -281,7 +277,7 @@ class TestCheckSource:
 
     def test_check_source_with_join(self):
         """Check source with join operation."""
-        source = textwrap.dedent('''
+        source = textwrap.dedent("""
             import polars as pl
             import pandera.polars as pa
             from pandera.typing.polars import DataFrame
@@ -304,7 +300,7 @@ class TestCheckSource:
                 right: DataFrame[R],
             ) -> DataFrame[Out]:
                 return left.join(right, on="id", how="inner")
-        ''')
+        """)
 
         results = check_source(source)
 

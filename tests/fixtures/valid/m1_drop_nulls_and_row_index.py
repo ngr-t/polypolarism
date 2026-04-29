@@ -1,7 +1,7 @@
 """M1: drop_nulls strips Nullable; with_row_index adds UInt32 column."""
 
-import polars as pl
 import pandera.polars as pa
+import polars as pl
 from pandera.typing.polars import DataFrame
 
 

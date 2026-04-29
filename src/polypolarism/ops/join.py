@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Literal
 
 from polypolarism.types import DataType, FrameType, Nullable
 
@@ -39,9 +39,9 @@ def infer_join(
     left: FrameType,
     right: FrameType,
     *,
-    on: Optional[str] = None,
-    left_on: Optional[str] = None,
-    right_on: Optional[str] = None,
+    on: str | None = None,
+    left_on: str | None = None,
+    right_on: str | None = None,
     how: JoinHow = "inner",
 ) -> FrameType:
     """

@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import textwrap
 
-from polypolarism.analyzer import analyze_source
 from polypolarism.checker import check_source
-
 
 COMMON_SCHEMAS = """
 import polars as pl

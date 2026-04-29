@@ -1,26 +1,21 @@
 """Tests for types module."""
 
-import pytest
-
 from polypolarism.types import (
-    DataType,
-    Int64,
-    Int32,
-    UInt32,
-    UInt64,
-    Float32,
-    Float64,
-    Utf8,
     Boolean,
+    Categorical,
+    DataType,
     Date,
     Datetime,
-    Duration,
     Decimal,
-    Categorical,
-    List,
-    Struct,
-    Nullable,
+    Duration,
+    Float64,
     FrameType,
+    Int32,
+    Int64,
+    List,
+    Nullable,
+    Struct,
+    Utf8,
 )
 
 
@@ -129,11 +124,13 @@ class TestFrameType:
         assert ft.columns == {}
 
     def test_frame_type_with_columns(self):
-        ft = FrameType({
-            "id": Int64(),
-            "name": Utf8(),
-            "score": Float64(),
-        })
+        ft = FrameType(
+            {
+                "id": Int64(),
+                "name": Utf8(),
+                "score": Float64(),
+            }
+        )
         assert ft.columns["id"].dtype == Int64()
         assert ft.columns["name"].dtype == Utf8()
         assert ft.columns["score"].dtype == Float64()
@@ -156,10 +153,12 @@ class TestFrameType:
         assert ft1 == ft2
 
     def test_frame_type_with_nullable(self):
-        ft = FrameType({
-            "id": Int64(),
-            "score": Nullable(Float64()),
-        })
+        ft = FrameType(
+            {
+                "id": Int64(),
+                "score": Nullable(Float64()),
+            }
+        )
         assert ft.columns["score"].dtype == Nullable(Float64())
 
 

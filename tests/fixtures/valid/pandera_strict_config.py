@@ -1,7 +1,7 @@
 """Pandera strict=True schema with exact column match passes."""
 
-import polars as pl
 import pandera.polars as pa
+import polars as pl
 from pandera.typing.polars import DataFrame
 
 

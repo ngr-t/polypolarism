@@ -4,48 +4,51 @@ from __future__ import annotations
 
 import ast
 from dataclasses import dataclass, field
-from typing import Optional, TYPE_CHECKING
 
+from polypolarism.expr_infer import ColumnNotFoundError, infer_col
+from polypolarism.ops.groupby import (
+    AggExpr,
+    AggFunction,
+    GroupByTypeError,
+    infer_agg_result_type,
+    infer_groupby_result,
+)
+from polypolarism.ops.join import JoinError, JoinHow, infer_join
+from polypolarism.ops.reshape import (
+    ReshapeError,
+    concat_diagonal,
+    concat_horizontal,
+    concat_vertical,
+)
+from polypolarism.ops.reshape import (
+    unpivot as infer_unpivot,
+)
+from polypolarism.pandera_annotation import extract_dataframe_annotation
+from polypolarism.pandera_schema import SchemaRegistry, collect_schemas
 from polypolarism.types import (
-    DataType,
-    FrameType,
-    Nullable,
+    Boolean,
     ColumnSpec,
+    DataType,
+    Date,
+    Datetime,
+    Duration,
+    Float32,
+    Float64,
+    FrameType,
     Int8,
     Int16,
     Int32,
     Int64,
+    Nullable,
     UInt8,
     UInt16,
     UInt32,
     UInt64,
-    Float32,
-    Float64,
     Utf8,
-    Boolean,
-    Date,
-    Datetime,
-    Duration,
+)
+from polypolarism.types import (
     List as ListT,
 )
-from polypolarism.pandera_annotation import extract_dataframe_annotation
-from polypolarism.pandera_schema import SchemaRegistry, collect_schemas
-from polypolarism.ops.join import infer_join, JoinError
-from polypolarism.ops.groupby import (
-    infer_groupby_result,
-    infer_agg_result_type,
-    AggExpr,
-    AggFunction,
-    GroupByTypeError,
-)
-from polypolarism.ops.reshape import (
-    ReshapeError,
-    concat_vertical,
-    concat_horizontal,
-    concat_diagonal,
-    unpivot as infer_unpivot,
-)
-from polypolarism.expr_infer import infer_col, ColumnNotFoundError
 
 
 class AnalysisError(Exception):
@@ -57,21 +60,23 @@ class AnalysisError(Exception):
 # Methods whose return frame has the same schema as the receiver.
 # `lazy()` and `collect()` cross between DataFrame/LazyFrame, but in our
 # static type system both are identity. `set_sorted` mutates only metadata.
-_IDENTITY_FRAME_METHODS: frozenset[str] = frozenset({
-    "sort",
-    "head",
-    "tail",
-    "limit",
-    "slice",
-    "reverse",
-    "sample",
-    "unique",
-    "clone",
-    "lazy",
-    "set_sorted",
-    "shrink_to_fit",
-    "rechunk",
-})
+_IDENTITY_FRAME_METHODS: frozenset[str] = frozenset(
+    {
+        "sort",
+        "head",
+        "tail",
+        "limit",
+        "slice",
+        "reverse",
+        "sample",
+        "unique",
+        "clone",
+        "lazy",
+        "set_sorted",
+        "shrink_to_fit",
+        "rechunk",
+    }
+)
 
 
 # Map ``pl.<Name>`` attribute references and call expressions to our DataType.
@@ -96,7 +101,7 @@ _PL_DTYPE_NAME_MAP: dict[str, DataType] = {
 }
 
 
-def _resolve_pl_dtype(node: ast.expr) -> Optional[DataType]:
+def _resolve_pl_dtype(node: ast.expr) -> DataType | None:
     """Resolve an AST node referring to a Polars dtype literal (``pl.Int32`` etc.)."""
     # Bare ``pl.Int32``
     if isinstance(node, ast.Attribute):
@@ -107,7 +112,7 @@ def _resolve_pl_dtype(node: ast.expr) -> Optional[DataType]:
         if isinstance(node.func.value, ast.Name) and node.func.value.id == "pl":
             base = _PL_DTYPE_NAME_MAP.get(node.func.attr)
             if isinstance(base, Datetime):
-                tz: Optional[str] = None
+                tz: str | None = None
                 if len(node.args) >= 2 and isinstance(node.args[1], ast.Constant):
                     if isinstance(node.args[1].value, str):
                         tz = node.args[1].value
@@ -127,13 +132,13 @@ def _wrap_like(receiver: DataType, new_inner: DataType) -> DataType:
     return new_inner
 
 
-def _str_constant(node: ast.expr) -> Optional[str]:
+def _str_constant(node: ast.expr) -> str | None:
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return node.value
     return None
 
 
-def _str_list_or_tuple(node: ast.expr) -> Optional[list[str]]:
+def _str_list_or_tuple(node: ast.expr) -> list[str] | None:
     if isinstance(node, (ast.List, ast.Tuple)):
         out: list[str] = []
         for elt in node.elts:
@@ -156,10 +161,10 @@ class FunctionSignature:
 
     name: str
     parameters: dict[str, tuple[int, FrameType]]  # param_name -> (position, type)
-    return_type: Optional[FrameType]
+    return_type: FrameType | None
     lineno: int
 
-    def get_param_by_position(self, position: int) -> Optional[tuple[str, FrameType]]:
+    def get_param_by_position(self, position: int) -> tuple[str, FrameType] | None:
         """Get parameter info by position."""
         for name, (idx, frame_type) in self.parameters.items():
             if idx == position:
@@ -173,7 +178,7 @@ class FunctionInfo:
 
     name: str
     node: ast.FunctionDef  # AST node for body analysis
-    signature: Optional[FunctionSignature]  # None if untyped
+    signature: FunctionSignature | None  # None if untyped
     inferred_returns: dict[tuple, FrameType] = field(default_factory=dict)
 
 
@@ -187,7 +192,7 @@ class FunctionRegistry:
         """Register a function."""
         self.functions[info.name] = info
 
-    def get(self, name: str) -> Optional[FunctionInfo]:
+    def get(self, name: str) -> FunctionInfo | None:
         """Get function info by name."""
         return self.functions.get(name)
 
@@ -259,8 +264,8 @@ class FunctionAnalysis:
     lineno: int  # Line number of function definition (1-indexed)
     end_lineno: int  # End line number of function definition (1-indexed)
     input_types: dict[str, FrameType]
-    declared_return_type: Optional[FrameType]
-    inferred_return_type: Optional[FrameType]
+    declared_return_type: FrameType | None
+    inferred_return_type: FrameType | None
     errors: list[str] = field(default_factory=list)
 
     @property
@@ -272,7 +277,7 @@ class FunctionAnalysis:
 def _resolve_declared_type(
     annotation: ast.expr,
     schema_registry: SchemaRegistry,
-) -> tuple[Optional[FrameType], Optional[str]]:
+) -> tuple[FrameType | None, str | None]:
     """Resolve a declared FrameType from a Pandera ``DataFrame[Schema]`` annotation.
 
     Returns ``(frame_type, error)``. Both are ``None`` when the annotation
@@ -300,7 +305,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         self.current_frame = current_frame
         self.errors: list[str] = []
 
-    def analyze_agg_expr(self, node: ast.expr) -> Optional[AggExpr]:
+    def analyze_agg_expr(self, node: ast.expr) -> AggExpr | None:
         """Analyze an aggregation expression like pl.col("x").sum().alias("total")."""
         # Pattern: pl.col("col").agg_func().alias("name") or pl.col("col").agg_func()
         alias = None
@@ -309,7 +314,11 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         # Check for .alias("name") at the end
         if isinstance(node, ast.Call):
             if isinstance(node.func, ast.Attribute) and node.func.attr == "alias":
-                if node.args and isinstance(node.args[0], ast.Constant):
+                if (
+                    node.args
+                    and isinstance(node.args[0], ast.Constant)
+                    and isinstance(node.args[0].value, str)
+                ):
                     alias = node.args[0].value
                     agg_node = node.func.value
 
@@ -349,57 +358,67 @@ class ExpressionAnalyzer(ast.NodeVisitor):
 
         return None
 
-    def _extract_col_name(self, node: ast.expr) -> Optional[str]:
+    def _extract_col_name(self, node: ast.expr) -> str | None:
         """Extract column name from pl.col("name") expression."""
         if isinstance(node, ast.Call):
             if isinstance(node.func, ast.Attribute):
                 if node.func.attr == "col":
                     if isinstance(node.func.value, ast.Name) and node.func.value.id == "pl":
-                        if node.args and isinstance(node.args[0], ast.Constant):
+                        if (
+                            node.args
+                            and isinstance(node.args[0], ast.Constant)
+                            and isinstance(node.args[0].value, str)
+                        ):
                             return node.args[0].value
         return None
 
     # Methods on a column expression that always produce Boolean.
-    _BOOLEAN_PREDICATE_METHODS = frozenset({
-        "is_null",
-        "is_not_null",
-        "is_nan",
-        "is_not_nan",
-        "is_finite",
-        "is_infinite",
-        "is_unique",
-        "is_duplicated",
-        "is_first_distinct",
-        "is_last_distinct",
-        "is_in",
-        "is_between",
-        "has_nulls",
-        "not_",
-    })
+    _BOOLEAN_PREDICATE_METHODS = frozenset(
+        {
+            "is_null",
+            "is_not_null",
+            "is_nan",
+            "is_not_nan",
+            "is_finite",
+            "is_infinite",
+            "is_unique",
+            "is_duplicated",
+            "is_first_distinct",
+            "is_last_distinct",
+            "is_in",
+            "is_between",
+            "has_nulls",
+            "not_",
+        }
+    )
 
     # Methods that return Float64 from any numeric receiver.
-    _FLOAT_RETURN_METHODS = frozenset({
-        "log",
-        "log10",
-        "log1p",
-        "exp",
-        "sqrt",
-        "cbrt",
-        "entropy",
-    })
+    _FLOAT_RETURN_METHODS = frozenset(
+        {
+            "log",
+            "log10",
+            "log1p",
+            "exp",
+            "sqrt",
+            "cbrt",
+            "entropy",
+        }
+    )
 
     # Methods that preserve the receiver's dtype (numeric mostly).
-    _DTYPE_PRESERVING_METHODS = frozenset({
-        "abs",
-        "round",
-        "clip",
-        "floor",
-        "ceil",
-        "sign",
-        "neg",
-        "shrink_dtype",
-        "rechunk",
-    })
+    _DTYPE_PRESERVING_METHODS = frozenset(
+        {
+            "abs",
+            "round",
+            "clip",
+            "floor",
+            "ceil",
+            "sign",
+            "neg",
+            "shrink_dtype",
+            "rechunk",
+        }
+    )
 
     # ---- sub-namespace return type tables ----------------------------------
 
@@ -478,42 +497,48 @@ class ExpressionAnalyzer(ast.NodeVisitor):
     }
 
     # Methods on ``pl.col("ts").dt`` that preserve the receiver dtype.
-    _DT_PRESERVING: frozenset[str] = frozenset({
-        "truncate",
-        "round",
-        "offset_by",
-        "replace_time_zone",
-        "convert_time_zone",
-        "month_start",
-        "month_end",
-    })
+    _DT_PRESERVING: frozenset[str] = frozenset(
+        {
+            "truncate",
+            "round",
+            "offset_by",
+            "replace_time_zone",
+            "convert_time_zone",
+            "month_start",
+            "month_end",
+        }
+    )
 
     # Methods on ``pl.col("xs").list`` that preserve the receiver dtype.
-    _LIST_PRESERVING: frozenset[str] = frozenset({
-        "unique",
-        "sort",
-        "reverse",
-        "head",
-        "tail",
-        "slice",
-        "drop_nulls",
-        "sample",
-        "shift",
-    })
+    _LIST_PRESERVING: frozenset[str] = frozenset(
+        {
+            "unique",
+            "sort",
+            "reverse",
+            "head",
+            "tail",
+            "slice",
+            "drop_nulls",
+            "sample",
+            "shift",
+        }
+    )
 
     # Methods on ``pl.col("xs").list`` that return the element dtype.
-    _LIST_ELEMENT_RETURN: frozenset[str] = frozenset({
-        "get",
-        "first",
-        "last",
-        "sum",
-        "mean",
-        "min",
-        "max",
-        "median",
-    })
+    _LIST_ELEMENT_RETURN: frozenset[str] = frozenset(
+        {
+            "get",
+            "first",
+            "last",
+            "sum",
+            "mean",
+            "min",
+            "max",
+            "median",
+        }
+    )
 
-    def analyze_select_expr(self, node: ast.expr) -> tuple[Optional[str], Optional[DataType]]:
+    def analyze_select_expr(self, node: ast.expr) -> tuple[str | None, DataType | None]:
         """Analyze a select expression, return (output_name, type)."""
         # Check for .alias() wrapper
         alias = None
@@ -521,7 +546,11 @@ class ExpressionAnalyzer(ast.NodeVisitor):
 
         if isinstance(node, ast.Call):
             if isinstance(node.func, ast.Attribute) and node.func.attr == "alias":
-                if node.args and isinstance(node.args[0], ast.Constant):
+                if (
+                    node.args
+                    and isinstance(node.args[0], ast.Constant)
+                    and isinstance(node.args[0].value, str)
+                ):
                     alias = node.args[0].value
                     inner_node = node.func.value
 
@@ -541,9 +570,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             return alias, Boolean()
 
         # Logical NOT: ~expr or `not expr` -> Boolean (when receiver is boolean-like)
-        if isinstance(inner_node, ast.UnaryOp) and isinstance(
-            inner_node.op, (ast.Invert, ast.Not)
-        ):
+        if isinstance(inner_node, ast.UnaryOp) and isinstance(inner_node.op, (ast.Invert, ast.Not)):
             self._validate_subexpr(inner_node.operand)
             return alias, Boolean()
 
@@ -584,8 +611,8 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         self,
         namespace: str,
         method: str,
-        receiver_type: Optional[DataType],
-    ) -> Optional[DataType]:
+        receiver_type: DataType | None,
+    ) -> DataType | None:
         """Resolve ``<col_expr>.<namespace>.<method>(...)`` to a DataType.
 
         ``receiver_type`` is the dtype of the column the namespace was attached
@@ -598,7 +625,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             receiver_inner = receiver_type.inner
             receiver_is_nullable = True
 
-        result: Optional[DataType] = None
+        result: DataType | None = None
 
         if namespace == "str":
             result = self._STR_RETURN.get(method)
@@ -612,9 +639,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 result = UInt32()
             elif method in self._LIST_PRESERVING and receiver_inner is not None:
                 result = receiver_inner
-            elif method in self._LIST_ELEMENT_RETURN and isinstance(
-                receiver_inner, ListT
-            ):
+            elif method in self._LIST_ELEMENT_RETURN and isinstance(receiver_inner, ListT):
                 result = receiver_inner.inner
 
         if result is None:
@@ -631,9 +656,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         """
         self.analyze_select_expr(node)
 
-    def _analyze_method_chain(
-        self, node: ast.expr
-    ) -> Optional[tuple[Optional[str], DataType]]:
+    def _analyze_method_chain(self, node: ast.expr) -> tuple[str | None, DataType] | None:
         """Analyze ``pl.col("x").<method>(...)`` style chains.
 
         Returns ``(default_name, dtype)`` or ``None`` if the node isn't a
@@ -680,11 +703,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
 
         # Float-returning numeric methods.
         if method in self._FLOAT_RETURN_METHODS:
-            base = (
-                receiver_type.inner
-                if isinstance(receiver_type, Nullable)
-                else receiver_type
-            )
+            receiver_type.inner if isinstance(receiver_type, Nullable) else receiver_type
             result: DataType = Float64()
             if isinstance(receiver_type, Nullable):
                 result = Nullable(Float64())
@@ -713,9 +732,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         }
         if method in agg_map and receiver_type is not None:
             try:
-                return receiver_name, infer_agg_result_type(
-                    agg_map[method], receiver_type
-                )
+                return receiver_name, infer_agg_result_type(agg_map[method], receiver_type)
             except GroupByTypeError as e:
                 self.errors.append(str(e))
                 return receiver_name, receiver_type
@@ -728,9 +745,9 @@ class ExpressionAnalyzer(ast.NodeVisitor):
 
         return None
 
-    def _extract_lit_type(self, node: ast.expr) -> Optional[DataType]:
+    def _extract_lit_type(self, node: ast.expr) -> DataType | None:
         """Extract type from pl.lit(value) expression."""
-        from polypolarism.types import Int64, Float64, Utf8, Boolean, Null
+        from polypolarism.types import Boolean, Float64, Int64, Null, Utf8
 
         if isinstance(node, ast.Call):
             if isinstance(node.func, ast.Attribute):
@@ -758,8 +775,8 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         self,
         input_types: dict[str, FrameType],
         errors: list[str],
-        registry: Optional[FunctionRegistry] = None,
-        schema_registry: Optional[SchemaRegistry] = None,
+        registry: FunctionRegistry | None = None,
+        schema_registry: SchemaRegistry | None = None,
     ):
         self.input_types = input_types
         self.errors = errors
@@ -767,7 +784,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         self.schema_registry = schema_registry or SchemaRegistry()
         # Track variable -> FrameType mapping
         self.var_types: dict[str, FrameType] = dict(input_types)
-        self.return_type: Optional[FrameType] = None
+        self.return_type: FrameType | None = None
         # Bare ``Schema.validate(df)`` narrowing only fires at the function's
         # top level. We toggle this off when descending into if/for/while/try.
         self._narrowing_enabled = True
@@ -856,7 +873,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     self.var_types[var_name] = inferred
         self.generic_visit(node)
 
-    def _infer_expr_type(self, node: ast.expr) -> Optional[FrameType]:
+    def _infer_expr_type(self, node: ast.expr) -> FrameType | None:
         """Infer the FrameType of an expression."""
         # Variable reference
         if isinstance(node, ast.Name):
@@ -868,7 +885,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
 
         return None
 
-    def _infer_call_type(self, node: ast.Call) -> Optional[FrameType]:
+    def _infer_call_type(self, node: ast.Call) -> FrameType | None:
         """Infer the type of a method or function call."""
         # Function call: func_name(args)
         if isinstance(node.func, ast.Name):
@@ -880,11 +897,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             receiver = node.func.value
 
             # ``pl.concat([...], how=...)`` — top-level pl function, not a frame method.
-            if (
-                isinstance(receiver, ast.Name)
-                and receiver.id == "pl"
-                and method_name == "concat"
-            ):
+            if isinstance(receiver, ast.Name) and receiver.id == "pl" and method_name == "concat":
                 return self._infer_concat_call(node)
 
             # Pandera narrowing: Schema.validate(df) -> Schema's FrameType
@@ -946,7 +959,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
 
         return None
 
-    def _infer_validate_call(self, node: ast.Call) -> Optional[FrameType]:
+    def _infer_validate_call(self, node: ast.Call) -> FrameType | None:
         """Resolve ``Schema.validate(df)`` to the schema's FrameType."""
         if not isinstance(node.func, ast.Attribute):
             return None
@@ -955,7 +968,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             return None
         return self.schema_registry.to_frame_type(schema_node.id)
 
-    def _infer_pipe_call(self, node: ast.Call) -> Optional[FrameType]:
+    def _infer_pipe_call(self, node: ast.Call) -> FrameType | None:
         """Resolve ``df.pipe(Schema.validate)`` to the schema's FrameType."""
         if not node.args:
             return None
@@ -965,7 +978,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 return self.schema_registry.to_frame_type(arg.value.id)
         return None
 
-    def _infer_function_call_type(self, node: ast.Call) -> Optional[FrameType]:
+    def _infer_function_call_type(self, node: ast.Call) -> FrameType | None:
         """Infer type of a function call like helper(df)."""
         if not isinstance(node.func, ast.Name):
             return None
@@ -978,7 +991,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             return None
 
         # Infer argument types
-        arg_types: list[Optional[FrameType]] = []
+        arg_types: list[FrameType | None] = []
         for arg in node.args:
             arg_type = self._infer_expr_type(arg)
             arg_types.append(arg_type)
@@ -1015,13 +1028,11 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         return self._analyze_untyped_function(func_info, arg_types)
 
     def _analyze_untyped_function(
-        self, func_info: FunctionInfo, arg_types: list[Optional[FrameType]]
-    ) -> Optional[FrameType]:
+        self, func_info: FunctionInfo, arg_types: list[FrameType | None]
+    ) -> FrameType | None:
         """Analyze an untyped function body with propagated argument types."""
         # Create cache key from argument types
-        cache_key = tuple(
-            tuple(sorted(t.columns.items())) if t else None for t in arg_types
-        )
+        cache_key = tuple(tuple(sorted(t.columns.items())) if t else None for t in arg_types)
         if cache_key in func_info.inferred_returns:
             return func_info.inferred_returns[cache_key]
 
@@ -1029,8 +1040,10 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         input_types: dict[str, FrameType] = {}
         func_node = func_info.node
         for idx, arg in enumerate(func_node.args.args):
-            if idx < len(arg_types) and arg_types[idx] is not None:
-                input_types[arg.arg] = arg_types[idx]
+            if idx < len(arg_types):
+                arg_type = arg_types[idx]
+                if arg_type is not None:
+                    input_types[arg.arg] = arg_type
 
         # Analyze the function body
         errors: list[str] = []
@@ -1046,9 +1059,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             func_info.inferred_returns[cache_key] = result
         return result
 
-    def _infer_join_call(
-        self, left_type: FrameType, node: ast.Call
-    ) -> Optional[FrameType]:
+    def _infer_join_call(self, left_type: FrameType, node: ast.Call) -> FrameType | None:
         """Infer type of .join() call."""
         # Extract right frame
         if not node.args:
@@ -1059,32 +1070,43 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             return None
 
         # Extract keyword arguments
-        on = None
-        left_on = None
-        right_on = None
-        how = "inner"
+        on: str | None = None
+        left_on: str | None = None
+        right_on: str | None = None
+        how: str = "inner"
 
         for kw in node.keywords:
-            if kw.arg == "on" and isinstance(kw.value, ast.Constant):
-                on = kw.value.value
-            elif kw.arg == "left_on" and isinstance(kw.value, ast.Constant):
-                left_on = kw.value.value
-            elif kw.arg == "right_on" and isinstance(kw.value, ast.Constant):
-                right_on = kw.value.value
-            elif kw.arg == "how" and isinstance(kw.value, ast.Constant):
-                how = kw.value.value
+            if not isinstance(kw.value, ast.Constant) or not isinstance(kw.value.value, str):
+                continue
+            value = kw.value.value
+            if kw.arg == "on":
+                on = value
+            elif kw.arg == "left_on":
+                left_on = value
+            elif kw.arg == "right_on":
+                right_on = value
+            elif kw.arg == "how":
+                how = value
+
+        if how == "inner" or how == "left" or how == "right" or how == "full":
+            valid_how: JoinHow = how
+        else:
+            return None
 
         try:
             return infer_join(
-                left_type, right_type, on=on, left_on=left_on, right_on=right_on, how=how
+                left_type,
+                right_type,
+                on=on,
+                left_on=left_on,
+                right_on=right_on,
+                how=valid_how,
             )
         except JoinError as e:
             self.errors.append(str(e))
             return None
 
-    def _infer_agg_call(
-        self, groupby_receiver: ast.expr, node: ast.Call
-    ) -> Optional[FrameType]:
+    def _infer_agg_call(self, groupby_receiver: ast.expr, node: ast.Call) -> FrameType | None:
         """Infer type of .group_by(...).agg(...) call."""
         # groupby_receiver should be a Call to .group_by()
         if not isinstance(groupby_receiver, ast.Call):
@@ -1122,9 +1144,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             self.errors.append(str(e))
             return None
 
-    def _infer_select_call(
-        self, input_frame: FrameType, node: ast.Call
-    ) -> Optional[FrameType]:
+    def _infer_select_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
         """Infer type of .select() call."""
         expr_analyzer = ExpressionAnalyzer(input_frame)
         result_columns: dict[str, DataType] = {}
@@ -1140,12 +1160,10 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             return FrameType(columns=result_columns)
         return None
 
-    def _infer_with_columns_call(
-        self, input_frame: FrameType, node: ast.Call
-    ) -> Optional[FrameType]:
+    def _infer_with_columns_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
         """Infer type of .with_columns() call."""
         # Start with all existing columns
-        result_columns = dict(input_frame.columns)
+        result_columns: dict[str, ColumnSpec | DataType] = dict(input_frame.columns)
 
         expr_analyzer = ExpressionAnalyzer(input_frame)
 
@@ -1177,9 +1195,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 names.extend(lst)
         return names
 
-    def _infer_drop_call(
-        self, input_frame: FrameType, node: ast.Call
-    ) -> Optional[FrameType]:
+    def _infer_drop_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
         targets = self._collect_drop_targets(node)
         result_columns = dict(input_frame.columns)
         for name in targets:
@@ -1187,18 +1203,14 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 self.errors.append(f"drop: column '{name}' not found")
                 continue
             del result_columns[name]
-        return FrameType(
-            columns=result_columns, strict=input_frame.strict, rest=input_frame.rest
-        )
+        return FrameType(columns=result_columns, strict=input_frame.strict, rest=input_frame.rest)
 
-    def _infer_rename_call(
-        self, input_frame: FrameType, node: ast.Call
-    ) -> Optional[FrameType]:
+    def _infer_rename_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
         if not node.args or not isinstance(node.args[0], ast.Dict):
             return input_frame
         mapping_node = node.args[0]
         mapping: dict[str, str] = {}
-        for key_node, val_node in zip(mapping_node.keys, mapping_node.values):
+        for key_node, val_node in zip(mapping_node.keys, mapping_node.values, strict=False):
             if key_node is None:
                 continue
             old = _str_constant(key_node)
@@ -1214,13 +1226,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         for old in mapping:
             if old not in input_frame.columns:
                 self.errors.append(f"rename: column '{old}' not found")
-        return FrameType(
-            columns=result_columns, strict=input_frame.strict, rest=input_frame.rest
-        )
+        return FrameType(columns=result_columns, strict=input_frame.strict, rest=input_frame.rest)
 
-    def _infer_cast_call(
-        self, input_frame: FrameType, node: ast.Call
-    ) -> Optional[FrameType]:
+    def _infer_cast_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
         if not node.args:
             return input_frame
         first = node.args[0]
@@ -1228,7 +1236,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             # ``cast(pl.Int64)`` whole-frame form not handled in M1 — fall back to identity.
             return input_frame
         result_columns: dict[str, ColumnSpec] = dict(input_frame.columns)
-        for key_node, val_node in zip(first.keys, first.values):
+        for key_node, val_node in zip(first.keys, first.values, strict=False):
             if key_node is None:
                 continue
             col = _str_constant(key_node)
@@ -1245,30 +1253,20 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 dtype=_wrap_like(spec.dtype, target),
                 required=spec.required,
             )
-        return FrameType(
-            columns=result_columns, strict=input_frame.strict, rest=input_frame.rest
-        )
+        return FrameType(columns=result_columns, strict=input_frame.strict, rest=input_frame.rest)
 
-    def _infer_drop_nulls_call(
-        self, input_frame: FrameType, node: ast.Call
-    ) -> Optional[FrameType]:
+    def _infer_drop_nulls_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
         # subset can be passed positionally or as keyword
-        subset: Optional[list[str]] = None
+        subset: list[str] | None = None
         if node.args:
-            cand = _str_list_or_tuple(node.args[0]) or (
-                [_str_constant(node.args[0])]
-                if _str_constant(node.args[0]) is not None
-                else None
-            )
+            single = _str_constant(node.args[0])
+            cand = _str_list_or_tuple(node.args[0]) or (None if single is None else [single])
             if cand is not None:
                 subset = cand
         for kw in node.keywords:
             if kw.arg == "subset":
-                cand2 = _str_list_or_tuple(kw.value) or (
-                    [_str_constant(kw.value)]
-                    if _str_constant(kw.value) is not None
-                    else None
-                )
+                single_kw = _str_constant(kw.value)
+                cand2 = _str_list_or_tuple(kw.value) or (None if single_kw is None else [single_kw])
                 if cand2 is not None:
                     subset = cand2
 
@@ -1277,12 +1275,8 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         for col_name, spec in input_frame.columns.items():
             if col_name in targets:
                 if col_name not in input_frame.columns and subset is not None:
-                    self.errors.append(
-                        f"drop_nulls: column '{col_name}' not found"
-                    )
-                inner = (
-                    spec.dtype.inner if isinstance(spec.dtype, Nullable) else spec.dtype
-                )
+                    self.errors.append(f"drop_nulls: column '{col_name}' not found")
+                inner = spec.dtype.inner if isinstance(spec.dtype, Nullable) else spec.dtype
                 result_columns[col_name] = ColumnSpec(dtype=inner, required=spec.required)
             else:
                 result_columns[col_name] = spec
@@ -1290,13 +1284,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             for s in subset:
                 if s not in input_frame.columns:
                     self.errors.append(f"drop_nulls: column '{s}' not found")
-        return FrameType(
-            columns=result_columns, strict=input_frame.strict, rest=input_frame.rest
-        )
+        return FrameType(columns=result_columns, strict=input_frame.strict, rest=input_frame.rest)
 
-    def _collect_concat_frames(
-        self, list_node: ast.expr
-    ) -> Optional[list[FrameType]]:
+    def _collect_concat_frames(self, list_node: ast.expr) -> list[FrameType] | None:
         """Resolve a list/tuple-of-frames argument used by ``pl.concat([...])``."""
         if not isinstance(list_node, (ast.List, ast.Tuple)):
             return None
@@ -1308,7 +1298,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             out.append(ft)
         return out
 
-    def _infer_concat_call(self, node: ast.Call) -> Optional[FrameType]:
+    def _infer_concat_call(self, node: ast.Call) -> FrameType | None:
         if not node.args:
             return None
         frames = self._collect_concat_frames(node.args[0])
@@ -1336,9 +1326,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             self.errors.append(str(e))
             return None
 
-    def _infer_vstack_call(
-        self, input_frame: FrameType, node: ast.Call
-    ) -> Optional[FrameType]:
+    def _infer_vstack_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
         if not node.args:
             return input_frame
         other = self._infer_expr_type(node.args[0])
@@ -1350,9 +1338,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             self.errors.append(str(e))
             return None
 
-    def _infer_hstack_call(
-        self, input_frame: FrameType, node: ast.Call
-    ) -> Optional[FrameType]:
+    def _infer_hstack_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
         if not node.args:
             return input_frame
         other = self._infer_expr_type(node.args[0])
@@ -1364,9 +1350,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             self.errors.append(str(e))
             return None
 
-    def _infer_explode_call(
-        self, input_frame: FrameType, node: ast.Call
-    ) -> Optional[FrameType]:
+    def _infer_explode_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
         targets: list[str] = []
         for arg in node.args:
             s = _str_constant(arg)
@@ -1390,21 +1374,15 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             if outer_nullable:
                 inner = inner.inner  # type: ignore[union-attr]
             if not isinstance(inner, ListT):
-                self.errors.append(
-                    f"explode: column '{col}' is {spec.dtype}, not List[T]"
-                )
+                self.errors.append(f"explode: column '{col}' is {spec.dtype}, not List[T]")
                 continue
             elem_dtype: DataType = inner.inner
             if outer_nullable:
                 elem_dtype = Nullable(elem_dtype)
             result_columns[col] = ColumnSpec(dtype=elem_dtype, required=spec.required)
-        return FrameType(
-            columns=result_columns, strict=input_frame.strict, rest=input_frame.rest
-        )
+        return FrameType(columns=result_columns, strict=input_frame.strict, rest=input_frame.rest)
 
-    def _infer_unpivot_call(
-        self, input_frame: FrameType, node: ast.Call
-    ) -> Optional[FrameType]:
+    def _infer_unpivot_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
         index: list[str] = []
         on: list[str] = []
         variable_name = "variable"
@@ -1444,9 +1422,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             self.errors.append(str(e))
             return None
 
-    def _infer_filter_call(
-        self, input_frame: FrameType, node: ast.Call
-    ) -> Optional[FrameType]:
+    def _infer_filter_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
         """Identity-typed, but walk every predicate sub-expression to validate columns."""
         expr_analyzer = ExpressionAnalyzer(input_frame)
         for arg in node.args:
@@ -1458,7 +1434,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
 
     def _infer_with_row_index_call(
         self, input_frame: FrameType, node: ast.Call
-    ) -> Optional[FrameType]:
+    ) -> FrameType | None:
         name = "index"
         if node.args:
             cand = _str_constant(node.args[0])
@@ -1473,23 +1449,19 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         result_columns: dict[str, ColumnSpec] = {name: ColumnSpec(dtype=UInt32())}
         for col_name, spec in input_frame.columns.items():
             if col_name == name:
-                self.errors.append(
-                    f"with_row_index: column '{name}' already exists"
-                )
+                self.errors.append(f"with_row_index: column '{name}' already exists")
                 continue
             result_columns[col_name] = spec
-        return FrameType(
-            columns=result_columns, strict=input_frame.strict, rest=input_frame.rest
-        )
+        return FrameType(columns=result_columns, strict=input_frame.strict, rest=input_frame.rest)
 
 
 def _extract_function_signature(
     func_node: ast.FunctionDef,
     schema_registry: SchemaRegistry,
-) -> Optional[FunctionSignature]:
+) -> FunctionSignature | None:
     """Extract type signature from a function definition."""
     parameters: dict[str, tuple[int, FrameType]] = {}
-    return_type: Optional[FrameType] = None
+    return_type: FrameType | None = None
 
     # Extract parameter types
     for idx, arg in enumerate(func_node.args.args):
@@ -1518,13 +1490,13 @@ def _extract_function_signature(
 
 def analyze_function(
     func_node: ast.FunctionDef,
-    registry: Optional[FunctionRegistry] = None,
-    schema_registry: Optional[SchemaRegistry] = None,
-) -> Optional[FunctionAnalysis]:
+    registry: FunctionRegistry | None = None,
+    schema_registry: SchemaRegistry | None = None,
+) -> FunctionAnalysis | None:
     """Analyze a single function definition."""
     schema_registry = schema_registry or SchemaRegistry()
     input_types: dict[str, FrameType] = {}
-    declared_return: Optional[FrameType] = None
+    declared_return: FrameType | None = None
     errors: list[str] = []
     has_df_annotation = False
 
@@ -1533,9 +1505,7 @@ def analyze_function(
         if arg.annotation:
             if _annotation_declares_frame(arg.annotation, schema_registry):
                 has_df_annotation = True
-                frame_type, parse_error = _resolve_declared_type(
-                    arg.annotation, schema_registry
-                )
+                frame_type, parse_error = _resolve_declared_type(arg.annotation, schema_registry)
                 if frame_type is not None:
                     input_types[arg.arg] = frame_type
                 elif parse_error:

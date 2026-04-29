@@ -1,7 +1,7 @@
 """Valid test case: Basic inner join."""
 
-import polars as pl
 import pandera.polars as pa
+import polars as pl
 from pandera.typing.polars import DataFrame
 
 

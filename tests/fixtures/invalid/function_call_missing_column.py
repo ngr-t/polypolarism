@@ -1,6 +1,5 @@
 """Error: Missing required column in function argument."""
 
-import polars as pl
 import pandera.polars as pa
 from pandera.typing.polars import DataFrame
 

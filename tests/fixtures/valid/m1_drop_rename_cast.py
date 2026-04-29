@@ -1,7 +1,7 @@
 """M1: drop / rename / cast reshape the FrameType."""
 
-import polars as pl
 import pandera.polars as pa
+import polars as pl
 from pandera.typing.polars import DataFrame
 
 

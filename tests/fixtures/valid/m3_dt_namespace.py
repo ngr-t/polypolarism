@@ -1,7 +1,7 @@
 """M3: pl.col(...).dt methods extract date parts and preserve dtype where appropriate."""
 
-import polars as pl
 import pandera.polars as pa
+import polars as pl
 from pandera.typing.polars import DataFrame
 
 

@@ -1,7 +1,7 @@
 """M3 invalid: a .str method called on a column that doesn't exist."""
 
-import polars as pl
 import pandera.polars as pa
+import polars as pl
 from pandera.typing.polars import DataFrame
 
 

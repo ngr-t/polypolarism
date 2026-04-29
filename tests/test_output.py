@@ -3,18 +3,14 @@
 import json
 import textwrap
 
-import pytest
-
-from polypolarism.types import FrameType, Int64, Utf8
-from polypolarism.analyzer import FunctionAnalysis
 from polypolarism.checker import (
     CheckResult,
-    MissingColumn,
     ExtraColumn,
-    TypeDifference,
     InferenceFailure,
+    MissingColumn,
 )
-from polypolarism.output import format_json, Diagnostic, DiagnosticSeverity
+from polypolarism.output import Diagnostic, DiagnosticSeverity, format_json
+from polypolarism.types import Int64, Utf8
 
 
 class TestDiagnostic:
@@ -162,7 +158,7 @@ class TestFormatJsonIntegration:
         """format_json works with actual CheckResult objects."""
         from polypolarism.checker import check_source
 
-        source = textwrap.dedent('''
+        source = textwrap.dedent("""
             import pandera.polars as pa
             from pandera.typing.polars import DataFrame
 
@@ -177,11 +173,12 @@ class TestFormatJsonIntegration:
                 data: DataFrame[InSchema],
             ) -> DataFrame[OutSchema]:
                 return data
-        ''')
+        """)
 
         results = check_source(source)
         # Get line numbers from analysis
         from polypolarism.analyzer import analyze_source
+
         analyses = analyze_source(source)
         function_lines = {a.name: a.lineno for a in analyses}
 

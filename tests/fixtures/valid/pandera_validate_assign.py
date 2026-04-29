@@ -1,7 +1,7 @@
 """Validation narrowing via assignment: df2 = Schema.validate(df)."""
 
-import polars as pl
 import pandera.polars as pa
+import polars as pl
 from pandera.typing.polars import DataFrame
 
 

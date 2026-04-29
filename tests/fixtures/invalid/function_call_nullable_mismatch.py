@@ -1,6 +1,5 @@
 """Error: Nullable type passed where non-nullable expected."""
 
-import polars as pl
 import pandera.polars as pa
 from pandera.typing.polars import DataFrame
 

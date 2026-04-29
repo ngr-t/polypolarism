@@ -1,8 +1,8 @@
 """Validation narrowing on a LazyFrame: Schema.validate(lf).collect()."""
 
-import polars as pl
 import pandera.polars as pa
-from pandera.typing.polars import LazyFrame, DataFrame
+import polars as pl
+from pandera.typing.polars import DataFrame, LazyFrame
 
 
 class RawSchema(pa.DataFrameModel):

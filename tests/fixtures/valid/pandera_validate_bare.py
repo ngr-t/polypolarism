@@ -1,7 +1,7 @@
 """Validation narrowing via bare statement: Schema.validate(df) then later use df."""
 
-import polars as pl
 import pandera.polars as pa
+import polars as pl
 from pandera.typing.polars import DataFrame
 
 

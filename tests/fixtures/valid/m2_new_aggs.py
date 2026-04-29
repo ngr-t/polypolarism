@@ -1,7 +1,7 @@
 """M2: std / var / median / quantile / product in group_by aggregation."""
 
-import polars as pl
 import pandera.polars as pa
+import polars as pl
 from pandera.typing.polars import DataFrame
 
 

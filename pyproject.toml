@@ -34,8 +34,44 @@ dev = [
     "polars>=1.0.0",
     "pytest>=8.0.0",
     "pytest-cov>=4.0.0",
+    "ruff>=0.7.0",
+    "pyright>=1.1.380",
+    "pre-commit>=3.7.0",
 ]
 
 [build-system]
 requires = ["uv_build>=0.9.21,<0.10.0"]
 build-backend = "uv_build"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "SIM", # flake8-simplify
+]
+ignore = [
+    "E501",  # line length is enforced by the formatter
+    "SIM102",  # nested isinstance ifs are clearer than combined ones in AST walks
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["B011"]
+# Fixtures simulate external code with deliberately undefined names.
+"tests/fixtures/**/*.py" = ["F821"]
+
+[tool.pyright]
+include = ["src", "tests"]
+# Fixtures are static-analysis inputs, not real code: their imports of polars
+# / pandera are inspected as AST text by polypolarism itself rather than being
+# imported at runtime, and they intentionally reference undefined names.
+exclude = ["tests/fixtures", ".venv", "dist"]
+pythonVersion = "3.11"
+typeCheckingMode = "basic"
+reportMissingTypeStubs = false

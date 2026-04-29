@@ -175,7 +175,9 @@ class TestConfig:
                 id: int
             """
         )
-        assert registry.get("S").strict is False
+        schema_s = registry.get("S")
+        assert schema_s is not None
+        assert schema_s.strict is False
 
 
 class TestInheritance:
@@ -231,6 +233,7 @@ class TestInheritance:
             """
         )
         child = registry.get("Child")
+        assert child is not None
         assert child.strict is True
 
     def test_grandchild_chain(self):
@@ -249,6 +252,7 @@ class TestInheritance:
             """
         )
         c = registry.get("C")
+        assert c is not None
         assert set(c.columns.keys()) == {"a", "b", "c"}
 
 

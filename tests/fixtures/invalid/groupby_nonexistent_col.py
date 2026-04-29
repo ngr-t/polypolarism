@@ -1,7 +1,7 @@
 """Invalid test case: Group by non-existent column."""
 
-import polars as pl
 import pandera.polars as pa
+import polars as pl
 from pandera.typing.polars import DataFrame
 
 

@@ -1,6 +1,5 @@
 """Error: Untyped function body cannot be analyzed."""
 
-import polars as pl
 import pandera.polars as pa
 from pandera.typing.polars import DataFrame
 

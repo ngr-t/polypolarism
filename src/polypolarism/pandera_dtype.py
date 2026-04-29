@@ -16,14 +16,13 @@ Field RHS:
 from __future__ import annotations
 
 import ast
-from typing import Optional
 
 from polypolarism.types import (
     Boolean,
     Categorical,
     ColumnSpec,
-    Date,
     DataType,
+    Date,
     Datetime,
     Duration,
     Float32,
@@ -42,7 +41,6 @@ from polypolarism.types import (
     UInt64,
     Utf8,
 )
-
 
 _BUILTIN_MAP: dict[str, DataType] = {
     "int": Int64(),
@@ -77,8 +75,8 @@ _PL_DTYPE_MAP: dict[str, DataType] = {
 
 def parse_field_annotation(
     annotation: ast.expr,
-    value: Optional[ast.expr] = None,
-) -> Optional[ColumnSpec]:
+    value: ast.expr | None = None,
+) -> ColumnSpec | None:
     """Parse a Pandera class-body field annotation + optional ``pa.Field(...)`` value.
 
     Returns ``None`` if the annotation cannot be translated.
@@ -94,7 +92,7 @@ def parse_field_annotation(
     return ColumnSpec(dtype=dtype, required=required)
 
 
-def _parse_dtype_expr(node: ast.expr) -> Optional[tuple[DataType, bool]]:
+def _parse_dtype_expr(node: ast.expr) -> tuple[DataType, bool] | None:
     """Parse a type expression. Returns (dtype, required)."""
     if _is_optional(node):
         inner = _optional_inner(node)
@@ -115,7 +113,7 @@ def _parse_dtype_expr(node: ast.expr) -> Optional[tuple[DataType, bool]]:
     return dtype, True
 
 
-def _parse_plain_dtype(node: ast.expr) -> Optional[DataType]:
+def _parse_plain_dtype(node: ast.expr) -> DataType | None:
     """Parse a non-Optional, non-Annotated dtype expression."""
     if isinstance(node, ast.Name):
         return _BUILTIN_MAP.get(node.id)
@@ -139,7 +137,7 @@ def _is_optional(node: ast.expr) -> bool:
     return False
 
 
-def _optional_inner(node: ast.expr) -> Optional[ast.expr]:
+def _optional_inner(node: ast.expr) -> ast.expr | None:
     if isinstance(node, ast.Subscript):
         return node.slice
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
@@ -158,7 +156,7 @@ def _is_annotated(node: ast.expr) -> bool:
     return isinstance(node, ast.Subscript) and _name_matches(node.value, "Annotated")
 
 
-def _parse_annotated(node: ast.expr) -> Optional[tuple[DataType, bool]]:
+def _parse_annotated(node: ast.expr) -> tuple[DataType, bool] | None:
     assert isinstance(node, ast.Subscript)
     slice_ = node.slice
     elts = slice_.elts if isinstance(slice_, ast.Tuple) else [slice_]
@@ -179,7 +177,7 @@ def _parse_annotated(node: ast.expr) -> Optional[tuple[DataType, bool]]:
         if not meta or not isinstance(meta[0], ast.Dict):
             return None
         fields: dict[str, DataType] = {}
-        for k, v in zip(meta[0].keys, meta[0].values):
+        for k, v in zip(meta[0].keys, meta[0].values, strict=True):
             if not (isinstance(k, ast.Constant) and isinstance(k.value, str)):
                 return None
             inner = _parse_plain_dtype(v)
@@ -204,9 +202,7 @@ def _name_matches(node: ast.expr, name: str) -> bool:
     """Check if node matches a bare ``Name(name)`` or any qualified ``X.name``."""
     if isinstance(node, ast.Name) and node.id == name:
         return True
-    if isinstance(node, ast.Attribute) and node.attr == name:
-        return True
-    return False
+    return isinstance(node, ast.Attribute) and node.attr == name
 
 
 def _is_field_with_nullable(node: ast.expr) -> bool:
@@ -222,10 +218,7 @@ def _is_field_with_nullable(node: ast.expr) -> bool:
             return False
     else:
         return False
-    for kw in node.keywords:
-        if kw.arg == "nullable" and _is_true_constant(kw.value):
-            return True
-    return False
+    return any(kw.arg == "nullable" and _is_true_constant(kw.value) for kw in node.keywords)
 
 
 def _is_true_constant(node: ast.expr) -> bool:

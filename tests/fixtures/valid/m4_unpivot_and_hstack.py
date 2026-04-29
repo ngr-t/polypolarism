@@ -1,7 +1,7 @@
 """M4: unpivot produces fixed schema; hstack merges disjoint frames."""
 
-import polars as pl
 import pandera.polars as pa
+import polars as pl
 from pandera.typing.polars import DataFrame
 
 

@@ -1,7 +1,7 @@
 """Untyped function with transformation: body analysis infers return type."""
 
-import polars as pl
 import pandera.polars as pa
+import polars as pl
 from pandera.typing.polars import DataFrame
 
 

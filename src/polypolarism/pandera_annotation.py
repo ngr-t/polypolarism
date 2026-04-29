@@ -8,11 +8,9 @@ to function parameters, return values, and annotated assignments.
 from __future__ import annotations
 
 import ast
-from typing import Optional
 
 from polypolarism.pandera_schema import SchemaRegistry
 from polypolarism.types import FrameType
-
 
 _HEAD_NAMES = frozenset({"DataFrame", "LazyFrame"})
 
@@ -20,7 +18,7 @@ _HEAD_NAMES = frozenset({"DataFrame", "LazyFrame"})
 def extract_dataframe_annotation(
     annotation: ast.expr,
     registry: SchemaRegistry,
-) -> Optional[FrameType]:
+) -> FrameType | None:
     """Return the FrameType from a ``DataFrame[Schema]`` / ``LazyFrame[Schema]`` annotation.
 
     Recognised forms:
@@ -54,7 +52,7 @@ def _is_dataframe_head(node: ast.expr) -> bool:
     return False
 
 
-def _extract_schema_name(slice_: ast.expr) -> Optional[str]:
+def _extract_schema_name(slice_: ast.expr) -> str | None:
     """Pull the schema class name out of a subscript slice."""
     if isinstance(slice_, ast.Name):
         return slice_.id

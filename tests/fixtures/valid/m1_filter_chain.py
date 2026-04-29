@@ -1,7 +1,7 @@
 """M1: filter / sort / head are identity-typed; chains preserve schema."""
 
-import polars as pl
 import pandera.polars as pa
+import polars as pl
 from pandera.typing.polars import DataFrame
 
 

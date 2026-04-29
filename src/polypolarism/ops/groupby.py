@@ -2,23 +2,21 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Callable, Optional
 
 from polypolarism.types import (
     DataType,
+    Float32,
     Float64,
-    Int64,
+    FrameType,
     Int32,
+    Int64,
+    List,
+    Nullable,
     UInt32,
     UInt64,
-    Float32,
-    Nullable,
-    List,
-    Utf8,
-    Boolean,
-    FrameType,
 )
 
 
@@ -53,7 +51,7 @@ class AggExpr:
 
     column: str
     function: AggFunction
-    alias: Optional[str] = None
+    alias: str | None = None
 
     @property
     def output_name(self) -> str:
@@ -89,14 +87,13 @@ def _wrap_nullable(dtype: DataType, is_nullable: bool) -> DataType:
 # Each function returns (result_type, preserves_nullability)
 # where preserves_nullability means the result should be Nullable if input is Nullable
 
+
 def _infer_sum(dtype: DataType) -> DataType:
     """sum(T) -> T for numeric types."""
     inner, is_nullable = _unwrap_nullable(dtype)
 
     if not isinstance(inner, NUMERIC_TYPES):
-        raise GroupByTypeError(
-            f"Cannot apply sum to type {dtype}: sum requires numeric type"
-        )
+        raise GroupByTypeError(f"Cannot apply sum to type {dtype}: sum requires numeric type")
 
     # sum preserves the type (Int64 -> Int64, Float64 -> Float64)
     return _wrap_nullable(inner, is_nullable)
@@ -107,9 +104,7 @@ def _infer_mean(dtype: DataType) -> DataType:
     inner, is_nullable = _unwrap_nullable(dtype)
 
     if not isinstance(inner, NUMERIC_TYPES):
-        raise GroupByTypeError(
-            f"Cannot apply mean to type {dtype}: mean requires numeric type"
-        )
+        raise GroupByTypeError(f"Cannot apply mean to type {dtype}: mean requires numeric type")
 
     # mean always returns Float64
     return _wrap_nullable(Float64(), is_nullable)
@@ -245,9 +240,7 @@ def infer_groupby_result(
     # 1. Add group key columns (preserve their types)
     for key in keys:
         if not input_frame.has_column(key):
-            raise GroupByTypeError(
-                f"Group by key column '{key}' not found in DataFrame"
-            )
+            raise GroupByTypeError(f"Group by key column '{key}' not found in DataFrame")
         key_type = input_frame.get_column_type(key)
         assert key_type is not None  # We just checked has_column
         result_columns[key] = key_type
@@ -256,9 +249,7 @@ def infer_groupby_result(
     for agg_expr in agg_exprs:
         col_name = agg_expr.column
         if not input_frame.has_column(col_name):
-            raise GroupByTypeError(
-                f"Aggregation column '{col_name}' not found in DataFrame"
-            )
+            raise GroupByTypeError(f"Aggregation column '{col_name}' not found in DataFrame")
 
         col_type = input_frame.get_column_type(col_name)
         assert col_type is not None  # We just checked has_column

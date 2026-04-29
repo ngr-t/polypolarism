@@ -1,7 +1,7 @@
 """M2: pl.col(...).fill_null(value) strips Nullable from the receiver."""
 
-import polars as pl
 import pandera.polars as pa
+import polars as pl
 from pandera.typing.polars import DataFrame
 
 
