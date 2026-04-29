@@ -236,11 +236,16 @@ class TestCheckSource:
     def test_check_valid_source(self):
         """Check source with valid function."""
         source = textwrap.dedent('''
-            from polypolarism import DF
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+
+            class IdName(pa.DataFrameModel):
+                id: int
+                name: str
 
             def identity(
-                data: DF["{id: Int64, name: Utf8}"],
-            ) -> DF["{id: Int64, name: Utf8}"]:
+                data: DataFrame[IdName],
+            ) -> DataFrame[IdName]:
                 return data
         ''')
 
@@ -252,11 +257,19 @@ class TestCheckSource:
     def test_check_invalid_source_detects_mismatch(self):
         """Check source detects type mismatch."""
         source = textwrap.dedent('''
-            from polypolarism import DF
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+
+            class InSchema(pa.DataFrameModel):
+                id: int
+
+            class OutSchema(pa.DataFrameModel):
+                id: int
+                extra: str
 
             def wrong_return(
-                data: DF["{id: Int64}"],
-            ) -> DF["{id: Int64, extra: Utf8}"]:
+                data: DataFrame[InSchema],
+            ) -> DataFrame[OutSchema]:
                 return data
         ''')
 
@@ -269,12 +282,27 @@ class TestCheckSource:
     def test_check_source_with_join(self):
         """Check source with join operation."""
         source = textwrap.dedent('''
-            from polypolarism import DF
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+
+            class L(pa.DataFrameModel):
+                id: int
+                name: str
+
+            class R(pa.DataFrameModel):
+                id: int
+                value: pl.Float64
+
+            class Out(pa.DataFrameModel):
+                id: int
+                name: str
+                value: pl.Float64
 
             def merge(
-                left: DF["{id: Int64, name: Utf8}"],
-                right: DF["{id: Int64, value: Float64}"],
-            ) -> DF["{id: Int64, name: Utf8, value: Float64}"]:
+                left: DataFrame[L],
+                right: DataFrame[R],
+            ) -> DataFrame[Out]:
                 return left.join(right, on="id", how="inner")
         ''')
 

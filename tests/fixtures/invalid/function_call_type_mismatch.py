@@ -1,13 +1,25 @@
 """Error: Column type mismatch in function argument."""
+
 import polars as pl
-from polypolarism import DF
+import pandera.polars as pa
+from pandera.typing.polars import DataFrame
 
 
-def expects_int_id(df: DF["{id: Int64, value: Float64}"]) -> DF["{id: Int64, value: Float64}"]:
+class IntIdSchema(pa.DataFrameModel):
+    id: int
+    value: pl.Float64
+
+
+class StrIdSchema(pa.DataFrameModel):
+    id: str
+    value: pl.Float64
+
+
+def expects_int_id(df: DataFrame[IntIdSchema]) -> DataFrame[IntIdSchema]:
     """Function that expects id: Int64."""
     return df
 
 
-def caller(data: DF["{id: Utf8, value: Float64}"]) -> DF["{id: Int64, value: Float64}"]:
+def caller(data: DataFrame[StrIdSchema]) -> DataFrame[IntIdSchema]:
     """Error: id type is Utf8, mismatches expected Int64."""
-    return expects_int_id(data)  # Error: type mismatch for column 'id'
+    return expects_int_id(data)

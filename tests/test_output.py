@@ -163,11 +163,19 @@ class TestFormatJsonIntegration:
         from polypolarism.checker import check_source
 
         source = textwrap.dedent('''
-            from polypolarism import DF
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+
+            class InSchema(pa.DataFrameModel):
+                id: int
+
+            class OutSchema(pa.DataFrameModel):
+                id: int
+                missing: str
 
             def wrong_return(
-                data: DF["{id: Int64}"],
-            ) -> DF["{id: Int64, missing: Utf8}"]:
+                data: DataFrame[InSchema],
+            ) -> DataFrame[OutSchema]:
                 return data
         ''')
 

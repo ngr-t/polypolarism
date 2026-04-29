@@ -1,6 +1,13 @@
 """Variable type annotation in function body."""
+
 import polars as pl
-from polypolarism import DF
+import pandera.polars as pa
+from pandera.typing.polars import DataFrame
+
+
+class IdNameSchema(pa.DataFrameModel):
+    id: int
+    name: str
 
 
 def get_data():
@@ -8,7 +15,7 @@ def get_data():
     return external_source.fetch()
 
 
-def process() -> DF["{id: Int64, name: Utf8}"]:
+def process() -> DataFrame[IdNameSchema]:
     """Provide type information via variable annotation."""
-    df: DF["{id: Int64, name: Utf8}"] = get_data()
+    df: DataFrame[IdNameSchema] = get_data()
     return df

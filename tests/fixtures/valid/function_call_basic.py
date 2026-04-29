@@ -1,9 +1,21 @@
 """Basic function call type inference."""
+
 import polars as pl
-from polypolarism import DF
+import pandera.polars as pa
+from pandera.typing.polars import DataFrame
 
 
-def double_value(df: DF["{id: Int64, value: Float64}"]) -> DF["{id: Int64, doubled: Float64}"]:
+class InSchema(pa.DataFrameModel):
+    id: int
+    value: pl.Float64
+
+
+class OutSchema(pa.DataFrameModel):
+    id: int
+    doubled: pl.Float64
+
+
+def double_value(df: DataFrame[InSchema]) -> DataFrame[OutSchema]:
     """Transform: double the value and return as 'doubled'."""
     return df.select(
         pl.col("id"),
@@ -11,8 +23,6 @@ def double_value(df: DF["{id: Int64, value: Float64}"]) -> DF["{id: Int64, doubl
     )
 
 
-def process_data(
-    data: DF["{id: Int64, value: Float64}"]
-) -> DF["{id: Int64, doubled: Float64}"]:
+def process_data(data: DataFrame[InSchema]) -> DataFrame[OutSchema]:
     """Pipeline: call double_value."""
     return double_value(data)

@@ -1,13 +1,24 @@
 """Valid test case: Multiple aggregation functions."""
 
 import polars as pl
+import pandera.polars as pa
+from pandera.typing.polars import DataFrame
 
-from polypolarism import DF
+
+class OrdersSchema(pa.DataFrameModel):
+    product_id: int
+    quantity: int
+    price: pl.Float64
 
 
-def product_stats(
-    orders: DF["{product_id: Int64, quantity: Int64, price: Float64}"],
-) -> DF["{product_id: Int64, total_qty: Int64, avg_price: Float64, order_count: UInt32}"]:
+class StatsSchema(pa.DataFrameModel):
+    product_id: int
+    total_qty: int
+    avg_price: pl.Float64
+    order_count: pl.UInt32
+
+
+def product_stats(orders: DataFrame[OrdersSchema]) -> DataFrame[StatsSchema]:
     """Group by product and compute multiple statistics."""
     return orders.group_by("product_id").agg(
         pl.col("quantity").sum().alias("total_qty"),

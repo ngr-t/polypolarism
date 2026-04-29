@@ -1,13 +1,21 @@
 """Invalid test case: pl.col references non-existent column."""
 
 import polars as pl
+import pandera.polars as pa
+from pandera.typing.polars import DataFrame
 
-from polypolarism import DF
+
+class InSchema(pa.DataFrameModel):
+    id: int
+    value: pl.Float64
 
 
-def reference_missing_column(
-    data: DF["{id: Int64, value: Float64}"],
-) -> DF["{id: Int64, doubled: Float64}"]:
+class OutSchema(pa.DataFrameModel):
+    id: int
+    doubled: pl.Float64
+
+
+def reference_missing_column(data: DataFrame[InSchema]) -> DataFrame[OutSchema]:
     """ERROR: 'amount' column does not exist, should be 'value'."""
     return data.select(
         pl.col("id"),

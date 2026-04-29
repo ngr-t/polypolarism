@@ -1,6 +1,12 @@
 """Untyped function passthrough: body analysis infers return type."""
+
 import polars as pl
-from polypolarism import DF
+import pandera.polars as pa
+from pandera.typing.polars import DataFrame
+
+
+class IdSchema(pa.DataFrameModel):
+    id: int
 
 
 def untyped_passthrough(df):
@@ -8,6 +14,6 @@ def untyped_passthrough(df):
     return df
 
 
-def caller(data: DF["{id: Int64}"]) -> DF["{id: Int64}"]:
+def caller(data: DataFrame[IdSchema]) -> DataFrame[IdSchema]:
     """Type is inferred via body analysis even through untyped function."""
     return untyped_passthrough(data)

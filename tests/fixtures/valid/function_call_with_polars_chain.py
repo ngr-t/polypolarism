@@ -1,9 +1,21 @@
 """Function call combined with Polars method chain."""
+
 import polars as pl
-from polypolarism import DF
+import pandera.polars as pa
+from pandera.typing.polars import DataFrame
 
 
-def normalize(df: DF["{id: Int64, value: Float64}"]) -> DF["{id: Int64, norm: Float64}"]:
+class InSchema(pa.DataFrameModel):
+    id: int
+    value: pl.Float64
+
+
+class NormSchema(pa.DataFrameModel):
+    id: int
+    norm: pl.Float64
+
+
+def normalize(df: DataFrame[InSchema]) -> DataFrame[NormSchema]:
     """Normalize value column."""
     return df.select(
         pl.col("id"),
@@ -11,10 +23,7 @@ def normalize(df: DF["{id: Int64, value: Float64}"]) -> DF["{id: Int64, norm: Fl
     )
 
 
-def process_and_filter(
-    data: DF["{id: Int64, value: Float64}"]
-) -> DF["{id: Int64, norm: Float64}"]:
+def process_and_filter(data: DataFrame[InSchema]) -> DataFrame[NormSchema]:
     """Continue Polars method chain after function call."""
     normalized = normalize(data)
-    # Further operations on function return value
     return normalized.select(pl.col("id"), pl.col("norm"))

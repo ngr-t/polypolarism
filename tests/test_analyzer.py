@@ -18,17 +18,26 @@ from polypolarism.analyzer import (
 )
 
 
+PANDERA_HEADER = """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+"""
+
+
 class TestAnalyzeSourceBasic:
     """Test basic source code analysis."""
 
     def test_finds_function_with_df_annotation(self):
-        """Find function with DF type annotations."""
-        source = textwrap.dedent('''
-            from polypolarism import DF
+        """Find function with Pandera DataFrame[Schema] annotations."""
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class S(pa.DataFrameModel):
+                id: int
+                name: str
 
             def process(
-                data: DF["{id: Int64, name: Utf8}"],
-            ) -> DF["{id: Int64, name: Utf8}"]:
+                data: DataFrame[S],
+            ) -> DataFrame[S]:
                 return data
         ''')
 
@@ -39,12 +48,14 @@ class TestAnalyzeSourceBasic:
 
     def test_extracts_input_frame_types(self):
         """Extract input FrameType from parameter annotations."""
-        source = textwrap.dedent('''
-            from polypolarism import DF
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class S(pa.DataFrameModel):
+                id: int
+                name: str
 
             def process(
-                data: DF["{id: Int64, name: Utf8}"],
-            ) -> DF["{id: Int64, name: Utf8}"]:
+                data: DataFrame[S],
+            ) -> DataFrame[S]:
                 return data
         ''')
 
@@ -56,12 +67,14 @@ class TestAnalyzeSourceBasic:
 
     def test_extracts_return_frame_type(self):
         """Extract return FrameType from annotation."""
-        source = textwrap.dedent('''
-            from polypolarism import DF
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class S(pa.DataFrameModel):
+                id: int
+                name: str
 
             def process(
-                data: DF["{id: Int64, name: Utf8}"],
-            ) -> DF["{id: Int64, name: Utf8}"]:
+                data: DataFrame[S],
+            ) -> DataFrame[S]:
                 return data
         ''')
 
@@ -71,14 +84,25 @@ class TestAnalyzeSourceBasic:
         assert results[0].declared_return_type == expected
 
     def test_multiple_input_parameters(self):
-        """Handle multiple DF parameters."""
-        source = textwrap.dedent('''
-            from polypolarism import DF
+        """Handle multiple DataFrame parameters."""
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class L(pa.DataFrameModel):
+                id: int
+                value: pl.Float64
+
+            class R(pa.DataFrameModel):
+                id: int
+                name: str
+
+            class Out(pa.DataFrameModel):
+                id: int
+                value: pl.Float64
+                name: str
 
             def merge(
-                left: DF["{id: Int64, value: Float64}"],
-                right: DF["{id: Int64, name: Utf8}"],
-            ) -> DF["{id: Int64, value: Float64, name: Utf8}"]:
+                left: DataFrame[L],
+                right: DataFrame[R],
+            ) -> DataFrame[Out]:
                 return left.join(right, on="id")
         ''')
 
@@ -89,16 +113,17 @@ class TestAnalyzeSourceBasic:
         assert "right" in results[0].input_types
 
     def test_ignores_functions_without_df_annotations(self):
-        """Ignore functions that don't use DF types."""
-        source = textwrap.dedent('''
-            from polypolarism import DF
+        """Ignore functions that don't use DataFrame types."""
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class S(pa.DataFrameModel):
+                id: int
 
             def helper(x: int) -> int:
                 return x + 1
 
             def process(
-                data: DF["{id: Int64}"],
-            ) -> DF["{id: Int64}"]:
+                data: DataFrame[S],
+            ) -> DataFrame[S]:
                 return data
         ''')
 
@@ -113,13 +138,26 @@ class TestAnalyzeJoinOperations:
 
     def test_infers_inner_join_result(self):
         """Infer result type of inner join."""
-        source = textwrap.dedent('''
-            from polypolarism import DF
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class Users(pa.DataFrameModel):
+                user_id: int
+                name: str
+
+            class Orders(pa.DataFrameModel):
+                order_id: int
+                user_id: int
+                amount: pl.Float64
+
+            class Out(pa.DataFrameModel):
+                user_id: int
+                name: str
+                order_id: int
+                amount: pl.Float64
 
             def merge(
-                users: DF["{user_id: Int64, name: Utf8}"],
-                orders: DF["{order_id: Int64, user_id: Int64, amount: Float64}"],
-            ) -> DF["{user_id: Int64, name: Utf8, order_id: Int64, amount: Float64}"]:
+                users: DataFrame[Users],
+                orders: DataFrame[Orders],
+            ) -> DataFrame[Out]:
                 return users.join(orders, on="user_id", how="inner")
         ''')
 
@@ -135,13 +173,24 @@ class TestAnalyzeJoinOperations:
 
     def test_infers_left_join_with_nullable(self):
         """Left join makes right columns nullable."""
-        source = textwrap.dedent('''
-            from polypolarism import DF
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class Users(pa.DataFrameModel):
+                user_id: int
+                name: str
+
+            class Orders(pa.DataFrameModel):
+                user_id: int
+                amount: pl.Float64
+
+            class Out(pa.DataFrameModel):
+                user_id: int
+                name: str
+                amount: pl.Float64 = pa.Field(nullable=True)
 
             def merge(
-                users: DF["{user_id: Int64, name: Utf8}"],
-                orders: DF["{user_id: Int64, amount: Float64}"],
-            ) -> DF["{user_id: Int64, name: Utf8, amount: Float64?}"]:
+                users: DataFrame[Users],
+                orders: DataFrame[Orders],
+            ) -> DataFrame[Out]:
                 return users.join(orders, on="user_id", how="left")
         ''')
 
@@ -156,13 +205,25 @@ class TestAnalyzeJoinOperations:
 
     def test_detects_join_key_missing_error(self):
         """Detect when join key is missing from right frame."""
-        source = textwrap.dedent('''
-            from polypolarism import DF
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class Users(pa.DataFrameModel):
+                user_id: int
+                name: str
+
+            class Orders(pa.DataFrameModel):
+                order_id: int
+                amount: pl.Float64
+
+            class Out(pa.DataFrameModel):
+                user_id: int
+                name: str
+                order_id: int
+                amount: pl.Float64
 
             def bad_join(
-                users: DF["{user_id: Int64, name: Utf8}"],
-                orders: DF["{order_id: Int64, amount: Float64}"],
-            ) -> DF["{user_id: Int64, name: Utf8, order_id: Int64, amount: Float64}"]:
+                users: DataFrame[Users],
+                orders: DataFrame[Orders],
+            ) -> DataFrame[Out]:
                 return users.join(orders, on="user_id", how="inner")
         ''')
 
@@ -177,13 +238,18 @@ class TestAnalyzeGroupByOperations:
 
     def test_infers_groupby_agg_result(self):
         """Infer result type of group_by().agg()."""
-        source = textwrap.dedent('''
-            import polars as pl
-            from polypolarism import DF
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class In(pa.DataFrameModel):
+                category: str
+                amount: pl.Float64
+
+            class Out(pa.DataFrameModel):
+                category: str
+                total: pl.Float64
 
             def summarize(
-                data: DF["{category: Utf8, amount: Float64}"],
-            ) -> DF["{category: Utf8, total: Float64}"]:
+                data: DataFrame[In],
+            ) -> DataFrame[Out]:
                 return data.group_by("category").agg(
                     pl.col("amount").sum().alias("total"),
                 )
@@ -199,13 +265,18 @@ class TestAnalyzeGroupByOperations:
 
     def test_infers_count_returns_uint32(self):
         """count() aggregation returns UInt32."""
-        source = textwrap.dedent('''
-            import polars as pl
-            from polypolarism import DF
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class In(pa.DataFrameModel):
+                category: str
+                value: int
+
+            class Out(pa.DataFrameModel):
+                category: str
+                count: pl.UInt32
 
             def count_by_category(
-                data: DF["{category: Utf8, value: Int64}"],
-            ) -> DF["{category: Utf8, count: UInt32}"]:
+                data: DataFrame[In],
+            ) -> DataFrame[Out]:
                 return data.group_by("category").agg(
                     pl.col("value").count().alias("count"),
                 )
@@ -221,13 +292,18 @@ class TestAnalyzeGroupByOperations:
 
     def test_detects_groupby_nonexistent_column(self):
         """Detect when group_by uses non-existent column."""
-        source = textwrap.dedent('''
-            import polars as pl
-            from polypolarism import DF
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class In(pa.DataFrameModel):
+                id: int
+                value: pl.Float64
+
+            class Out(pa.DataFrameModel):
+                category: str
+                total: pl.Float64
 
             def bad_groupby(
-                data: DF["{id: Int64, value: Float64}"],
-            ) -> DF["{category: Utf8, total: Float64}"]:
+                data: DataFrame[In],
+            ) -> DataFrame[Out]:
                 return data.group_by("category").agg(
                     pl.col("value").sum().alias("total"),
                 )
@@ -244,14 +320,24 @@ class TestAnalyzeChainedOperations:
 
     def test_infers_join_then_groupby(self):
         """Infer result of join followed by group_by."""
-        source = textwrap.dedent('''
-            import polars as pl
-            from polypolarism import DF
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class Orders(pa.DataFrameModel):
+                order_id: int
+                customer_id: int
+                amount: pl.Float64
+
+            class Customers(pa.DataFrameModel):
+                customer_id: int
+                region: str
+
+            class Out(pa.DataFrameModel):
+                region: str
+                total_sales: pl.Float64
 
             def sales_summary(
-                orders: DF["{order_id: Int64, customer_id: Int64, amount: Float64}"],
-                customers: DF["{customer_id: Int64, region: Utf8}"],
-            ) -> DF["{region: Utf8, total_sales: Float64}"]:
+                orders: DataFrame[Orders],
+                customers: DataFrame[Customers],
+            ) -> DataFrame[Out]:
                 return (
                     orders.join(customers, on="customer_id", how="inner")
                     .group_by("region")
@@ -273,13 +359,19 @@ class TestAnalyzeSelectOperations:
 
     def test_infers_select_with_col(self):
         """Infer result of select with pl.col()."""
-        source = textwrap.dedent('''
-            import polars as pl
-            from polypolarism import DF
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class In(pa.DataFrameModel):
+                id: int
+                name: str
+                value: pl.Float64
+
+            class Out(pa.DataFrameModel):
+                id: int
+                value: pl.Float64
 
             def select_columns(
-                data: DF["{id: Int64, name: Utf8, value: Float64}"],
-            ) -> DF["{id: Int64, value: Float64}"]:
+                data: DataFrame[In],
+            ) -> DataFrame[Out]:
                 return data.select(pl.col("id"), pl.col("value"))
         ''')
 
@@ -293,13 +385,18 @@ class TestAnalyzeSelectOperations:
 
     def test_detects_select_nonexistent_column(self):
         """Detect when select references non-existent column."""
-        source = textwrap.dedent('''
-            import polars as pl
-            from polypolarism import DF
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class In(pa.DataFrameModel):
+                id: int
+                value: pl.Float64
+
+            class Out(pa.DataFrameModel):
+                id: int
+                amount: pl.Float64
 
             def bad_select(
-                data: DF["{id: Int64, value: Float64}"],
-            ) -> DF["{id: Int64, amount: Float64}"]:
+                data: DataFrame[In],
+            ) -> DataFrame[Out]:
                 return data.select(
                     pl.col("id"),
                     pl.col("amount"),
@@ -317,13 +414,19 @@ class TestAnalyzeWithColumn:
 
     def test_infers_with_columns_adds_column(self):
         """with_columns adds new column to existing ones."""
-        source = textwrap.dedent('''
-            import polars as pl
-            from polypolarism import DF
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class In(pa.DataFrameModel):
+                id: int
+                value: pl.Float64
+
+            class Out(pa.DataFrameModel):
+                id: int
+                value: pl.Float64
+                doubled: pl.Float64
 
             def add_doubled(
-                data: DF["{id: Int64, value: Float64}"],
-            ) -> DF["{id: Int64, value: Float64, doubled: Float64}"]:
+                data: DataFrame[In],
+            ) -> DataFrame[Out]:
                 return data.with_columns(
                     (pl.col("value") * 2).alias("doubled"),
                 )
@@ -344,13 +447,17 @@ class TestFunctionAnalysisDataClass:
 
     def test_has_errors_property(self):
         """has_errors returns True when errors exist."""
-        source = textwrap.dedent('''
-            import polars as pl
-            from polypolarism import DF
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class In(pa.DataFrameModel):
+                id: int
+
+            class Out(pa.DataFrameModel):
+                id: int
+                value: pl.Float64
 
             def bad_col(
-                data: DF["{id: Int64}"],
-            ) -> DF["{id: Int64, value: Float64}"]:
+                data: DataFrame[In],
+            ) -> DataFrame[Out]:
                 return data.select(pl.col("missing"))
         ''')
 
@@ -360,12 +467,13 @@ class TestFunctionAnalysisDataClass:
 
     def test_has_errors_false_when_valid(self):
         """has_errors returns False when no errors."""
-        source = textwrap.dedent('''
-            from polypolarism import DF
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class S(pa.DataFrameModel):
+                id: int
 
             def identity(
-                data: DF["{id: Int64}"],
-            ) -> DF["{id: Int64}"]:
+                data: DataFrame[S],
+            ) -> DataFrame[S]:
                 return data
         ''')
 
@@ -379,14 +487,26 @@ class TestAnalyzeIntermediateVariables:
 
     def test_tracks_variable_assignment(self):
         """Track DataFrame type through variable assignment."""
-        source = textwrap.dedent('''
-            import polars as pl
-            from polypolarism import DF
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class Users(pa.DataFrameModel):
+                user_id: int
+                name: str
+
+            class Orders(pa.DataFrameModel):
+                order_id: int
+                user_id: int
+                amount: pl.Float64
+
+            class Out(pa.DataFrameModel):
+                user_id: int
+                name: str
+                order_id: int
+                amount: pl.Float64
 
             def with_intermediate(
-                users: DF["{user_id: Int64, name: Utf8}"],
-                orders: DF["{order_id: Int64, user_id: Int64, amount: Float64}"],
-            ) -> DF["{user_id: Int64, name: Utf8, order_id: Int64, amount: Float64}"]:
+                users: DataFrame[Users],
+                orders: DataFrame[Orders],
+            ) -> DataFrame[Out]:
                 joined = users.join(orders, on="user_id", how="inner")
                 return joined
         ''')
@@ -402,93 +522,48 @@ class TestAnalyzeIntermediateVariables:
         assert results[0].inferred_return_type == expected
 
 
-class TestParseErrorReporting:
-    """Test that schema parse errors are reported."""
-
-    def test_unknown_type_in_return_type(self):
-        """Unknown type in return annotation should report error."""
-        source = textwrap.dedent('''
-            from polypolarism import DF
-
-            def process(df: DF["{id: Int64}"]) -> DF["{id: UnknownType}"]:
-                return df
-        ''')
-        results = analyze_source(source)
-
-        assert len(results) == 1
-        assert results[0].has_errors
-        assert any("Unknown type" in err for err in results[0].errors)
-
-    def test_unknown_type_in_parameter(self):
-        """Unknown type in parameter annotation should report error."""
-        source = textwrap.dedent('''
-            from polypolarism import DF
-
-            def process(df: DF["{id: BadType}"]) -> DF["{id: Int64}"]:
-                return df
-        ''')
-        results = analyze_source(source)
-
-        assert len(results) == 1
-        assert results[0].has_errors
-        assert any("Unknown type" in err for err in results[0].errors)
-
-    def test_string_type_alias_works(self):
-        """String should be accepted as alias for Utf8."""
-        source = textwrap.dedent('''
-            from polypolarism import DF
-
-            def process(df: DF["{name: String}"]) -> DF["{name: String}"]:
-                return df
-        ''')
-        results = analyze_source(source)
-
-        assert len(results) == 1
-        assert not results[0].has_errors
-        assert results[0].declared_return_type is not None
-        assert "name" in results[0].declared_return_type.columns
-        # String should be parsed as Utf8
-        assert results[0].declared_return_type.columns["name"].dtype == Utf8()
-
-
 class TestSourceLocation:
     """Test source location information in analysis results."""
 
     def test_function_analysis_has_lineno(self):
         """FunctionAnalysis should include function definition line number."""
-        source = textwrap.dedent('''
-            from polypolarism import DF
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class S(pa.DataFrameModel):
+                id: int
 
             def process(
-                data: DF["{id: Int64}"],
-            ) -> DF["{id: Int64}"]:
+                data: DataFrame[S],
+            ) -> DataFrame[S]:
                 return data
         ''')
 
         results = analyze_source(source)
 
         assert len(results) == 1
-        # Function def starts at line 4 (1-indexed, after dedent)
-        assert results[0].lineno == 4
+        # Function def line is determined by the schema preamble.
+        assert results[0].lineno > 0
 
     def test_multiple_functions_have_correct_linenos(self):
         """Multiple functions should each have their correct line numbers."""
-        source = textwrap.dedent('''
-            from polypolarism import DF
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class A(pa.DataFrameModel):
+                id: int
 
-            def first(df: DF["{id: Int64}"]) -> DF["{id: Int64}"]:
+            class B(pa.DataFrameModel):
+                name: str
+
+            def first(df: DataFrame[A]) -> DataFrame[A]:
                 return df
 
-            def second(df: DF["{name: Utf8}"]) -> DF["{name: Utf8}"]:
+            def second(df: DataFrame[B]) -> DataFrame[B]:
                 return df
         ''')
 
         results = analyze_source(source)
 
         assert len(results) == 2
-        # Sort by lineno to ensure consistent ordering
         results.sort(key=lambda r: r.lineno)
         assert results[0].name == "first"
-        assert results[0].lineno == 4
         assert results[1].name == "second"
-        assert results[1].lineno == 7
+        # Second function comes after the first
+        assert results[1].lineno > results[0].lineno

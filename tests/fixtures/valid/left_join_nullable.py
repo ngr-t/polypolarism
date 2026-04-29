@@ -1,13 +1,29 @@
 """Valid test case: Left join with nullable right columns."""
 
 import polars as pl
+import pandera.polars as pa
+from pandera.typing.polars import DataFrame
 
-from polypolarism import DF
+
+class UsersSchema(pa.DataFrameModel):
+    user_id: int
+    name: str
+
+
+class OrdersSchema(pa.DataFrameModel):
+    user_id: int
+    total: pl.Float64
+
+
+class UsersWithOptionalOrdersSchema(pa.DataFrameModel):
+    user_id: int
+    name: str
+    total: pl.Float64 = pa.Field(nullable=True)
 
 
 def users_with_optional_orders(
-    users: DF["{user_id: Int64, name: Utf8}"],
-    orders: DF["{user_id: Int64, total: Float64}"],
-) -> DF["{user_id: Int64, name: Utf8, total: Float64?}"]:
+    users: DataFrame[UsersSchema],
+    orders: DataFrame[OrdersSchema],
+) -> DataFrame[UsersWithOptionalOrdersSchema]:
     """Left join makes right-side columns nullable."""
     return users.join(orders, on="user_id", how="left")

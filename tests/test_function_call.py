@@ -8,6 +8,13 @@ from polypolarism.analyzer import analyze_source, FunctionRegistry, FunctionInfo
 from polypolarism.types import FrameType, Int64, Float64, Utf8, Nullable
 
 
+PANDERA_HEADER = """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+"""
+
+
 class TestFunctionRegistry:
     """Tests for FunctionRegistry."""
 
@@ -47,18 +54,22 @@ class TestBasicFunctionCall:
 
     def test_call_typed_function(self):
         """Calling a typed function infers return type from signature."""
-        source = textwrap.dedent('''
-            from polypolarism import DF
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class IdSchema(pa.DataFrameModel):
+                id: int
 
-            def helper(df: DF["{id: Int64}"]) -> DF["{id: Int64, doubled: Int64}"]:
+            class IdDoubledSchema(pa.DataFrameModel):
+                id: int
+                doubled: int
+
+            def helper(df: DataFrame[IdSchema]) -> DataFrame[IdDoubledSchema]:
                 return df.with_columns((pl.col("id") * 2).alias("doubled"))
 
-            def caller(data: DF["{id: Int64}"]) -> DF["{id: Int64, doubled: Int64}"]:
+            def caller(data: DataFrame[IdSchema]) -> DataFrame[IdDoubledSchema]:
                 return helper(data)
         ''')
         results = analyze_source(source)
 
-        # Find caller analysis
         caller_analysis = next(r for r in results if r.name == "caller")
         assert caller_analysis.inferred_return_type is not None
         assert "id" in caller_analysis.inferred_return_type.columns
@@ -66,16 +77,26 @@ class TestBasicFunctionCall:
 
     def test_call_typed_function_chained(self):
         """Chained function calls propagate types correctly."""
-        source = textwrap.dedent('''
-            from polypolarism import DF
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class A(pa.DataFrameModel):
+                a: int
 
-            def add_b(df: DF["{a: Int64}"]) -> DF["{a: Int64, b: Int64}"]:
+            class AB(pa.DataFrameModel):
+                a: int
+                b: int
+
+            class ABC(pa.DataFrameModel):
+                a: int
+                b: int
+                c: int
+
+            def add_b(df: DataFrame[A]) -> DataFrame[AB]:
                 return df.with_columns(pl.lit(100).alias("b"))
 
-            def add_c(df: DF["{a: Int64, b: Int64}"]) -> DF["{a: Int64, b: Int64, c: Int64}"]:
+            def add_c(df: DataFrame[AB]) -> DataFrame[ABC]:
                 return df.with_columns((pl.col("a") + pl.col("b")).alias("c"))
 
-            def pipeline(data: DF["{a: Int64}"]) -> DF["{a: Int64, b: Int64, c: Int64}"]:
+            def pipeline(data: DataFrame[A]) -> DataFrame[ABC]:
                 temp = add_b(data)
                 result = add_c(temp)
                 return result
@@ -88,13 +109,18 @@ class TestBasicFunctionCall:
 
     def test_forward_reference(self):
         """Can call function defined later in the file."""
-        source = textwrap.dedent('''
-            from polypolarism import DF
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class XSchema(pa.DataFrameModel):
+                x: int
 
-            def caller(data: DF["{x: Int64}"]) -> DF["{x: Int64, y: Int64}"]:
+            class XYSchema(pa.DataFrameModel):
+                x: int
+                y: int
+
+            def caller(data: DataFrame[XSchema]) -> DataFrame[XYSchema]:
                 return helper(data)
 
-            def helper(df: DF["{x: Int64}"]) -> DF["{x: Int64, y: Int64}"]:
+            def helper(df: DataFrame[XSchema]) -> DataFrame[XYSchema]:
                 return df.with_columns((pl.col("x") * 2).alias("y"))
         ''')
         results = analyze_source(source)
@@ -109,13 +135,14 @@ class TestUntypedFunctionCall:
 
     def test_untyped_passthrough(self):
         """Untyped function that passes through infers correct type."""
-        source = textwrap.dedent('''
-            from polypolarism import DF
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class IdSchema(pa.DataFrameModel):
+                id: int
 
             def untyped_passthrough(df):
                 return df
 
-            def caller(data: DF["{id: Int64}"]) -> DF["{id: Int64}"]:
+            def caller(data: DataFrame[IdSchema]) -> DataFrame[IdSchema]:
                 return untyped_passthrough(data)
         ''')
         results = analyze_source(source)
@@ -126,13 +153,18 @@ class TestUntypedFunctionCall:
 
     def test_untyped_with_transform(self):
         """Untyped function that transforms infers correct type."""
-        source = textwrap.dedent('''
-            from polypolarism import DF
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class IdSchema(pa.DataFrameModel):
+                id: int
+
+            class IdNewSchema(pa.DataFrameModel):
+                id: int
+                new_col: int
 
             def untyped_add_column(df):
                 return df.with_columns(pl.lit(100).alias("new_col"))
 
-            def caller(data: DF["{id: Int64}"]) -> DF["{id: Int64, new_col: Int64}"]:
+            def caller(data: DataFrame[IdSchema]) -> DataFrame[IdNewSchema]:
                 return untyped_add_column(data)
         ''')
         results = analyze_source(source)
@@ -148,11 +180,13 @@ class TestVariableAnnotation:
 
     def test_variable_annotation_basic(self):
         """Variable annotation provides type for unknown source."""
-        source = textwrap.dedent('''
-            from polypolarism import DF
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class IdName(pa.DataFrameModel):
+                id: int
+                name: str
 
-            def process() -> DF["{id: Int64, name: Utf8}"]:
-                df: DF["{id: Int64, name: Utf8}"] = get_data()
+            def process() -> DataFrame[IdName]:
+                df: DataFrame[IdName] = get_data()
                 return df
         ''')
         results = analyze_source(source)
@@ -164,11 +198,17 @@ class TestVariableAnnotation:
 
     def test_variable_annotation_with_chain(self):
         """Variable annotation followed by method chain."""
-        source = textwrap.dedent('''
-            from polypolarism import DF
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class InSchema(pa.DataFrameModel):
+                id: int
+                value: int
 
-            def process() -> DF["{id: Int64, doubled: Int64}"]:
-                df: DF["{id: Int64, value: Int64}"] = get_data()
+            class OutSchema(pa.DataFrameModel):
+                id: int
+                doubled: int
+
+            def process() -> DataFrame[OutSchema]:
+                df: DataFrame[InSchema] = get_data()
                 result = df.select(
                     pl.col("id"),
                     (pl.col("value") * 2).alias("doubled"),
@@ -188,13 +228,18 @@ class TestArgumentTypeCheck:
 
     def test_missing_column_error(self):
         """Error when argument is missing required column."""
-        source = textwrap.dedent('''
-            from polypolarism import DF
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class TwoColSchema(pa.DataFrameModel):
+                id: int
+                name: str
 
-            def requires_two(df: DF["{id: Int64, name: Utf8}"]) -> DF["{id: Int64, name: Utf8}"]:
+            class IdOnlySchema(pa.DataFrameModel):
+                id: int
+
+            def requires_two(df: DataFrame[TwoColSchema]) -> DataFrame[TwoColSchema]:
                 return df
 
-            def caller(data: DF["{id: Int64}"]) -> DF["{id: Int64, name: Utf8}"]:
+            def caller(data: DataFrame[IdOnlySchema]) -> DataFrame[TwoColSchema]:
                 return requires_two(data)
         ''')
         results = analyze_source(source)
@@ -205,13 +250,17 @@ class TestArgumentTypeCheck:
 
     def test_type_mismatch_error(self):
         """Error when argument column has wrong type."""
-        source = textwrap.dedent('''
-            from polypolarism import DF
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class IntSchema(pa.DataFrameModel):
+                id: int
 
-            def expects_int(df: DF["{id: Int64}"]) -> DF["{id: Int64}"]:
+            class StrSchema(pa.DataFrameModel):
+                id: str
+
+            def expects_int(df: DataFrame[IntSchema]) -> DataFrame[IntSchema]:
                 return df
 
-            def caller(data: DF["{id: Utf8}"]) -> DF["{id: Int64}"]:
+            def caller(data: DataFrame[StrSchema]) -> DataFrame[IntSchema]:
                 return expects_int(data)
         ''')
         results = analyze_source(source)
@@ -222,13 +271,17 @@ class TestArgumentTypeCheck:
 
     def test_nullable_mismatch_error(self):
         """Error when nullable passed where non-nullable expected."""
-        source = textwrap.dedent('''
-            from polypolarism import DF
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class NonNull(pa.DataFrameModel):
+                value: int
 
-            def expects_non_nullable(df: DF["{value: Int64}"]) -> DF["{value: Int64}"]:
+            class WithNull(pa.DataFrameModel):
+                value: int = pa.Field(nullable=True)
+
+            def expects_non_nullable(df: DataFrame[NonNull]) -> DataFrame[NonNull]:
                 return df
 
-            def caller(data: DF["{value: Int64?}"]) -> DF["{value: Int64}"]:
+            def caller(data: DataFrame[WithNull]) -> DataFrame[NonNull]:
                 return expects_non_nullable(data)
         ''')
         results = analyze_source(source)

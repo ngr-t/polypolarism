@@ -1,13 +1,23 @@
 """Valid test case: Basic group_by with aggregation."""
 
 import polars as pl
+import pandera.polars as pa
+from pandera.typing.polars import DataFrame
 
-from polypolarism import DF
+
+class SalesSchema(pa.DataFrameModel):
+    country: str
+    product: str
+    amount: pl.Float64
 
 
-def sales_by_country(
-    sales: DF["{country: Utf8, product: Utf8, amount: Float64}"],
-) -> DF["{country: Utf8, total_amount: Float64, count: UInt32}"]:
+class SummarySchema(pa.DataFrameModel):
+    country: str
+    total_amount: pl.Float64
+    count: pl.UInt32
+
+
+def sales_by_country(sales: DataFrame[SalesSchema]) -> DataFrame[SummarySchema]:
     """Group by country and aggregate sales."""
     return sales.group_by("country").agg(
         pl.col("amount").sum().alias("total_amount"),

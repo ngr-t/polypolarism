@@ -125,9 +125,13 @@ class TestMainExitCode:
         # Create a valid test file
         test_file = tmp_path / "valid.py"
         test_file.write_text('''
-from polypolarism import DF
+import pandera.polars as pa
+from pandera.typing.polars import DataFrame
 
-def identity(data: DF["{id: Int64}"]) -> DF["{id: Int64}"]:
+class IdSchema(pa.DataFrameModel):
+    id: int
+
+def identity(data: DataFrame[IdSchema]) -> DataFrame[IdSchema]:
     return data
 ''')
         monkeypatch.setattr(sys, "argv", ["polypolarism", str(test_file)])
@@ -140,9 +144,17 @@ def identity(data: DF["{id: Int64}"]) -> DF["{id: Int64}"]:
         # Create an invalid test file
         test_file = tmp_path / "invalid.py"
         test_file.write_text('''
-from polypolarism import DF
+import pandera.polars as pa
+from pandera.typing.polars import DataFrame
 
-def bad(data: DF["{id: Int64}"]) -> DF["{id: Int64, extra: Utf8}"]:
+class InSchema(pa.DataFrameModel):
+    id: int
+
+class OutSchema(pa.DataFrameModel):
+    id: int
+    extra: str
+
+def bad(data: DataFrame[InSchema]) -> DataFrame[OutSchema]:
     return data
 ''')
         monkeypatch.setattr(sys, "argv", ["polypolarism", str(test_file)])
@@ -214,9 +226,13 @@ class TestFormatOption:
 
         test_file = tmp_path / "test.py"
         test_file.write_text('''
-from polypolarism import DF
+import pandera.polars as pa
+from pandera.typing.polars import DataFrame
 
-def identity(data: DF["{id: Int64}"]) -> DF["{id: Int64}"]:
+class IdSchema(pa.DataFrameModel):
+    id: int
+
+def identity(data: DataFrame[IdSchema]) -> DataFrame[IdSchema]:
     return data
 ''')
 
@@ -237,9 +253,17 @@ def identity(data: DF["{id: Int64}"]) -> DF["{id: Int64}"]:
 
         test_file = tmp_path / "test.py"
         test_file.write_text('''
-from polypolarism import DF
+import pandera.polars as pa
+from pandera.typing.polars import DataFrame
 
-def bad(data: DF["{id: Int64}"]) -> DF["{id: Int64, missing: Utf8}"]:
+class InSchema(pa.DataFrameModel):
+    id: int
+
+class OutSchema(pa.DataFrameModel):
+    id: int
+    missing: str
+
+def bad(data: DataFrame[InSchema]) -> DataFrame[OutSchema]:
     return data
 ''')
 
@@ -258,9 +282,13 @@ def bad(data: DF["{id: Int64}"]) -> DF["{id: Int64, missing: Utf8}"]:
         """--format text is the default format."""
         test_file = tmp_path / "test.py"
         test_file.write_text('''
-from polypolarism import DF
+import pandera.polars as pa
+from pandera.typing.polars import DataFrame
 
-def identity(data: DF["{id: Int64}"]) -> DF["{id: Int64}"]:
+class IdSchema(pa.DataFrameModel):
+    id: int
+
+def identity(data: DataFrame[IdSchema]) -> DataFrame[IdSchema]:
     return data
 ''')
 

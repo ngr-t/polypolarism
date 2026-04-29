@@ -1,6 +1,12 @@
 """Error: Untyped function body cannot be analyzed."""
+
 import polars as pl
-from polypolarism import DF
+import pandera.polars as pa
+from pandera.typing.polars import DataFrame
+
+
+class IdSchema(pa.DataFrameModel):
+    id: int
 
 
 def external_function(df):
@@ -8,6 +14,6 @@ def external_function(df):
     return some_external_lib.process(df)
 
 
-def caller(data: DF["{id: Int64}"]) -> DF["{id: Int64}"]:
+def caller(data: DataFrame[IdSchema]) -> DataFrame[IdSchema]:
     """Error when untyped function body cannot be analyzed."""
     return external_function(data)
