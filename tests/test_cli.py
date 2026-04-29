@@ -72,6 +72,30 @@ class TestCheckDirectory:
         results = check_directory(tmp_path)
         assert results == []
 
+
+class TestCheckWarningFixtures:
+    """Files in fixtures/warning produce warnings but still pass type-check."""
+
+    def test_warning_fixtures_pass_with_warnings(self):
+        warning_dir = FIXTURES_DIR / "warning"
+        results = check_directory(warning_dir)
+        assert len(results) >= 3
+        # Every function passes (warnings don't fail)
+        assert all(r.passed for r in results)
+        # Every function carries at least one warning
+        assert all(r.warnings for r in results)
+        # PLW codes show up
+        all_warnings = [w for r in results for w in r.warnings]
+        assert any("PLW001" in w for w in all_warnings)
+        assert any("PLW003" in w for w in all_warnings)
+        assert any("PLW004" in w for w in all_warnings)
+
+    def test_cli_exits_zero_with_only_warnings(self, tmp_path):
+        warning_dir = FIXTURES_DIR / "warning"
+        rc = main([str(warning_dir)])
+        # passed=True for every function so the CLI returns 0.
+        assert rc == 0
+
     def test_check_directory_not_found(self):
         """Handle non-existent directory."""
         with pytest.raises(FileNotFoundError):

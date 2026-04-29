@@ -66,17 +66,27 @@ class FileResults:
 def _build_diagnostics(group: FileResults) -> list[dict]:
     diagnostics: list[dict] = []
     for result in group.results:
-        if result.passed:
-            continue
         line = group.function_lines.get(result.function_name, 1)
         end_line = group.function_end_lines.get(result.function_name)
-        for error in result.errors:
+        if not result.passed:
+            for error in result.errors:
+                diag = Diagnostic(
+                    file=group.file_path,
+                    line=line,
+                    column=0,
+                    message=_error_to_message(error),
+                    severity=DiagnosticSeverity.ERROR,
+                    end_line=end_line,
+                    end_column=0,
+                )
+                diagnostics.append(diag.to_dict())
+        for warning in result.warnings:
             diag = Diagnostic(
                 file=group.file_path,
                 line=line,
                 column=0,
-                message=_error_to_message(error),
-                severity=DiagnosticSeverity.ERROR,
+                message=warning,
+                severity=DiagnosticSeverity.WARNING,
                 end_line=end_line,
                 end_column=0,
             )

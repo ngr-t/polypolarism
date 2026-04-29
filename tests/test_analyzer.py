@@ -1928,6 +1928,142 @@ class TestM6DiagnosticCodes:
         assert any("[PLY002]" in e for e in results[0].errors)
 
 
+class TestM7PipeRegistry:
+    """``df.pipe(typed_helper)`` should use the helper's declared return type."""
+
+    def test_pipe_typed_helper(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                id: int
+                value: pl.Float64
+
+            class Out(pa.DataFrameModel):
+                id: int
+                value: pl.Float64
+                doubled: pl.Float64
+
+            def double_value(df: DataFrame[S]) -> DataFrame[Out]:
+                return df.with_columns((pl.col("value") * 2).alias("doubled"))
+
+            def via_pipe(df: DataFrame[S]) -> DataFrame[Out]:
+                return df.pipe(double_value)
+        """
+        )
+        results = analyze_source(source)
+        via_pipe = next(r for r in results if r.name == "via_pipe")
+        assert via_pipe.has_errors is False, via_pipe.errors
+        assert via_pipe.inferred_return_type is not None
+        assert "doubled" in via_pipe.inferred_return_type.columns
+
+    def test_pipe_untyped_helper_propagates(self):
+        """Untyped helper called via pipe still propagates types via body inference."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                id: int
+                value: pl.Float64
+
+            def add_one(df):
+                return df.with_columns((pl.col("value") + 1).alias("value"))
+
+            def via_pipe(df: DataFrame[S]) -> DataFrame[S]:
+                return df.pipe(add_one)
+        """
+        )
+        results = analyze_source(source)
+        via_pipe = next(r for r in results if r.name == "via_pipe")
+        assert via_pipe.has_errors is False, via_pipe.errors
+
+    def test_pipe_unknown_callable_warns(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            from somewhere import external_helper
+
+            class S(pa.DataFrameModel):
+                id: int
+
+            def f(df: DataFrame[S]):
+                return df.pipe(external_helper)
+        """
+        )
+        results = analyze_source(source)
+        f = next(r for r in results if r.name == "f")
+        assert any("PLW002" in w for w in f.warnings)
+        assert any("external_helper" in w for w in f.warnings)
+
+
+class TestM7MapElementsReturnDtype:
+    def test_map_elements_with_return_dtype(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                id: int
+                value: pl.Float64
+
+            class Out(pa.DataFrameModel):
+                id: int
+                value: pl.Float64
+                doubled: pl.Float64
+
+            def f(df: DataFrame[S]) -> DataFrame[Out]:
+                return df.with_columns(
+                    pl.col("value").map_elements(
+                        lambda v: v * 2.0, return_dtype=pl.Float64
+                    ).alias("doubled")
+                )
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["doubled"].dtype == Float64()
+
+    def test_map_elements_without_return_dtype_warns(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                id: int
+                value: pl.Float64
+
+            def f(df: DataFrame[S]):
+                return df.with_columns(
+                    pl.col("value").map_elements(lambda v: v * 2.0).alias("v2")
+                )
+        """
+        )
+        results = analyze_source(source)
+        f = results[0]
+        assert any("PLW001" in w for w in f.warnings)
+        assert any("return_dtype" in w for w in f.warnings)
+
+
+class TestM7ExternalHelperWarning:
+    def test_unknown_function_call_warns(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            from othermodule import process
+
+            class S(pa.DataFrameModel):
+                id: int
+
+            def f(df: DataFrame[S]):
+                return process(df)
+        """
+        )
+        results = analyze_source(source)
+        f = results[0]
+        assert any("PLW003" in w for w in f.warnings)
+        assert any("process" in w for w in f.warnings)
+
+
 class TestFunctionAnalysisDataClass:
     """Test FunctionAnalysis data class."""
 

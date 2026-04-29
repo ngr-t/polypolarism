@@ -80,9 +80,15 @@ def format_results(
     lines: list[str] = []
     passed_count = sum(1 for r in results if r.passed)
     failed_count = len(results) - passed_count
+    warn_count = sum(1 for r in results if r.warnings)
 
     for result in results:
-        status = "\033[32mOK\033[0m" if result.passed else "\033[31mFAIL\033[0m"
+        if result.passed and result.warnings:
+            status = "\033[33mWARN\033[0m"
+        elif result.passed:
+            status = "\033[32mOK\033[0m"
+        else:
+            status = "\033[31mFAIL\033[0m"
 
         lineno = function_lines.get(result.function_name)
         if lineno is not None:
@@ -93,12 +99,22 @@ def format_results(
         if not result.passed:
             for error in result.errors:
                 lines.append(f"    - {error}")
+        for warning in result.warnings:
+            lines.append(f"    \033[33m! {warning}\033[0m")
 
     lines.append("")
     if failed_count == 0:
-        lines.append(f"\033[32mAll {passed_count} function(s) passed.\033[0m")
+        summary = f"\033[32mAll {passed_count} function(s) passed.\033[0m"
+        if warn_count:
+            summary += f" \033[33m({warn_count} with warnings)\033[0m"
+        lines.append(summary)
     else:
-        lines.append(f"\033[31m{failed_count} function(s) failed, {passed_count} passed.\033[0m")
+        summary = (
+            f"\033[31m{failed_count} function(s) failed, {passed_count} passed.\033[0m"
+        )
+        if warn_count:
+            summary += f" \033[33m({warn_count} with warnings)\033[0m"
+        lines.append(summary)
 
     return "\n".join(lines)
 

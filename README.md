@@ -317,6 +317,37 @@ Errors are tagged with a stable `[PLY###]` prefix for IDE/CI consumers:
 | `PLY021` | `explode`: column not found or not `List[T]` |
 | `PLY022` | `unpivot`: column not found or `on`-columns dtype mismatch |
 
+### Apply-style helpers and warning codes (M7)
+
+Some patterns are **not statically decidable** without help from the
+user. Polypolarism detects them, falls back to a best-effort inference,
+and emits a `[PLW###]` **warning** that names a concrete source change
+that would let the analyser check the code precisely. Warnings are
+non-fatal: the CLI exits `0` even when warnings are emitted.
+
+| Form | Status | Note |
+|---|---|---|
+| `df.pipe(typed_helper)` where `typed_helper` is a `DataFrame[A] → DataFrame[B]` defined in the same module | ✅ inferred | uses the helper's declared return type |
+| `df.pipe(untyped_helper)` defined in the same module | ✅ inferred | body is re-analysed with the propagated argument types |
+| `df.pipe(external_helper)` (imported from another module) | ⚠️ `PLW002` | suggests defining the helper locally with a `DataFrame[Schema]` annotation |
+| `df.pipe(lambda d: ...)` | ⚠️ `PLW004` | suggests promoting the lambda to a top-level typed function |
+| `pl.col("x").map_elements(fn, return_dtype=pl.Float64)` | ✅ inferred | the declared `return_dtype` becomes the result dtype |
+| `pl.col("x").map_elements(fn)` (no `return_dtype=`) | ⚠️ `PLW001` | falls back to receiver dtype; suggests adding `return_dtype=pl.<DType>` |
+| `pl.col("x").map_batches(fn, return_dtype=...)` | ✅ inferred | same rule as `map_elements` |
+| `external_helper(df)` (top-level call into an imported helper) | ⚠️ `PLW003` | suggests defining the helper locally or inlining the transformation |
+
+Warning codes:
+
+| Code | Meaning |
+|---|---|
+| `PLW001` | `map_elements` / `map_batches` without `return_dtype=` |
+| `PLW002` | `pipe` with a callable that isn't in the analysed module |
+| `PLW003` | function call to a name that isn't defined in the analysed module |
+| `PLW004` | lambda / inline callable used where its return dtype is unknowable |
+
+JSON output (`--format json`) emits warnings as `severity: "warning"`
+diagnostics so editors and CI can route them separately from errors.
+
 ## Development
 
 ```bash

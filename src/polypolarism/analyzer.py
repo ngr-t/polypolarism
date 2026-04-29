@@ -6,6 +6,10 @@ import ast
 from dataclasses import dataclass, field
 
 from polypolarism.diagnostics import (
+    PLW001,
+    PLW002,
+    PLW003,
+    PLW004,
     PLY001,
     PLY002,
     PLY003,
@@ -380,11 +384,20 @@ class FunctionAnalysis:
     declared_return_type: FrameType | None
     inferred_return_type: FrameType | None
     errors: list[str] = field(default_factory=list)
+    # Non-fatal advisories: situations where polypolarism can't precisely
+    # check the code and the user could fix that by adding an annotation
+    # or an explicit dtype. Does not affect ``has_errors``.
+    warnings: list[str] = field(default_factory=list)
 
     @property
     def has_errors(self) -> bool:
         """Return True if any errors were found during analysis."""
         return len(self.errors) > 0
+
+    @property
+    def has_warnings(self) -> bool:
+        """Return True if any warnings were emitted."""
+        return len(self.warnings) > 0
 
 
 def _resolve_declared_type(
@@ -414,9 +427,18 @@ def _annotation_declares_frame(
 class ExpressionAnalyzer(ast.NodeVisitor):
     """Analyze expressions to infer their types and output column names."""
 
-    def __init__(self, current_frame: FrameType):
+    def __init__(
+        self,
+        current_frame: FrameType,
+        warnings: list[str] | None = None,
+        registry: FunctionRegistry | None = None,
+    ):
         self.current_frame = current_frame
         self.errors: list[str] = []
+        # Shared advisory channel (passed in by the body analyzer so warnings
+        # bubble up to FunctionAnalysis). New list when used standalone.
+        self.warnings: list[str] = warnings if warnings is not None else []
+        self.registry = registry or FunctionRegistry()
 
     def analyze_agg_expr(self, node: ast.expr) -> AggExpr | None:
         """Analyze an aggregation expression like pl.col("x").sum().alias("total")."""
@@ -932,6 +954,65 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 return receiver_name, Nullable(Float64())
             return receiver_name, Float64()
 
+        # M7: ``pl.col("x").map_elements(fn, return_dtype=pl.Float64)`` /
+        # ``map_batches(fn, return_dtype=...)``. The return type is what the
+        # user declared; without ``return_dtype`` it's uninferable, so we
+        # fall back to the receiver dtype and emit ``PLW001`` so the user
+        # knows to add the kwarg.
+        if method in ("map_elements", "map_batches"):
+            for kw in node.keywords:
+                if kw.arg == "return_dtype":
+                    declared = _resolve_pl_dtype(kw.value)
+                    if declared is not None:
+                        if receiver_type is not None and isinstance(
+                            receiver_type, Nullable
+                        ):
+                            return receiver_name, Nullable(declared)
+                        return receiver_name, declared
+            self.warnings.append(
+                tag(
+                    PLW001,
+                    f"{method}: no `return_dtype=` was supplied, so polypolarism "
+                    f"falls back to the receiver dtype. Add e.g. "
+                    f"`return_dtype=pl.Float64` to make the result type precise.",
+                )
+            )
+            return receiver_name, receiver_type if receiver_type is not None else Boolean()
+
+        # ``pl.col("x").pipe(callable)`` — expression-level pipe. Use the
+        # registry when possible; warn for lambda / external names.
+        if method == "pipe" and node.args:
+            callable_arg = node.args[0]
+            if isinstance(callable_arg, ast.Name):
+                func_info = self.registry.get(callable_arg.id)
+                if func_info is not None and func_info.signature is not None:
+                    declared_return = func_info.signature.return_type
+                    if declared_return is not None:
+                        # Helper has a frame return; not directly usable as expr dtype,
+                        # but the same machinery can carry frame-returning expr pipes.
+                        # Treat as receiver-typed for column inference here.
+                        return receiver_name, receiver_type if receiver_type else Boolean()
+                # Unknown callable in expr.pipe — uninferable.
+                self.warnings.append(
+                    tag(
+                        PLW002,
+                        f"expr.pipe: callable '{callable_arg.id}' is not annotated "
+                        f"or not in this module. The expression's return dtype "
+                        f"cannot be inferred precisely.",
+                    )
+                )
+                return receiver_name, receiver_type if receiver_type else Boolean()
+            if isinstance(callable_arg, ast.Lambda):
+                self.warnings.append(
+                    tag(
+                        PLW004,
+                        "expr.pipe: a lambda was passed; promote it to a top-level "
+                        "function with a typed signature so polypolarism can infer "
+                        "the return dtype.",
+                    )
+                )
+                return receiver_name, receiver_type if receiver_type else Boolean()
+
         # Aggregation-style methods used outside of group_by — return reduction dtype.
         # Reuses the same map as analyze_agg_expr.
         agg_map: dict[str, AggFunction] = {
@@ -996,9 +1077,12 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         errors: list[str],
         registry: FunctionRegistry | None = None,
         schema_registry: SchemaRegistry | None = None,
+        warnings: list[str] | None = None,
     ):
         self.input_types = input_types
         self.errors = errors
+        # Non-fatal advisories. Owned externally so nested analyses can append.
+        self.warnings: list[str] = warnings if warnings is not None else []
         self.registry = registry or FunctionRegistry()
         self.schema_registry = schema_registry or SchemaRegistry()
         # Track variable -> FrameType mapping
@@ -1125,12 +1209,16 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 if schema_ft is not None:
                     return schema_ft
 
-            # df.pipe(Schema.validate) -> Schema's FrameType; otherwise pipe is identity-typed
+            # df.pipe(callable) — resolve in this order:
+            #   1) ``Schema.validate``                      → schema's FrameType
+            #   2) a typed/untyped helper in the registry   → its return type
+            #   3) anything else                            → identity, with a PLW002
             if method_name == "pipe":
-                piped = self._infer_pipe_call(node)
+                receiver_type = self._infer_expr_type(receiver)
+                piped = self._infer_pipe_call(node, receiver_type)
                 if piped is not None:
                     return piped
-                return self._infer_expr_type(receiver)
+                return receiver_type
 
             # LazyFrame.collect() is identity for our static type system
             if method_name == "collect":
@@ -1188,14 +1276,69 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             return None
         return self.schema_registry.to_frame_type(schema_node.id)
 
-    def _infer_pipe_call(self, node: ast.Call) -> FrameType | None:
-        """Resolve ``df.pipe(Schema.validate)`` to the schema's FrameType."""
+    def _infer_pipe_call(
+        self,
+        node: ast.Call,
+        receiver_type: FrameType | None = None,
+    ) -> FrameType | None:
+        """Resolve ``df.pipe(callable, *args, **kwargs)``.
+
+        Recognised forms:
+        - ``df.pipe(Schema.validate)`` → that schema's FrameType.
+        - ``df.pipe(my_helper, ...)`` → if ``my_helper`` is in the registry,
+          we treat the call like ``my_helper(df, *args, **kwargs)`` and
+          delegate to the same inference path used by direct calls.
+        - Anything else (``df.pipe(lambda d: ...)`` / ``df.pipe(some_import)``
+          where the callable isn't analysable) → emit ``PLW002`` and return
+          ``None`` so the caller falls back to identity.
+        """
         if not node.args:
             return None
-        arg = node.args[0]
-        if isinstance(arg, ast.Attribute) and arg.attr == "validate":
-            if isinstance(arg.value, ast.Name):
-                return self.schema_registry.to_frame_type(arg.value.id)
+        callable_arg = node.args[0]
+
+        # 1) Schema.validate
+        if isinstance(callable_arg, ast.Attribute) and callable_arg.attr == "validate":
+            if isinstance(callable_arg.value, ast.Name):
+                return self.schema_registry.to_frame_type(callable_arg.value.id)
+
+        # 2) registry helper — synthesise a function call
+        if isinstance(callable_arg, ast.Name):
+            func_info = self.registry.get(callable_arg.id)
+            if func_info is not None:
+                synthesized = ast.Call(
+                    func=ast.Name(id=callable_arg.id, ctx=ast.Load()),
+                    args=[node.func.value, *node.args[1:]]  # type: ignore[union-attr]
+                    if isinstance(node.func, ast.Attribute)
+                    else list(node.args[1:]),
+                    keywords=list(node.keywords),
+                )
+                ast.copy_location(synthesized, node)
+                ast.copy_location(synthesized.func, node)
+                return self._infer_function_call_type(synthesized)
+            # Unknown name — likely an external import. Warn.
+            self.warnings.append(
+                tag(
+                    PLW002,
+                    f"pipe: callable '{callable_arg.id}' is not annotated or not "
+                    f"in this module; treating as identity. To make polypolarism "
+                    f"check it, define '{callable_arg.id}' here with a "
+                    f"DataFrame[Schema] return annotation, or call it directly.",
+                )
+            )
+            return receiver_type
+
+        # 3) lambda / arbitrary expression — uninferable.
+        if isinstance(callable_arg, ast.Lambda):
+            self.warnings.append(
+                tag(
+                    PLW004,
+                    "pipe: a lambda was passed as the callable; polypolarism cannot "
+                    "infer its return type. Promote the lambda to a top-level "
+                    "function with a DataFrame[Schema] return annotation.",
+                )
+            )
+            return receiver_type
+
         return None
 
     def _infer_function_call_type(self, node: ast.Call) -> FrameType | None:
@@ -1207,7 +1350,22 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         func_info = self.registry.get(func_name)
 
         if func_info is None:
-            # Unknown function - cannot infer
+            # Unknown function — likely imported from another module. We can't
+            # walk its body, so the return type is uninferable. Warn the user
+            # so they know the downstream type tracking will be lost here.
+            args_with_frame = any(
+                self._infer_expr_type(arg) is not None for arg in node.args
+            )
+            if args_with_frame:
+                self.warnings.append(
+                    tag(
+                        PLW003,
+                        f"call to '{func_name}': function isn't defined in this "
+                        f"module so polypolarism cannot infer its return type. "
+                        f"Define '{func_name}' here with a DataFrame[Schema] "
+                        f"return annotation, or inline the transformation.",
+                    )
+                )
             return None
 
         # Infer argument types
@@ -1265,10 +1423,15 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 if arg_type is not None:
                     input_types[arg.arg] = arg_type
 
-        # Analyze the function body
+        # Analyze the function body — warnings bubble up to the calling
+        # body analyzer so the user sees them on the outer function.
         errors: list[str] = []
         body_analyzer = FunctionBodyAnalyzer(
-            input_types, errors, self.registry, self.schema_registry
+            input_types,
+            errors,
+            self.registry,
+            self.schema_registry,
+            warnings=self.warnings,
         )
         for stmt in func_node.body:
             body_analyzer.visit(stmt)
@@ -1411,7 +1574,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 keys.insert(0, index_col)
 
         # Extract aggregation expressions
-        expr_analyzer = ExpressionAnalyzer(input_frame)
+        expr_analyzer = ExpressionAnalyzer(input_frame, warnings=self.warnings, registry=self.registry)
         agg_exprs: list[AggExpr] = []
         for arg in node.args:
             agg_expr = expr_analyzer.analyze_agg_expr(arg)
@@ -1428,7 +1591,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
 
     def _infer_select_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
         """Infer type of .select() call."""
-        expr_analyzer = ExpressionAnalyzer(input_frame)
+        expr_analyzer = ExpressionAnalyzer(input_frame, warnings=self.warnings, registry=self.registry)
         result_columns: dict[str, DataType] = {}
 
         for arg in node.args:
@@ -1454,7 +1617,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         # Start with all existing columns
         result_columns: dict[str, ColumnSpec | DataType] = dict(input_frame.columns)
 
-        expr_analyzer = ExpressionAnalyzer(input_frame)
+        expr_analyzer = ExpressionAnalyzer(input_frame, warnings=self.warnings, registry=self.registry)
 
         for arg in node.args:
             sel = _resolve_selector(arg, input_frame)
@@ -1730,7 +1893,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
 
     def _infer_filter_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
         """Identity-typed, but walk every predicate sub-expression to validate columns."""
-        expr_analyzer = ExpressionAnalyzer(input_frame)
+        expr_analyzer = ExpressionAnalyzer(input_frame, warnings=self.warnings, registry=self.registry)
         for arg in node.args:
             expr_analyzer.analyze_select_expr(arg)
         for kw in node.keywords:
@@ -1834,7 +1997,10 @@ def analyze_function(
         return None
 
     # Analyze function body with registry
-    body_analyzer = FunctionBodyAnalyzer(input_types, errors, registry, schema_registry)
+    warnings: list[str] = []
+    body_analyzer = FunctionBodyAnalyzer(
+        input_types, errors, registry, schema_registry, warnings=warnings
+    )
     for stmt in func_node.body:
         body_analyzer.visit(stmt)
 
@@ -1846,6 +2012,7 @@ def analyze_function(
         declared_return_type=declared_return,
         inferred_return_type=body_analyzer.return_type,
         errors=body_analyzer.errors,
+        warnings=body_analyzer.warnings,
     )
 
 

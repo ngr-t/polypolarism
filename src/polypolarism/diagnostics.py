@@ -28,6 +28,14 @@ PLY021 = "PLY021"  # explode: column missing or not List[T]
 PLY022 = "PLY022"  # unpivot: column missing / value dtype unification failure
 
 
+# Warnings (PLW###): inference is imprecise here, but the user can usually
+# fix it by adding a type annotation or an explicit dtype argument.
+PLW001 = "PLW001"  # map_elements / map_batches without ``return_dtype=`` keyword
+PLW002 = "PLW002"  # ``df.pipe(callable)`` where the callable can't be resolved
+PLW003 = "PLW003"  # function call to a name that isn't in the analysed module
+PLW004 = "PLW004"  # lambda / inline callable used where its return dtype is unknowable
+
+
 def tag(code: str, message: str) -> str:
     """Return ``"[CODE] message"``; idempotent if message is already tagged."""
     if message.startswith(f"[{code}]"):

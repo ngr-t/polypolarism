@@ -72,10 +72,17 @@ class CheckResult:
     function_name: str
     passed: bool
     errors: list[CheckError] = field(default_factory=list)
+    # Non-fatal advisories. ``passed`` ignores them — they exist to nudge
+    # the user toward source changes that would let polypolarism check the
+    # code precisely (e.g. adding ``return_dtype=`` to ``map_elements``).
+    warnings: list[str] = field(default_factory=list)
 
     def __repr__(self) -> str:
         status = "PASSED" if self.passed else "FAILED"
-        return f"CheckResult({self.function_name}: {status}, errors={len(self.errors)})"
+        return (
+            f"CheckResult({self.function_name}: {status}, "
+            f"errors={len(self.errors)}, warnings={len(self.warnings)})"
+        )
 
 
 def _get_base_type(dtype: DataType) -> DataType:
@@ -127,6 +134,7 @@ def check_function(analysis: FunctionAnalysis) -> CheckResult:
             function_name=analysis.name,
             passed=len(errors) == 0,
             errors=errors,
+            warnings=list(analysis.warnings),
         )
 
     if analysis.inferred_return_type is None:
@@ -135,6 +143,7 @@ def check_function(analysis: FunctionAnalysis) -> CheckResult:
             function_name=analysis.name,
             passed=False,
             errors=errors,
+            warnings=list(analysis.warnings),
         )
 
     declared = analysis.declared_return_type
@@ -165,6 +174,7 @@ def check_function(analysis: FunctionAnalysis) -> CheckResult:
         function_name=analysis.name,
         passed=len(errors) == 0,
         errors=errors,
+        warnings=list(analysis.warnings),
     )
 
 
