@@ -5,13 +5,16 @@ Static type checker for Polars DataFrames based on row polymorphism.
 ## Features
 
 - **Static type checking** for Polars DataFrame operations without running your code
-- **Schema annotation DSL**: `DF["{col: Type, ...}"]` for type hints
+- **Pandera schema declaration** with `pa.DataFrameModel` and `DataFrame[Schema]` annotations
+- **Validation-as-narrowing**: `Schema.validate(df)`, `df.pipe(Schema.validate)`, and `Schema.validate(lf).collect()` all narrow the static type downstream
 - **Operation support**: join, group_by, select, with_columns
 - **Error detection**:
   - Missing columns
   - Type mismatches in join keys
   - Invalid aggregation function applications
   - Declared vs inferred return type differences
+  - Strict-mode extra columns (`class Config: strict = True`)
+  - `Optional[T]` (column may be absent) vs `pa.Field(nullable=True)` (value may be null)
 
 ## Installation
 
@@ -33,15 +36,37 @@ pip install .
 
 ## Quick Start
 
-Annotate your DataFrame functions with the `DF` type:
+Declare schemas as Pandera `DataFrameModel` classes and annotate functions
+with `DataFrame[Schema]`:
 
 ```python
-from polypolarism import DF
+import polars as pl
+import pandera.polars as pa
+from pandera.typing.polars import DataFrame
+
+
+class Users(pa.DataFrameModel):
+    user_id: int
+    name: str
+
+
+class Orders(pa.DataFrameModel):
+    order_id: int
+    user_id: int
+    amount: pl.Float64
+
+
+class Joined(pa.DataFrameModel):
+    user_id: int
+    name: str
+    order_id: int
+    amount: pl.Float64
+
 
 def merge_users_orders(
-    users: DF["{user_id: Int64, name: Utf8}"],
-    orders: DF["{order_id: Int64, user_id: Int64, amount: Float64}"],
-) -> DF["{user_id: Int64, name: Utf8, order_id: Int64, amount: Float64}"]:
+    users: DataFrame[Users],
+    orders: DataFrame[Orders],
+) -> DataFrame[Joined]:
     return users.join(orders, on="user_id", how="inner")
 ```
 
@@ -51,36 +76,41 @@ Then run the type checker:
 polypolarism your_module.py
 ```
 
-## Schema DSL
+## Schema declaration
 
-The schema DSL uses a simple syntax to describe DataFrame types:
+Use Pandera class-based schemas. Field annotations accept Python builtins
+(`int`, `str`, `float`, `bool`), polars dtype classes (`pl.Int64`,
+`pl.Float64`, `pl.UInt32`, ...), `Optional[T]`, and
+`Annotated[pl.List, pl.Int64()]` / `Annotated[pl.Struct, {...}]` for
+nested types.
 
 ```python
-# Basic types
-DF["{id: Int64, name: Utf8, value: Float64}"]
+class Example(pa.DataFrameModel):
+    id: int                                          # required, non-null
+    name: str = pa.Field(nullable=True)              # required, may be null
+    age: Optional[int]                               # column may be absent
+    score: pl.Float64
+    tags: Annotated[pl.List, pl.Utf8()]
+    addr: Annotated[pl.Struct, {"city": pl.Utf8()}]
 
-# Nullable types (append ?)
-DF["{id: Int64, name: Utf8?}"]
-
-# List types
-DF["{tags: List[Utf8]}"]
-
-# Struct types
-DF["{address: Struct{city: Utf8, zip: Int64}}"]
+    class Config:
+        strict = True   # reject any column not listed above
 ```
 
-### Supported Types
+### Validation as type narrowing
 
-| Type | Description |
-|------|-------------|
-| `Int64`, `Int32` | Integer types |
-| `UInt64`, `UInt32` | Unsigned integer types |
-| `Float64`, `Float32` | Floating point types |
-| `Utf8` | String type |
-| `Boolean` | Boolean type |
-| `Date`, `Datetime` | Temporal types |
-| `List[T]` | List of type T |
-| `Struct{...}` | Struct with named fields |
+Any of the following bind a downstream variable's type to the schema:
+
+```python
+df2 = Schema.validate(df)            # assignment-bound LHS
+Schema.validate(df)                  # bare statement narrows df
+df.pipe(Schema.validate)             # pipe chain
+Schema.validate(lf).collect()        # LazyFrame -> DataFrame
+```
+
+Bare-statement narrowing only fires at the function body's top level;
+narrowing inside `if`/`for`/`while`/`try`/`with` is intentionally out of
+scope.
 
 ## CLI Usage
 
@@ -90,6 +120,9 @@ polypolarism path/to/file.py
 
 # Check a directory
 polypolarism path/to/project/
+
+# JSON output (e.g. for editor integrations)
+polypolarism --format json path/to/file.py
 
 # Show version
 polypolarism --version
@@ -123,14 +156,6 @@ For invalid code:
 
 ### Join
 
-```python
-def merge(
-    left: DF["{id: Int64, value: Utf8}"],
-    right: DF["{id: Int64, score: Float64}"],
-) -> DF["{id: Int64, value: Utf8, score: Float64}"]:
-    return left.join(right, on="id", how="inner")
-```
-
 - Supported join types: `inner`, `left`, `right`, `full`
 - Left join makes right columns nullable
 - Right join makes left columns nullable
@@ -138,58 +163,23 @@ def merge(
 
 ### Group By + Aggregation
 
-```python
-import polars as pl
+Supported aggregation functions: `sum`, `mean`, `min`, `max`, `count`,
+`n_unique`, `first`, `last`, `list`.
 
-def summarize(
-    data: DF["{category: Utf8, amount: Float64}"],
-) -> DF["{category: Utf8, total: Float64, count: UInt32}"]:
-    return data.group_by("category").agg(
-        pl.col("amount").sum().alias("total"),
-        pl.col("amount").count().alias("count"),
-    )
-```
+### Select / With Columns
 
-Supported aggregation functions:
-- `sum`, `mean`, `min`, `max`
-- `count`, `n_unique`
-- `first`, `last`
-- `list`
-
-### Select
-
-```python
-def select_cols(
-    data: DF["{id: Int64, name: Utf8, value: Float64}"],
-) -> DF["{id: Int64, value: Float64}"]:
-    return data.select(pl.col("id"), pl.col("value"))
-```
-
-### With Columns
-
-```python
-def add_doubled(
-    data: DF["{id: Int64, value: Float64}"],
-) -> DF["{id: Int64, value: Float64, doubled: Float64}"]:
-    return data.with_columns(
-        (pl.col("value") * 2).alias("doubled"),
-    )
-```
+`select` and `with_columns` are recognised; column dtypes flow through
+literal expressions, `pl.col(...)` references, arithmetic, and
+`.alias(...)`.
 
 ## Development
 
 ```bash
-# Clone the repository
 git clone https://github.com/ngr-t/polypolarism.git
 cd polypolarism
 
-# Install with uv
 uv sync --dev
-
-# Run tests
 uv run pytest
-
-# Run tests with coverage
 uv run pytest --cov
 ```
 

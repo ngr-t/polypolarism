@@ -28,15 +28,17 @@ uv build
 
 ```
 src/polypolarism/
-├── types.py        # DataType, FrameType definitions
-├── dsl.py          # Schema DSL parser: DF["{col: Type}"]
-├── expr_infer.py   # Expression type inference
+├── types.py               # DataType, ColumnSpec, FrameType definitions
+├── pandera_dtype.py       # AST type expression -> ColumnSpec translator
+├── pandera_schema.py      # Pandera DataFrameModel class registry
+├── pandera_annotation.py  # DataFrame[Schema] annotation detection
+├── expr_infer.py          # Expression type inference
 ├── ops/
-│   ├── join.py     # Join operation type inference
-│   └── groupby.py  # GroupBy/Agg type inference
-├── analyzer.py     # AST analysis, data flow tracking
-├── checker.py      # Declared vs inferred type comparison
-└── cli.py          # Command-line interface
+│   ├── join.py            # Join operation type inference
+│   └── groupby.py         # GroupBy/Agg type inference
+├── analyzer.py            # AST analysis, data flow tracking, validate-narrowing
+├── checker.py             # Declared vs inferred type comparison
+└── cli.py                 # Command-line interface
 ```
 
 ## Development Notes
@@ -51,15 +53,17 @@ This project follows TDD (t-wada style):
 
 ### Key Design Decisions
 
-- **Nullable subtyping**: `T` is a subtype of `Nullable[T]`, but `Nullable[T]` is NOT a subtype of `T`
-- **Join nullability**: left join makes right columns nullable, right join makes left columns nullable
-- **AST analysis**: Method chains are analyzed by recursively inferring receiver types
+- **Schema declaration**: Pandera class-based `pa.DataFrameModel` with `DataFrame[Schema]` / `LazyFrame[Schema]` annotations. The legacy `DF["{...}"]` DSL has been removed.
+- **Nullable subtyping**: `T` is a subtype of `Nullable[T]`, but `Nullable[T]` is NOT a subtype of `T`. Value nullability is encoded by wrapping a column's dtype in `Nullable(...)` (declared via `pa.Field(nullable=True)`).
+- **Optional columns**: A column declared `Optional[T]` carries `ColumnSpec(dtype=T, required=False)` and is allowed to be absent in the inferred frame. An inferred optional cannot satisfy a required declared slot.
+- **Strict schemas**: `class Config: strict = True` rejects extra columns at every position the schema is the "expected" side. Default (non-strict) allows structural subtyping.
+- **Validation as narrowing**: `Schema.validate(df)`, `df.pipe(Schema.validate)`, `Schema.validate(lf).collect()` all retype the downstream variable. Bare-statement narrowing only fires at the function body's top level.
+- **Join nullability**: left join makes right columns nullable, right join makes left columns nullable, full join makes both sides nullable.
+- **AST analysis**: Method chains are analyzed by recursively inferring receiver types.
 
 ### Gotchas / Lessons Learned
 
-1. **DSL Parser whitespace**: The schema DSL `{col: Type}` allows flexible whitespace. Parser uses recursive descent.
-
-2. **AST method chains**: When analyzing `df.join(...).group_by(...).agg(...)`, need to handle `.agg()` specially because it follows `.group_by()` which doesn't return a FrameType directly.
+1. **AST method chains**: When analyzing `df.join(...).group_by(...).agg(...)`, need to handle `.agg()` specially because it follows `.group_by()` which doesn't return a FrameType directly.
 
 3. **Git worktree for parallel work**: Can use `git worktree add` to create parallel working directories for subagents. Remember to clean up with `git worktree remove`.
 
@@ -78,7 +82,7 @@ This project follows TDD (t-wada style):
 - Test fixtures in `tests/fixtures/valid/` and `tests/fixtures/invalid/`
 - Valid fixtures should pass type checking
 - Invalid fixtures should fail with specific errors
-- 211 tests total as of Phase 4 completion
+- 265 tests total after Pandera migration
 
 ## Git Conventions
 

@@ -33,7 +33,7 @@ class AnalysisError(Exception):
 
 @dataclass
 class FunctionSignature:
-    """Type signature for a DF-annotated function."""
+    """Type signature for a function with ``DataFrame[Schema]`` annotations."""
 
     name: str
     parameters: dict[str, tuple[int, FrameType]]  # param_name -> (position, type)
@@ -389,7 +389,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         """Handle annotated assignments like: df: DataFrame[Schema] = expr."""
         if isinstance(node.target, ast.Name):
             var_name = node.target.id
-            # Try to get type from annotation (Pandera or DSL)
+            # Try to get type from a Pandera DataFrame[Schema] annotation
             frame_type, _ = _resolve_declared_type(node.annotation, self.schema_registry)
             if frame_type is not None:
                 self.var_types[var_name] = frame_type
@@ -775,7 +775,8 @@ def analyze_source(source: str) -> list[FunctionAnalysis]:
         source: Python source code as a string
 
     Returns:
-        List of FunctionAnalysis results for functions with DF annotations
+        List of FunctionAnalysis results for functions with
+        ``DataFrame[Schema]`` / ``LazyFrame[Schema]`` annotations
     """
     tree = ast.parse(source)
 

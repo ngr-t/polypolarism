@@ -23,7 +23,7 @@ def check_file(file_path: Path) -> list[CheckResult]:
         file_path: Path to the Python file
 
     Returns:
-        List of CheckResult for each function with DF annotations
+        List of CheckResult for each function with DataFrame[Schema] annotations
 
     Raises:
         FileNotFoundError: If the file does not exist
@@ -83,7 +83,7 @@ def format_results(
         function_lines = {}
 
     if not results:
-        return "No functions with DF annotations found.\n"
+        return "No functions with DataFrame[Schema] annotations found.\n"
 
     lines: list[str] = []
     passed_count = sum(1 for r in results if r.passed)

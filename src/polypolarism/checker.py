@@ -172,13 +172,13 @@ def check_function(analysis: FunctionAnalysis) -> CheckResult:
 
 def check_source(source: str) -> list[CheckResult]:
     """
-    Check all functions with DF annotations in source code.
+    Check all functions with ``DataFrame[Schema]`` annotations in source code.
 
     Args:
         source: Python source code as a string
 
     Returns:
-        List of CheckResult for each function with DF annotations
+        List of CheckResult for each function with DataFrame[Schema] annotations
     """
     analyses = analyze_source(source)
     return [check_function(analysis) for analysis in analyses]
