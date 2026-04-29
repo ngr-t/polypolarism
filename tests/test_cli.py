@@ -1,12 +1,12 @@
 """Tests for CLI."""
 
-import pytest
 import subprocess
 import sys
 from pathlib import Path
 
-from polypolarism.cli import main, check_file, check_directory, format_results
+import pytest
 
+from polypolarism.cli import check_directory, check_file, format_results, main
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -93,10 +93,10 @@ class TestFormatResults:
 
     def test_format_failed_result_with_errors(self):
         """Format a failed check result with errors."""
-        from polypolarism.checker import CheckResult, MissingColumn
+        from polypolarism.checker import CheckError, CheckResult, MissingColumn
         from polypolarism.types import Utf8
 
-        errors = [MissingColumn("name", Utf8())]
+        errors: list[CheckError] = [MissingColumn("name", Utf8())]
         result = CheckResult(function_name="bad_func", passed=False, errors=errors)
         output = format_results([result])
 
@@ -124,7 +124,7 @@ class TestMainExitCode:
         """CLI exits with 0 when all checks pass."""
         # Create a valid test file
         test_file = tmp_path / "valid.py"
-        test_file.write_text('''
+        test_file.write_text("""
 import pandera.polars as pa
 from pandera.typing.polars import DataFrame
 
@@ -133,7 +133,7 @@ class IdSchema(pa.DataFrameModel):
 
 def identity(data: DataFrame[IdSchema]) -> DataFrame[IdSchema]:
     return data
-''')
+""")
         monkeypatch.setattr(sys, "argv", ["polypolarism", str(test_file)])
 
         exit_code = main()
@@ -143,7 +143,7 @@ def identity(data: DataFrame[IdSchema]) -> DataFrame[IdSchema]:
         """CLI exits with non-zero when checks fail."""
         # Create an invalid test file
         test_file = tmp_path / "invalid.py"
-        test_file.write_text('''
+        test_file.write_text("""
 import pandera.polars as pa
 from pandera.typing.polars import DataFrame
 
@@ -156,7 +156,7 @@ class OutSchema(pa.DataFrameModel):
 
 def bad(data: DataFrame[InSchema]) -> DataFrame[OutSchema]:
     return data
-''')
+""")
         monkeypatch.setattr(sys, "argv", ["polypolarism", str(test_file)])
 
         exit_code = main()
@@ -225,7 +225,7 @@ class TestFormatOption:
         import json
 
         test_file = tmp_path / "test.py"
-        test_file.write_text('''
+        test_file.write_text("""
 import pandera.polars as pa
 from pandera.typing.polars import DataFrame
 
@@ -234,7 +234,7 @@ class IdSchema(pa.DataFrameModel):
 
 def identity(data: DataFrame[IdSchema]) -> DataFrame[IdSchema]:
     return data
-''')
+""")
 
         result = subprocess.run(
             [sys.executable, "-m", "polypolarism", "--format", "json", str(test_file)],
@@ -252,7 +252,7 @@ def identity(data: DataFrame[IdSchema]) -> DataFrame[IdSchema]:
         import json
 
         test_file = tmp_path / "test.py"
-        test_file.write_text('''
+        test_file.write_text("""
 import pandera.polars as pa
 from pandera.typing.polars import DataFrame
 
@@ -265,7 +265,7 @@ class OutSchema(pa.DataFrameModel):
 
 def bad(data: DataFrame[InSchema]) -> DataFrame[OutSchema]:
     return data
-''')
+""")
 
         result = subprocess.run(
             [sys.executable, "-m", "polypolarism", "--format", "json", str(test_file)],
@@ -281,7 +281,7 @@ def bad(data: DataFrame[InSchema]) -> DataFrame[OutSchema]:
     def test_format_text_is_default(self, tmp_path):
         """--format text is the default format."""
         test_file = tmp_path / "test.py"
-        test_file.write_text('''
+        test_file.write_text("""
 import pandera.polars as pa
 from pandera.typing.polars import DataFrame
 
@@ -290,7 +290,7 @@ class IdSchema(pa.DataFrameModel):
 
 def identity(data: DataFrame[IdSchema]) -> DataFrame[IdSchema]:
     return data
-''')
+""")
 
         result_default = subprocess.run(
             [sys.executable, "-m", "polypolarism", str(test_file)],
@@ -310,3 +310,175 @@ def identity(data: DataFrame[IdSchema]) -> DataFrame[IdSchema]:
         # Both should produce similar output (not JSON)
         assert "identity" in result_default.stdout
         assert "identity" in result_text.stdout
+
+
+# ---------------------------------------------------------------------------
+# Pre-commit-style invocation: callers pass an explicit list of file paths.
+# These tests lock the CLI's behaviour for that shape.
+# ---------------------------------------------------------------------------
+
+VALID_SOURCE = """
+import pandera.polars as pa
+from pandera.typing.polars import DataFrame
+
+class IdSchema(pa.DataFrameModel):
+    id: int
+
+def identity(data: DataFrame[IdSchema]) -> DataFrame[IdSchema]:
+    return data
+"""
+
+
+INVALID_SOURCE = """
+import pandera.polars as pa
+from pandera.typing.polars import DataFrame
+
+class InSchema(pa.DataFrameModel):
+    id: int
+
+class OutSchema(pa.DataFrameModel):
+    id: int
+    missing: str
+
+def bad(data: DataFrame[InSchema]) -> DataFrame[OutSchema]:
+    return data
+"""
+
+
+SYNTAX_ERROR_SOURCE = "def broken(:\n"
+
+
+class TestSyntaxErrorHandling:
+    """Files that fail to parse must be reported as failures, not silently skipped."""
+
+    def test_check_file_returns_failure_for_syntax_error(self, tmp_path):
+        broken = tmp_path / "broken.py"
+        broken.write_text(SYNTAX_ERROR_SOURCE)
+
+        results = check_file(broken)
+
+        assert len(results) == 1
+        assert results[0].passed is False
+        assert any("SyntaxError" in str(e) for e in results[0].errors)
+
+    def test_check_directory_includes_syntax_error_failures(self, tmp_path):
+        (tmp_path / "good.py").write_text(VALID_SOURCE)
+        (tmp_path / "broken.py").write_text(SYNTAX_ERROR_SOURCE)
+
+        results = check_directory(tmp_path)
+
+        assert any(not r.passed and "SyntaxError" in str(r.errors) for r in results), (
+            "directory scan must surface parse failures, not silently swallow them"
+        )
+
+    def test_main_exit_code_nonzero_when_syntax_error_in_directory(self, tmp_path, monkeypatch):
+        (tmp_path / "good.py").write_text(VALID_SOURCE)
+        (tmp_path / "broken.py").write_text(SYNTAX_ERROR_SOURCE)
+        monkeypatch.setattr(sys, "argv", ["polypolarism", str(tmp_path)])
+
+        assert main() != 0
+
+
+class TestMultiFileInvocation:
+    """pre-commit invokes the CLI as `polypolarism a.py b.py c.py ...`."""
+
+    def test_main_accepts_multiple_files(self, tmp_path, monkeypatch):
+        valid = tmp_path / "valid.py"
+        valid.write_text(VALID_SOURCE)
+        invalid = tmp_path / "invalid.py"
+        invalid.write_text(INVALID_SOURCE)
+
+        monkeypatch.setattr(sys, "argv", ["polypolarism", str(valid), str(invalid)])
+
+        assert main() != 0
+
+    def test_main_all_valid_multi_file_exits_zero(self, tmp_path, monkeypatch):
+        a = tmp_path / "a.py"
+        b = tmp_path / "b.py"
+        a.write_text(VALID_SOURCE)
+        b.write_text(VALID_SOURCE)
+
+        monkeypatch.setattr(sys, "argv", ["polypolarism", str(a), str(b)])
+
+        assert main() == 0
+
+    def test_cli_multi_file_text_output_lists_each_function(self, tmp_path):
+        valid = tmp_path / "valid.py"
+        valid.write_text(VALID_SOURCE)
+        invalid = tmp_path / "invalid.py"
+        invalid.write_text(INVALID_SOURCE)
+
+        result = subprocess.run(
+            [sys.executable, "-m", "polypolarism", str(valid), str(invalid)],
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode != 0
+        assert "identity" in result.stdout
+        assert "bad" in result.stdout
+
+    def test_cli_multi_file_json_attributes_diagnostics_per_file(self, tmp_path):
+        import json
+
+        good = tmp_path / "good.py"
+        good.write_text(VALID_SOURCE)
+        bad_a = tmp_path / "bad_a.py"
+        bad_a.write_text(INVALID_SOURCE)
+        bad_b = tmp_path / "bad_b.py"
+        bad_b.write_text(INVALID_SOURCE)
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "polypolarism",
+                "--format",
+                "json",
+                str(good),
+                str(bad_a),
+                str(bad_b),
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode != 0
+        data = json.loads(result.stdout)
+        assert "diagnostics" in data
+
+        files_in_output = {d["file"] for d in data["diagnostics"]}
+        # Every diagnostic should know which file produced it. The bad files
+        # should both appear; the good file should not generate diagnostics.
+        assert str(bad_a) in files_in_output
+        assert str(bad_b) in files_in_output
+        assert str(good) not in files_in_output
+
+    def test_cli_multi_file_json_includes_syntax_errors(self, tmp_path):
+        import json
+
+        valid = tmp_path / "valid.py"
+        valid.write_text(VALID_SOURCE)
+        broken = tmp_path / "broken.py"
+        broken.write_text(SYNTAX_ERROR_SOURCE)
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "polypolarism",
+                "--format",
+                "json",
+                str(valid),
+                str(broken),
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode != 0
+        data = json.loads(result.stdout)
+        assert any(
+            d.get("file") == str(broken) and "SyntaxError" in d["message"]
+            for d in data["diagnostics"]
+        )

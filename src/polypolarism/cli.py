@@ -5,25 +5,30 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import Optional
 
-from polypolarism.checker import check_source, CheckResult
 from polypolarism.analyzer import analyze_source
-from polypolarism.output import format_json
-
+from polypolarism.checker import CheckResult, check_source
+from polypolarism.output import FileResults, format_json, format_json_files
 
 __version__ = "0.1.0"
+
+
+def _parse_error_result(file_path: Path, err: Exception) -> CheckResult:
+    """Build a CheckResult representing a file-level read or parse failure."""
+    return CheckResult(
+        function_name=f"<{file_path}>",
+        passed=False,
+        errors=[f"{type(err).__name__}: {err}"],
+    )
 
 
 def check_file(file_path: Path) -> list[CheckResult]:
     """
     Check a single Python file for DataFrame type errors.
 
-    Args:
-        file_path: Path to the Python file
-
-    Returns:
-        List of CheckResult for each function with DataFrame[Schema] annotations
+    On read or parse failures, returns a single failing CheckResult instead of
+    raising or silently passing — so external callers (pre-commit, CI) cannot
+    miss a broken file.
 
     Raises:
         FileNotFoundError: If the file does not exist
@@ -31,19 +36,22 @@ def check_file(file_path: Path) -> list[CheckResult]:
     if not file_path.exists():
         raise FileNotFoundError(f"File not found: {file_path}")
 
-    source = file_path.read_text()
-    return check_source(source)
+    try:
+        source = file_path.read_text()
+    except (UnicodeDecodeError, OSError) as err:
+        return [_parse_error_result(file_path, err)]
+    try:
+        return check_source(source)
+    except SyntaxError as err:
+        return [_parse_error_result(file_path, err)]
 
 
 def check_directory(dir_path: Path) -> list[CheckResult]:
     """
     Check all Python files in a directory for DataFrame type errors.
 
-    Args:
-        dir_path: Path to the directory
-
-    Returns:
-        List of CheckResult for all functions in all files
+    Files that fail to read or parse contribute a synthetic failing
+    CheckResult rather than being silently skipped.
 
     Raises:
         FileNotFoundError: If the directory does not exist
@@ -52,33 +60,17 @@ def check_directory(dir_path: Path) -> list[CheckResult]:
         raise FileNotFoundError(f"Directory not found: {dir_path}")
 
     results: list[CheckResult] = []
-    for py_file in dir_path.glob("**/*.py"):
-        try:
-            file_results = check_file(py_file)
-            results.extend(file_results)
-        except Exception:
-            # Skip files that can't be parsed
-            pass
-
+    for py_file in sorted(dir_path.glob("**/*.py")):
+        results.extend(check_file(py_file))
     return results
 
 
 def format_results(
     results: list[CheckResult],
     verbose: bool = False,
-    function_lines: Optional[dict[str, int]] = None,
+    function_lines: dict[str, int] | None = None,
 ) -> str:
-    """
-    Format check results for display.
-
-    Args:
-        results: List of check results
-        verbose: If True, show more details
-        function_lines: Optional mapping of function name to line number
-
-    Returns:
-        Formatted string for output
-    """
+    """Format check results for human-readable display."""
     if function_lines is None:
         function_lines = {}
 
@@ -90,10 +82,7 @@ def format_results(
     failed_count = len(results) - passed_count
 
     for result in results:
-        if result.passed:
-            status = "\033[32mOK\033[0m"  # Green
-        else:
-            status = "\033[31mFAIL\033[0m"  # Red
+        status = "\033[32mOK\033[0m" if result.passed else "\033[31mFAIL\033[0m"
 
         lineno = function_lines.get(result.function_name)
         if lineno is not None:
@@ -105,14 +94,11 @@ def format_results(
             for error in result.errors:
                 lines.append(f"    - {error}")
 
-    # Summary
     lines.append("")
     if failed_count == 0:
         lines.append(f"\033[32mAll {passed_count} function(s) passed.\033[0m")
     else:
-        lines.append(
-            f"\033[31m{failed_count} function(s) failed, {passed_count} passed.\033[0m"
-        )
+        lines.append(f"\033[31m{failed_count} function(s) failed, {passed_count} passed.\033[0m")
 
     return "\n".join(lines)
 
@@ -158,29 +144,43 @@ def _check_file_with_locations(
     file_path: Path,
 ) -> tuple[list[CheckResult], dict[str, int], dict[str, int]]:
     """
-    Check a file and return results with function line numbers.
+    Check a file and return results plus per-function source line numbers.
 
-    Returns:
-        Tuple of (results, function_lines mapping, function_end_lines mapping)
+    On read or parse failures, returns a single failing CheckResult and empty
+    line-number maps. Never raises for those cases.
     """
-    source = file_path.read_text()
-    analyses = analyze_source(source)
-    results = check_source(source)
+    try:
+        source = file_path.read_text()
+    except (UnicodeDecodeError, OSError) as err:
+        return [_parse_error_result(file_path, err)], {}, {}
+    try:
+        analyses = analyze_source(source)
+        results = check_source(source)
+    except SyntaxError as err:
+        return [_parse_error_result(file_path, err)], {}, {}
     function_lines = {a.name: a.lineno for a in analyses}
     function_end_lines = {a.name: a.end_lineno for a in analyses}
     return results, function_lines, function_end_lines
 
 
-def main(args: Optional[list[str]] = None) -> int:
-    """
-    Entry point for the CLI.
+def _expand_directory_groups(dir_path: Path) -> list[FileResults]:
+    """Per-file FileResults for every .py under dir_path."""
+    groups: list[FileResults] = []
+    for py_file in sorted(dir_path.glob("**/*.py")):
+        results, function_lines, function_end_lines = _check_file_with_locations(py_file)
+        groups.append(
+            FileResults(
+                file_path=str(py_file),
+                results=results,
+                function_lines=function_lines,
+                function_end_lines=function_end_lines,
+            )
+        )
+    return groups
 
-    Args:
-        args: Command line arguments (defaults to sys.argv[1:])
 
-    Returns:
-        Exit code (0 for success, 1 for errors)
-    """
+def main(args: list[str] | None = None) -> int:
+    """Entry point for the CLI. Returns 0 on success, 1 on any failure."""
     parser = create_parser()
     parsed = parser.parse_args(args)
 
@@ -188,10 +188,7 @@ def main(args: Optional[list[str]] = None) -> int:
         parser.print_help()
         return 0
 
-    all_results: list[CheckResult] = []
-    all_function_lines: dict[str, int] = {}
-    all_function_end_lines: dict[str, int] = {}
-    current_file: Optional[Path] = None
+    file_groups: list[FileResults] = []
 
     for path in parsed.paths:
         if not path.exists():
@@ -199,41 +196,46 @@ def main(args: Optional[list[str]] = None) -> int:
             return 1
 
         if path.is_file():
-            try:
-                results, function_lines, function_end_lines = _check_file_with_locations(path)
-                all_results.extend(results)
-                all_function_lines.update(function_lines)
-                all_function_end_lines.update(function_end_lines)
-                current_file = path
-            except Exception as e:
-                print(f"Error checking {path}: {e}", file=sys.stderr)
-                return 1
+            results, function_lines, function_end_lines = _check_file_with_locations(path)
+            file_groups.append(
+                FileResults(
+                    file_path=str(path),
+                    results=results,
+                    function_lines=function_lines,
+                    function_end_lines=function_end_lines,
+                )
+            )
         elif path.is_dir():
-            try:
-                results = check_directory(path)
-                all_results.extend(results)
-            except Exception as e:
-                print(f"Error checking {path}: {e}", file=sys.stderr)
-                return 1
+            file_groups.extend(_expand_directory_groups(path))
 
-    # Format output based on --format option
+    all_results: list[CheckResult] = []
+    all_function_lines: dict[str, int] = {}
+    for group in file_groups:
+        all_results.extend(group.results)
+        all_function_lines.update(group.function_lines)
+
     if parsed.format == "json":
-        file_path_str = str(current_file) if current_file else "unknown"
-        output = format_json(
-            all_results, file_path_str, all_function_lines, all_function_end_lines
-        )
+        if len(file_groups) == 1:
+            single = file_groups[0]
+            output = format_json(
+                single.results,
+                single.file_path,
+                single.function_lines,
+                single.function_end_lines,
+            )
+        else:
+            output = format_json_files(file_groups)
     else:
         output = format_results(
             all_results, verbose=parsed.verbose, function_lines=all_function_lines
         )
-        # Strip color codes if requested
         if parsed.no_color:
             import re
+
             output = re.sub(r"\033\[[0-9;]*m", "", output)
 
     print(output)
 
-    # Return non-zero if any check failed
     if any(not r.passed for r in all_results):
         return 1
 
