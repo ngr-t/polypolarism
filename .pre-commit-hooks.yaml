@@ -1,0 +1,7 @@
+- id: polypolarism
+  name: polypolarism
+  description: Static type checker for Polars DataFrames based on row polymorphism.
+  entry: polypolarism
+  language: python
+  types: [python]
+  require_serial: false

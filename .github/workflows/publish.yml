@@ -1,0 +1,48 @@
+name: Publish to PyPI
+
+# Triggered manually from the Actions tab, or automatically when a v*.*.* tag
+# is pushed. Uses PyPI Trusted Publishing (OIDC) — no API token in repo
+# secrets. Requires a "pending publisher" or active publisher entry on PyPI
+# pointing at this workflow before the first run can succeed.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Build sdist and wheel
+        run: uv build
+
+      - name: Upload distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/polypolarism
+    permissions:
+      id-token: write  # required for Trusted Publishing
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
