@@ -106,16 +106,25 @@ def _is_frame_subtype(actual: FrameType, expected: FrameType) -> bool:
     """Check if actual FrameType is subtype of expected.
 
     Rules:
-    - actual must have all columns that expected has
-    - Each column type must be a subtype
-    - actual may have extra columns (structural subtyping)
+    - actual must contain every required column expected has
+    - For columns present on both sides, the actual dtype must be a subtype
+      and an actual optional column cannot satisfy a required expected column
+    - actual may have extra columns unless ``expected.strict`` is True
     """
     for col_name, expected_spec in expected.columns.items():
-        if col_name not in actual.columns:
+        actual_spec = actual.columns.get(col_name)
+        if actual_spec is None:
+            if expected_spec.required:
+                return False
+            continue
+        if expected_spec.required and not actual_spec.required:
             return False
-        actual_type = actual.columns[col_name].dtype
-        if not _is_column_subtype(actual_type, expected_spec.dtype):
+        if not _is_column_subtype(actual_spec.dtype, expected_spec.dtype):
             return False
+    if expected.strict:
+        for col_name in actual.columns:
+            if col_name not in expected.columns:
+                return False
     return True
 
 

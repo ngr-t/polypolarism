@@ -94,10 +94,29 @@ class TestCheckMissingColumn:
 
 
 class TestCheckExtraColumn:
-    """Test detection of extra columns."""
+    """Test detection of extra columns under strict mode."""
 
-    def test_detects_extra_column(self):
-        """Detect when inferred type has column not in declared type."""
+    def test_detects_extra_column_when_strict(self):
+        """Strict declared type: inferred extras are reported."""
+        analysis = FunctionAnalysis(
+            name="process",
+            lineno=1,
+            end_lineno=1,
+            input_types={"data": FrameType({"id": Int64(), "name": Utf8()})},
+            declared_return_type=FrameType({"id": Int64()}, strict=True),
+            inferred_return_type=FrameType({"id": Int64(), "name": Utf8()}),
+            errors=[],
+        )
+
+        result = check_function(analysis)
+
+        assert result.passed is False
+        assert any(isinstance(e, ExtraColumn) for e in result.errors)
+        extra_errors = [e for e in result.errors if isinstance(e, ExtraColumn)]
+        assert any(e.column == "name" for e in extra_errors)
+
+    def test_no_error_when_not_strict(self):
+        """Non-strict (default) declared type: extras are tolerated (structural subtyping)."""
         analysis = FunctionAnalysis(
             name="process",
             lineno=1,
@@ -110,10 +129,7 @@ class TestCheckExtraColumn:
 
         result = check_function(analysis)
 
-        assert result.passed is False
-        assert any(isinstance(e, ExtraColumn) for e in result.errors)
-        extra_errors = [e for e in result.errors if isinstance(e, ExtraColumn)]
-        assert any(e.column == "name" for e in extra_errors)
+        assert result.passed is True
 
     def test_extra_column_error_message(self):
         """Extra column error has helpful message."""

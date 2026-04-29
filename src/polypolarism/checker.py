@@ -140,24 +140,28 @@ def check_function(analysis: FunctionAnalysis) -> CheckResult:
     declared = analysis.declared_return_type
     inferred = analysis.inferred_return_type
 
-    # Check for missing columns (in declared but not in inferred)
-    for col_name, col_spec in declared.columns.items():
-        if col_name not in inferred.columns:
-            errors.append(MissingColumn(col_name, col_spec.dtype))
+    # Required/optional + dtype check for declared columns
+    for col_name, declared_spec in declared.columns.items():
+        inferred_spec = inferred.columns.get(col_name)
+        if inferred_spec is None:
+            if declared_spec.required:
+                errors.append(MissingColumn(col_name, declared_spec.dtype))
+            continue
+        # Inferred frame may have the column as optional (may be absent);
+        # if declared expects it always-present, that's a mismatch.
+        if declared_spec.required and not inferred_spec.required:
+            errors.append(MissingColumn(col_name, declared_spec.dtype))
+            continue
+        if not _is_subtype(inferred_spec.dtype, declared_spec.dtype):
+            errors.append(
+                TypeDifference(col_name, declared_spec.dtype, inferred_spec.dtype)
+            )
 
-    # Check for extra columns (in inferred but not in declared)
-    for col_name, col_spec in inferred.columns.items():
-        if col_name not in declared.columns:
-            errors.append(ExtraColumn(col_name, col_spec.dtype))
-
-    # Check for type differences in common columns
-    for col_name in declared.columns:
-        if col_name in inferred.columns:
-            declared_type = declared.columns[col_name].dtype
-            inferred_type = inferred.columns[col_name].dtype
-
-            if not _is_subtype(inferred_type, declared_type):
-                errors.append(TypeDifference(col_name, declared_type, inferred_type))
+    # Extra columns (only flagged for strict declared schemas)
+    if declared.strict:
+        for col_name, inferred_spec in inferred.columns.items():
+            if col_name not in declared.columns:
+                errors.append(ExtraColumn(col_name, inferred_spec.dtype))
 
     return CheckResult(
         function_name=analysis.name,
