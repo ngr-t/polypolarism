@@ -346,11 +346,68 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         # Track variable -> FrameType mapping
         self.var_types: dict[str, FrameType] = dict(input_types)
         self.return_type: Optional[FrameType] = None
+        # Bare ``Schema.validate(df)`` narrowing only fires at the function's
+        # top level. We toggle this off when descending into if/for/while/try.
+        self._narrowing_enabled = True
+
+    def _visit_with_narrowing_disabled(self, node: ast.AST) -> None:
+        prev = self._narrowing_enabled
+        self._narrowing_enabled = False
+        try:
+            self.generic_visit(node)
+        finally:
+            self._narrowing_enabled = prev
+
+    def visit_If(self, node: ast.If) -> None:
+        self._visit_with_narrowing_disabled(node)
+
+    def visit_For(self, node: ast.For) -> None:
+        self._visit_with_narrowing_disabled(node)
+
+    def visit_AsyncFor(self, node: ast.AsyncFor) -> None:
+        self._visit_with_narrowing_disabled(node)
+
+    def visit_While(self, node: ast.While) -> None:
+        self._visit_with_narrowing_disabled(node)
+
+    def visit_Try(self, node: ast.Try) -> None:
+        self._visit_with_narrowing_disabled(node)
+
+    def visit_With(self, node: ast.With) -> None:
+        self._visit_with_narrowing_disabled(node)
+
+    def visit_AsyncWith(self, node: ast.AsyncWith) -> None:
+        self._visit_with_narrowing_disabled(node)
 
     def visit_Return(self, node: ast.Return) -> None:
         """Handle return statements."""
         if node.value:
             self.return_type = self._infer_expr_type(node.value)
+
+    def visit_Expr(self, node: ast.Expr) -> None:
+        """Bare expression statement; recognise ``Schema.validate(df)`` as narrowing.
+
+        Narrowing only fires at the function body's top level; visits inside
+        if/for/while/try/with disable it via the ``_narrowing_enabled`` flag.
+        """
+        if not self._narrowing_enabled:
+            return
+        if not isinstance(node.value, ast.Call):
+            return
+        call = node.value
+        if not isinstance(call.func, ast.Attribute):
+            return
+        if call.func.attr != "validate":
+            return
+        schema_node = call.func.value
+        if not isinstance(schema_node, ast.Name):
+            return
+        schema_ft = self.schema_registry.to_frame_type(schema_node.id)
+        if schema_ft is None or not call.args:
+            return
+        arg = call.args[0]
+        if isinstance(arg, ast.Name) and arg.id in self.var_types:
+            self.var_types[arg.id] = schema_ft
 
     def visit_Assign(self, node: ast.Assign) -> None:
         """Handle variable assignments."""
@@ -400,6 +457,23 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             method_name = node.func.attr
             receiver = node.func.value
 
+            # Pandera narrowing: Schema.validate(df) -> Schema's FrameType
+            if method_name == "validate":
+                schema_ft = self._infer_validate_call(node)
+                if schema_ft is not None:
+                    return schema_ft
+
+            # df.pipe(Schema.validate) -> Schema's FrameType; otherwise pipe is identity-typed
+            if method_name == "pipe":
+                piped = self._infer_pipe_call(node)
+                if piped is not None:
+                    return piped
+                return self._infer_expr_type(receiver)
+
+            # LazyFrame.collect() is identity for our static type system
+            if method_name == "collect":
+                return self._infer_expr_type(receiver)
+
             # Handle .agg() call (comes after .group_by())
             if method_name == "agg":
                 return self._infer_agg_call(receiver, node)
@@ -418,6 +492,25 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 elif method_name == "with_columns":
                     return self._infer_with_columns_call(receiver_type, node)
 
+        return None
+
+    def _infer_validate_call(self, node: ast.Call) -> Optional[FrameType]:
+        """Resolve ``Schema.validate(df)`` to the schema's FrameType."""
+        if not isinstance(node.func, ast.Attribute):
+            return None
+        schema_node = node.func.value
+        if not isinstance(schema_node, ast.Name):
+            return None
+        return self.schema_registry.to_frame_type(schema_node.id)
+
+    def _infer_pipe_call(self, node: ast.Call) -> Optional[FrameType]:
+        """Resolve ``df.pipe(Schema.validate)`` to the schema's FrameType."""
+        if not node.args:
+            return None
+        arg = node.args[0]
+        if isinstance(arg, ast.Attribute) and arg.attr == "validate":
+            if isinstance(arg.value, ast.Name):
+                return self.schema_registry.to_frame_type(arg.value.id)
         return None
 
     def _infer_function_call_type(self, node: ast.Call) -> Optional[FrameType]:
