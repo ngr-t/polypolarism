@@ -6,6 +6,7 @@ import textwrap
 from polypolarism.types import (
     FrameType,
     Int64,
+    Int32,
     Float64,
     Utf8,
     UInt32,
@@ -440,6 +441,281 @@ class TestAnalyzeWithColumn:
             "doubled": Float64(),
         })
         assert results[0].inferred_return_type == expected
+
+
+class TestM1IdentityMethods:
+    """Schema-preserving (identity-typed) DataFrame methods added in M1."""
+
+    @pytest.mark.parametrize(
+        "method_call",
+        [
+            'filter(pl.col("id") > 0)',
+            'sort("id")',
+            'head(10)',
+            'tail(5)',
+            'limit(100)',
+            'slice(0, 10)',
+            'reverse()',
+            'sample(n=3)',
+            'unique()',
+            'clone()',
+            'lazy()',
+            'set_sorted("id")',
+        ],
+    )
+    def test_identity_method_preserves_schema(self, method_call: str):
+        source = textwrap.dedent(PANDERA_HEADER + f'''
+            class S(pa.DataFrameModel):
+                id: int
+                value: pl.Float64
+
+            def keep(data: DataFrame[S]) -> DataFrame[S]:
+                return data.{method_call}
+        ''')
+        results = analyze_source(source)
+        assert results[0].has_errors is False
+        assert results[0].inferred_return_type == FrameType({
+            "id": Int64(),
+            "value": Float64(),
+        })
+
+    def test_filter_chains_with_other_methods(self):
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class S(pa.DataFrameModel):
+                id: int
+                value: pl.Float64
+
+            def pick(data: DataFrame[S]) -> DataFrame[S]:
+                return data.filter(pl.col("id") > 0).head(10)
+        ''')
+        results = analyze_source(source)
+        assert results[0].has_errors is False
+
+
+class TestM1Drop:
+    def test_drop_single_column(self):
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class In(pa.DataFrameModel):
+                id: int
+                value: pl.Float64
+                name: str
+
+            class Out(pa.DataFrameModel):
+                id: int
+                value: pl.Float64
+
+            def f(data: DataFrame[In]) -> DataFrame[Out]:
+                return data.drop("name")
+        ''')
+        results = analyze_source(source)
+        assert results[0].has_errors is False
+        assert results[0].inferred_return_type == FrameType({
+            "id": Int64(),
+            "value": Float64(),
+        })
+
+    def test_drop_multiple_columns_via_list(self):
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class In(pa.DataFrameModel):
+                id: int
+                value: pl.Float64
+                name: str
+
+            class Out(pa.DataFrameModel):
+                id: int
+
+            def f(data: DataFrame[In]) -> DataFrame[Out]:
+                return data.drop(["name", "value"])
+        ''')
+        results = analyze_source(source)
+        assert results[0].has_errors is False
+        assert results[0].inferred_return_type == FrameType({"id": Int64()})
+
+    def test_drop_multiple_columns_via_varargs(self):
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class In(pa.DataFrameModel):
+                id: int
+                value: pl.Float64
+                name: str
+
+            class Out(pa.DataFrameModel):
+                id: int
+
+            def f(data: DataFrame[In]) -> DataFrame[Out]:
+                return data.drop("name", "value")
+        ''')
+        results = analyze_source(source)
+        assert results[0].has_errors is False
+        assert results[0].inferred_return_type == FrameType({"id": Int64()})
+
+    def test_drop_unknown_column_errors(self):
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class S(pa.DataFrameModel):
+                id: int
+
+            def f(data: DataFrame[S]) -> DataFrame[S]:
+                return data.drop("missing")
+        ''')
+        results = analyze_source(source)
+        assert results[0].has_errors is True
+        assert any("missing" in e for e in results[0].errors)
+
+
+class TestM1Rename:
+    def test_rename_mapping(self):
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class In(pa.DataFrameModel):
+                id: int
+                value: pl.Float64
+
+            class Out(pa.DataFrameModel):
+                user_id: int
+                amount: pl.Float64
+
+            def f(data: DataFrame[In]) -> DataFrame[Out]:
+                return data.rename({"id": "user_id", "value": "amount"})
+        ''')
+        results = analyze_source(source)
+        assert results[0].has_errors is False
+        assert results[0].inferred_return_type == FrameType({
+            "user_id": Int64(),
+            "amount": Float64(),
+        })
+
+    def test_rename_unknown_source_errors(self):
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class S(pa.DataFrameModel):
+                id: int
+
+            def f(data: DataFrame[S]) -> DataFrame[S]:
+                return data.rename({"nope": "x"})
+        ''')
+        results = analyze_source(source)
+        assert results[0].has_errors is True
+        assert any("nope" in e for e in results[0].errors)
+
+    def test_rename_preserves_nullability_and_required(self):
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class In(pa.DataFrameModel):
+                id: int = pa.Field(nullable=True)
+
+            def f(data: DataFrame[In]):
+                return data.rename({"id": "user_id"})
+        ''')
+        results = analyze_source(source)
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert "user_id" in ft.columns
+        spec = ft.columns["user_id"]
+        assert isinstance(spec.dtype, Nullable)
+
+
+class TestM1Cast:
+    def test_cast_dict_form(self):
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class In(pa.DataFrameModel):
+                id: int
+                value: pl.Float64
+
+            class Out(pa.DataFrameModel):
+                id: pl.Int32
+                value: pl.Float64
+
+            def f(data: DataFrame[In]) -> DataFrame[Out]:
+                return data.cast({"id": pl.Int32})
+        ''')
+        results = analyze_source(source)
+        assert results[0].has_errors is False
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["id"].dtype == Int32()
+        assert ft.columns["value"].dtype == Float64()
+
+    def test_cast_preserves_nullability(self):
+        from polypolarism.types import Int32 as _Int32
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class In(pa.DataFrameModel):
+                id: int = pa.Field(nullable=True)
+
+            def f(data: DataFrame[In]):
+                return data.cast({"id": pl.Int32})
+        ''')
+        results = analyze_source(source)
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["id"].dtype == Nullable(_Int32())
+
+    def test_cast_unknown_column_errors(self):
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class S(pa.DataFrameModel):
+                id: int
+
+            def f(data: DataFrame[S]) -> DataFrame[S]:
+                return data.cast({"missing": pl.Int32})
+        ''')
+        results = analyze_source(source)
+        assert results[0].has_errors is True
+
+
+class TestM1DropNulls:
+    def test_drop_nulls_strips_nullable_on_all(self):
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class S(pa.DataFrameModel):
+                id: int = pa.Field(nullable=True)
+                value: pl.Float64 = pa.Field(nullable=True)
+
+            def f(data: DataFrame[S]):
+                return data.drop_nulls()
+        ''')
+        results = analyze_source(source)
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["id"].dtype == Int64()
+        assert ft.columns["value"].dtype == Float64()
+
+    def test_drop_nulls_subset(self):
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class S(pa.DataFrameModel):
+                id: int = pa.Field(nullable=True)
+                value: pl.Float64 = pa.Field(nullable=True)
+
+            def f(data: DataFrame[S]):
+                return data.drop_nulls(subset=["id"])
+        ''')
+        results = analyze_source(source)
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["id"].dtype == Int64()
+        assert ft.columns["value"].dtype == Nullable(Float64())
+
+
+class TestM1WithRowIndex:
+    def test_with_row_index_default_name(self):
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class In(pa.DataFrameModel):
+                value: pl.Float64
+
+            def f(data: DataFrame[In]):
+                return data.with_row_index()
+        ''')
+        results = analyze_source(source)
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["index"].dtype == UInt32()
+        assert ft.columns["value"].dtype == Float64()
+
+    def test_with_row_index_custom_name(self):
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class In(pa.DataFrameModel):
+                value: pl.Float64
+
+            def f(data: DataFrame[In]):
+                return data.with_row_index(name="row_nr")
+        ''')
+        results = analyze_source(source)
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert "row_nr" in ft.columns
 
 
 class TestFunctionAnalysisDataClass:

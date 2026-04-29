@@ -6,7 +6,23 @@ import ast
 from dataclasses import dataclass, field
 from typing import Optional, TYPE_CHECKING
 
-from polypolarism.types import DataType, FrameType, Nullable
+from polypolarism.types import (
+    DataType,
+    FrameType,
+    Nullable,
+    ColumnSpec,
+    Int32,
+    Int64,
+    UInt32,
+    UInt64,
+    Float32,
+    Float64,
+    Utf8,
+    Boolean,
+    Date,
+    Datetime,
+    Duration,
+)
 from polypolarism.pandera_annotation import extract_dataframe_annotation
 from polypolarism.pandera_schema import SchemaRegistry, collect_schemas
 from polypolarism.ops.join import infer_join, JoinError
@@ -24,6 +40,94 @@ class AnalysisError(Exception):
     """Error during analysis."""
 
     pass
+
+
+# Methods whose return frame has the same schema as the receiver.
+# `lazy()` and `collect()` cross between DataFrame/LazyFrame, but in our
+# static type system both are identity. `set_sorted` mutates only metadata.
+_IDENTITY_FRAME_METHODS: frozenset[str] = frozenset({
+    "filter",
+    "sort",
+    "head",
+    "tail",
+    "limit",
+    "slice",
+    "reverse",
+    "sample",
+    "unique",
+    "clone",
+    "lazy",
+    "set_sorted",
+    "shrink_to_fit",
+    "rechunk",
+})
+
+
+# Map ``pl.<Name>`` attribute references and call expressions to our DataType.
+# Datetime/Duration with parameters are handled via Call form.
+_PL_DTYPE_NAME_MAP: dict[str, DataType] = {
+    "Int32": Int32(),
+    "Int64": Int64(),
+    "UInt32": UInt32(),
+    "UInt64": UInt64(),
+    "Float32": Float32(),
+    "Float64": Float64(),
+    "Utf8": Utf8(),
+    "String": Utf8(),  # polars 1.x alias
+    "Boolean": Boolean(),
+    "Date": Date(),
+    "Datetime": Datetime(),
+    "Duration": Duration(),
+}
+
+
+def _resolve_pl_dtype(node: ast.expr) -> Optional[DataType]:
+    """Resolve an AST node referring to a Polars dtype literal (``pl.Int32`` etc.)."""
+    # Bare ``pl.Int32``
+    if isinstance(node, ast.Attribute):
+        if isinstance(node.value, ast.Name) and node.value.id == "pl":
+            return _PL_DTYPE_NAME_MAP.get(node.attr)
+    # Parametric form like ``pl.Datetime("us", "UTC")`` — keep simple.
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+        if isinstance(node.func.value, ast.Name) and node.func.value.id == "pl":
+            base = _PL_DTYPE_NAME_MAP.get(node.func.attr)
+            if isinstance(base, Datetime):
+                tz: Optional[str] = None
+                if len(node.args) >= 2 and isinstance(node.args[1], ast.Constant):
+                    if isinstance(node.args[1].value, str):
+                        tz = node.args[1].value
+                for kw in node.keywords:
+                    if kw.arg == "time_zone" and isinstance(kw.value, ast.Constant):
+                        if isinstance(kw.value.value, str):
+                            tz = kw.value.value
+                return Datetime(tz=tz)
+            return base
+    return None
+
+
+def _wrap_like(receiver: DataType, new_inner: DataType) -> DataType:
+    """Preserve the receiver's outer ``Nullable`` wrapper around a new inner dtype."""
+    if isinstance(receiver, Nullable):
+        return Nullable(new_inner)
+    return new_inner
+
+
+def _str_constant(node: ast.expr) -> Optional[str]:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None
+
+
+def _str_list_or_tuple(node: ast.expr) -> Optional[list[str]]:
+    if isinstance(node, (ast.List, ast.Tuple)):
+        out: list[str] = []
+        for elt in node.elts:
+            s = _str_constant(elt)
+            if s is None:
+                return None
+            out.append(s)
+        return out
+    return None
 
 
 # =============================================================================
@@ -458,6 +562,18 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     return self._infer_select_call(receiver_type, node)
                 elif method_name == "with_columns":
                     return self._infer_with_columns_call(receiver_type, node)
+                elif method_name == "drop":
+                    return self._infer_drop_call(receiver_type, node)
+                elif method_name == "rename":
+                    return self._infer_rename_call(receiver_type, node)
+                elif method_name == "cast":
+                    return self._infer_cast_call(receiver_type, node)
+                elif method_name == "drop_nulls":
+                    return self._infer_drop_nulls_call(receiver_type, node)
+                elif method_name == "with_row_index":
+                    return self._infer_with_row_index_call(receiver_type, node)
+                elif method_name in _IDENTITY_FRAME_METHODS:
+                    return receiver_type
 
         return None
 
@@ -672,6 +788,168 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         self.errors.extend(expr_analyzer.errors)
 
         return FrameType(columns=result_columns)
+
+    # -- M1 frame methods --------------------------------------------------
+
+    def _collect_drop_targets(self, node: ast.Call) -> list[str]:
+        """Resolve column-name args for ``drop`` / ``drop_nulls(subset=...)``.
+
+        Supports both ``drop("a", "b")`` and ``drop(["a", "b"])``.
+        Returns column names in argument order (subset list flattened in).
+        """
+        names: list[str] = []
+        for arg in node.args:
+            s = _str_constant(arg)
+            if s is not None:
+                names.append(s)
+                continue
+            lst = _str_list_or_tuple(arg)
+            if lst is not None:
+                names.extend(lst)
+        return names
+
+    def _infer_drop_call(
+        self, input_frame: FrameType, node: ast.Call
+    ) -> Optional[FrameType]:
+        targets = self._collect_drop_targets(node)
+        result_columns = dict(input_frame.columns)
+        for name in targets:
+            if name not in result_columns:
+                self.errors.append(f"drop: column '{name}' not found")
+                continue
+            del result_columns[name]
+        return FrameType(
+            columns=result_columns, strict=input_frame.strict, rest=input_frame.rest
+        )
+
+    def _infer_rename_call(
+        self, input_frame: FrameType, node: ast.Call
+    ) -> Optional[FrameType]:
+        if not node.args or not isinstance(node.args[0], ast.Dict):
+            return input_frame
+        mapping_node = node.args[0]
+        mapping: dict[str, str] = {}
+        for key_node, val_node in zip(mapping_node.keys, mapping_node.values):
+            if key_node is None:
+                continue
+            old = _str_constant(key_node)
+            new = _str_constant(val_node)
+            if old is None or new is None:
+                continue
+            mapping[old] = new
+
+        result_columns: dict[str, ColumnSpec] = {}
+        for col_name, spec in input_frame.columns.items():
+            new_name = mapping.get(col_name, col_name)
+            result_columns[new_name] = spec
+        for old in mapping:
+            if old not in input_frame.columns:
+                self.errors.append(f"rename: column '{old}' not found")
+        return FrameType(
+            columns=result_columns, strict=input_frame.strict, rest=input_frame.rest
+        )
+
+    def _infer_cast_call(
+        self, input_frame: FrameType, node: ast.Call
+    ) -> Optional[FrameType]:
+        if not node.args:
+            return input_frame
+        first = node.args[0]
+        if not isinstance(first, ast.Dict):
+            # ``cast(pl.Int64)`` whole-frame form not handled in M1 — fall back to identity.
+            return input_frame
+        result_columns: dict[str, ColumnSpec] = dict(input_frame.columns)
+        for key_node, val_node in zip(first.keys, first.values):
+            if key_node is None:
+                continue
+            col = _str_constant(key_node)
+            if col is None:
+                continue
+            target = _resolve_pl_dtype(val_node)
+            if target is None:
+                continue
+            spec = result_columns.get(col)
+            if spec is None:
+                self.errors.append(f"cast: column '{col}' not found")
+                continue
+            result_columns[col] = ColumnSpec(
+                dtype=_wrap_like(spec.dtype, target),
+                required=spec.required,
+            )
+        return FrameType(
+            columns=result_columns, strict=input_frame.strict, rest=input_frame.rest
+        )
+
+    def _infer_drop_nulls_call(
+        self, input_frame: FrameType, node: ast.Call
+    ) -> Optional[FrameType]:
+        # subset can be passed positionally or as keyword
+        subset: Optional[list[str]] = None
+        if node.args:
+            cand = _str_list_or_tuple(node.args[0]) or (
+                [_str_constant(node.args[0])]
+                if _str_constant(node.args[0]) is not None
+                else None
+            )
+            if cand is not None:
+                subset = cand
+        for kw in node.keywords:
+            if kw.arg == "subset":
+                cand2 = _str_list_or_tuple(kw.value) or (
+                    [_str_constant(kw.value)]
+                    if _str_constant(kw.value) is not None
+                    else None
+                )
+                if cand2 is not None:
+                    subset = cand2
+
+        targets = subset if subset is not None else list(input_frame.columns.keys())
+        result_columns: dict[str, ColumnSpec] = {}
+        for col_name, spec in input_frame.columns.items():
+            if col_name in targets:
+                if col_name not in input_frame.columns and subset is not None:
+                    self.errors.append(
+                        f"drop_nulls: column '{col_name}' not found"
+                    )
+                inner = (
+                    spec.dtype.inner if isinstance(spec.dtype, Nullable) else spec.dtype
+                )
+                result_columns[col_name] = ColumnSpec(dtype=inner, required=spec.required)
+            else:
+                result_columns[col_name] = spec
+        if subset is not None:
+            for s in subset:
+                if s not in input_frame.columns:
+                    self.errors.append(f"drop_nulls: column '{s}' not found")
+        return FrameType(
+            columns=result_columns, strict=input_frame.strict, rest=input_frame.rest
+        )
+
+    def _infer_with_row_index_call(
+        self, input_frame: FrameType, node: ast.Call
+    ) -> Optional[FrameType]:
+        name = "index"
+        if node.args:
+            cand = _str_constant(node.args[0])
+            if cand is not None:
+                name = cand
+        for kw in node.keywords:
+            if kw.arg == "name":
+                cand2 = _str_constant(kw.value)
+                if cand2 is not None:
+                    name = cand2
+
+        result_columns: dict[str, ColumnSpec] = {name: ColumnSpec(dtype=UInt32())}
+        for col_name, spec in input_frame.columns.items():
+            if col_name == name:
+                self.errors.append(
+                    f"with_row_index: column '{name}' already exists"
+                )
+                continue
+            result_columns[col_name] = spec
+        return FrameType(
+            columns=result_columns, strict=input_frame.strict, rest=input_frame.rest
+        )
 
 
 def _extract_function_signature(

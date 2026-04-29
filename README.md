@@ -7,7 +7,7 @@ Static type checker for Polars DataFrames based on row polymorphism.
 - **Static type checking** for Polars DataFrame operations without running your code
 - **Pandera schema declaration** with `pa.DataFrameModel` and `DataFrame[Schema]` annotations
 - **Validation-as-narrowing**: `Schema.validate(df)`, `df.pipe(Schema.validate)`, and `Schema.validate(lf).collect()` all narrow the static type downstream
-- **Operation support**: join, group_by, select, with_columns
+- **Operation support**: join, group_by, select, with_columns, filter, sort, head/tail/limit/slice, unique, drop, rename, cast, drop_nulls, with_row_index, plus identity passthrough for lazy/collect/clone/reverse/sample/set_sorted
 - **Error detection**:
   - Missing columns
   - Type mismatches in join keys
@@ -171,6 +171,22 @@ Supported aggregation functions: `sum`, `mean`, `min`, `max`, `count`,
 `select` and `with_columns` are recognised; column dtypes flow through
 literal expressions, `pl.col(...)` references, arithmetic, and
 `.alias(...)`.
+
+### Frame reshape (M1)
+
+| Method | Effect on FrameType |
+|---|---|
+| `filter(...)` | identity |
+| `sort(...)`, `head`, `tail`, `limit`, `slice`, `reverse`, `sample`, `unique`, `clone`, `lazy`, `set_sorted`, `shrink_to_fit`, `rechunk` | identity |
+| `drop("a", "b")` / `drop(["a","b"])` | remove the named columns; error on unknown name |
+| `rename({"old": "new"})` | rename keys; preserves dtype + nullability + required |
+| `cast({"col": pl.Int32})` | per-column dtype change; preserves the receiver's `Nullable[...]` wrapper |
+| `drop_nulls(subset=[...])` | strips `Nullable[...]` from `subset` (or every column if omitted) |
+| `with_row_index(name="index")` | prepends a `UInt32` column |
+
+`pl.<dtype>` literals recognised by `cast`: `Int32`, `Int64`, `UInt32`,
+`UInt64`, `Float32`, `Float64`, `Utf8` (alias `String`), `Boolean`,
+`Date`, `Datetime` (incl. `pl.Datetime("us", "UTC")`), `Duration`.
 
 ## Development
 
