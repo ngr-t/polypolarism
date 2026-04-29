@@ -7,7 +7,7 @@ Static type checker for Polars DataFrames based on row polymorphism.
 - **Static type checking** for Polars DataFrame operations without running your code
 - **Pandera schema declaration** with `pa.DataFrameModel` and `DataFrame[Schema]` annotations
 - **Validation-as-narrowing**: `Schema.validate(df)`, `df.pipe(Schema.validate)`, and `Schema.validate(lf).collect()` all narrow the static type downstream
-- **Operation support**: join, group_by, select, with_columns, filter (predicates type-checked), sort, head/tail/limit/slice, unique, drop, rename, cast, drop_nulls, with_row_index, plus identity passthrough for lazy/collect/clone/reverse/sample/set_sorted
+- **Operation support**: join, group_by, select, with_columns, filter (predicates type-checked), sort, head/tail/limit/slice, unique, drop, rename, cast, drop_nulls, with_row_index, explode, unpivot/melt, vstack/hstack/extend, `pl.concat([...], how=vertical|horizontal|diagonal)`, plus identity passthrough for lazy/collect/clone/reverse/sample/set_sorted
 - **Error detection**:
   - Missing columns
   - Type mismatches in join keys
@@ -242,6 +242,22 @@ wrapper is preserved on the result.
 | `len` | `UInt32` |
 | `unique`, `sort`, `reverse`, `head`, `tail`, `slice`, `drop_nulls`, `sample`, `shift` | preserves receiver dtype |
 | `get(i)`, `first`, `last`, `sum`, `mean`, `min`, `max`, `median` | element dtype (requires `List[T]` receiver) |
+
+### Frame restructuring (M4)
+
+| Form | Result |
+|---|---|
+| `df.explode("xs")` / `explode(["a","b"])` | `List[T]` columns become `T`; errors if column isn't `List[T]` |
+| `pl.concat([f1, f2])` (default `how="vertical"`) | column sets must match; per-column dtypes unified, `Nullable[...]` widened |
+| `pl.concat([f1, f2], how="horizontal")` | column sets must be disjoint; merged into one frame |
+| `pl.concat([f1, f2], how="diagonal")` / `"diagonal_relaxed"` | union of columns; columns absent in any input become `Nullable[T]` |
+| `df.vstack(other)` | shorthand for vertical `pl.concat([df, other])` |
+| `df.hstack(other)` / `df.extend(other)` | shorthand for horizontal `pl.concat([df, other])` |
+| `df.unpivot(index=[...], on=[...], variable_name="variable", value_name="value")` / `df.melt(...)` | output schema `{index..., variable_name: Utf8, value_name: T}` where `T` unifies the dtypes of the `on` columns |
+
+`pivot()` and `partition_by()` are intentionally not yet inferred — they
+are deferred to a later milestone because the result schema depends on
+runtime data.
 
 ## Development
 

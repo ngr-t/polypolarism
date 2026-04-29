@@ -1094,6 +1094,256 @@ class TestM3ListNamespace:
         assert ft.columns["u"].dtype == ListT(Int64())
 
 
+class TestM4Explode:
+    """`explode("xs")` turns List[T] into T."""
+
+    def test_explode_single_column(self):
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            from typing import Annotated
+
+            class In(pa.DataFrameModel):
+                user_id: int
+                tags: Annotated[pl.List, pl.Utf8()]
+
+            class Out(pa.DataFrameModel):
+                user_id: int
+                tags: str
+
+            def f(data: DataFrame[In]) -> DataFrame[Out]:
+                return data.explode("tags")
+        ''')
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["tags"].dtype == Utf8()
+        assert ft.columns["user_id"].dtype == Int64()
+
+    def test_explode_multiple_columns_via_list(self):
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            from typing import Annotated
+
+            class In(pa.DataFrameModel):
+                tags: Annotated[pl.List, pl.Utf8()]
+                scores: Annotated[pl.List, pl.Float64()]
+
+            def f(data: DataFrame[In]):
+                return data.explode(["tags", "scores"])
+        ''')
+        results = analyze_source(source)
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["tags"].dtype == Utf8()
+        assert ft.columns["scores"].dtype == Float64()
+
+    def test_explode_non_list_column_errors(self):
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class S(pa.DataFrameModel):
+                v: pl.Float64
+
+            def f(data: DataFrame[S]):
+                return data.explode("v")
+        ''')
+        results = analyze_source(source)
+        assert results[0].has_errors is True
+        assert any("v" in e and "List" in e for e in results[0].errors)
+
+    def test_explode_unknown_column_errors(self):
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class S(pa.DataFrameModel):
+                v: pl.Float64
+
+            def f(data: DataFrame[S]):
+                return data.explode("missing")
+        ''')
+        results = analyze_source(source)
+        assert results[0].has_errors is True
+        assert any("missing" in e for e in results[0].errors)
+
+
+class TestM4Concat:
+    """`pl.concat([f1, f2], how=...)`."""
+
+    def test_concat_vertical_unifies_schemas(self):
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class A(pa.DataFrameModel):
+                id: int
+                value: pl.Float64
+
+            class B(pa.DataFrameModel):
+                id: int
+                value: pl.Float64
+
+            class Out(pa.DataFrameModel):
+                id: int
+                value: pl.Float64
+
+            def f(a: DataFrame[A], b: DataFrame[B]) -> DataFrame[Out]:
+                return pl.concat([a, b])
+        ''')
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        assert results[0].inferred_return_type == FrameType({
+            "id": Int64(),
+            "value": Float64(),
+        })
+
+    def test_concat_vertical_mismatched_columns_errors(self):
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class A(pa.DataFrameModel):
+                id: int
+
+            class B(pa.DataFrameModel):
+                id: int
+                extra: str
+
+            def f(a: DataFrame[A], b: DataFrame[B]):
+                return pl.concat([a, b])
+        ''')
+        results = analyze_source(source)
+        assert results[0].has_errors is True
+
+    def test_concat_horizontal_merges_columns(self):
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class A(pa.DataFrameModel):
+                id: int
+                v: pl.Float64
+
+            class B(pa.DataFrameModel):
+                name: str
+
+            class Out(pa.DataFrameModel):
+                id: int
+                v: pl.Float64
+                name: str
+
+            def f(a: DataFrame[A], b: DataFrame[B]) -> DataFrame[Out]:
+                return pl.concat([a, b], how="horizontal")
+        ''')
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+
+    def test_concat_horizontal_overlap_errors(self):
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class A(pa.DataFrameModel):
+                id: int
+
+            class B(pa.DataFrameModel):
+                id: int
+
+            def f(a: DataFrame[A], b: DataFrame[B]):
+                return pl.concat([a, b], how="horizontal")
+        ''')
+        results = analyze_source(source)
+        assert results[0].has_errors is True
+        assert any("id" in e for e in results[0].errors)
+
+    def test_concat_diagonal_makes_missing_nullable(self):
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class A(pa.DataFrameModel):
+                id: int
+                v: pl.Float64
+
+            class B(pa.DataFrameModel):
+                id: int
+                w: pl.Float64
+
+            def f(a: DataFrame[A], b: DataFrame[B]):
+                return pl.concat([a, b], how="diagonal")
+        ''')
+        results = analyze_source(source)
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["id"].dtype == Int64()
+        # v is in A only, so it becomes Nullable in the union
+        assert ft.columns["v"].dtype == Nullable(Float64())
+        assert ft.columns["w"].dtype == Nullable(Float64())
+
+
+class TestM4VHStack:
+    def test_vstack_unifies(self):
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class S(pa.DataFrameModel):
+                id: int
+
+            def f(a: DataFrame[S], b: DataFrame[S]) -> DataFrame[S]:
+                return a.vstack(b)
+        ''')
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        assert results[0].inferred_return_type == FrameType({"id": Int64()})
+
+    def test_hstack_merges(self):
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class A(pa.DataFrameModel):
+                id: int
+
+            class B(pa.DataFrameModel):
+                name: str
+
+            class Out(pa.DataFrameModel):
+                id: int
+                name: str
+
+            def f(a: DataFrame[A], b: DataFrame[B]) -> DataFrame[Out]:
+                return a.hstack(b)
+        ''')
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+
+
+class TestM4Unpivot:
+    def test_unpivot_default_names(self):
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class In(pa.DataFrameModel):
+                id: int
+                a: pl.Float64
+                b: pl.Float64
+
+            def f(data: DataFrame[In]):
+                return data.unpivot(index=["id"], on=["a", "b"])
+        ''')
+        results = analyze_source(source)
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["id"].dtype == Int64()
+        assert ft.columns["variable"].dtype == Utf8()
+        assert ft.columns["value"].dtype == Float64()
+
+    def test_unpivot_custom_names(self):
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class In(pa.DataFrameModel):
+                id: int
+                a: pl.Float64
+                b: pl.Float64
+
+            def f(data: DataFrame[In]):
+                return data.unpivot(
+                    index=["id"], on=["a", "b"],
+                    variable_name="metric", value_name="amount",
+                )
+        ''')
+        results = analyze_source(source)
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert "metric" in ft.columns
+        assert ft.columns["metric"].dtype == Utf8()
+        assert ft.columns["amount"].dtype == Float64()
+
+    def test_unpivot_value_columns_not_unifiable_errors(self):
+        source = textwrap.dedent(PANDERA_HEADER + '''
+            class In(pa.DataFrameModel):
+                id: int
+                a: pl.Float64
+                b: str
+
+            def f(data: DataFrame[In]):
+                return data.unpivot(index=["id"], on=["a", "b"])
+        ''')
+        results = analyze_source(source)
+        assert results[0].has_errors is True
+
+
 class TestFunctionAnalysisDataClass:
     """Test FunctionAnalysis data class."""
 

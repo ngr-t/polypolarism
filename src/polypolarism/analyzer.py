@@ -38,6 +38,13 @@ from polypolarism.ops.groupby import (
     AggFunction,
     GroupByTypeError,
 )
+from polypolarism.ops.reshape import (
+    ReshapeError,
+    concat_vertical,
+    concat_horizontal,
+    concat_diagonal,
+    unpivot as infer_unpivot,
+)
 from polypolarism.expr_infer import infer_col, ColumnNotFoundError
 
 
@@ -872,6 +879,14 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             method_name = node.func.attr
             receiver = node.func.value
 
+            # ``pl.concat([...], how=...)`` — top-level pl function, not a frame method.
+            if (
+                isinstance(receiver, ast.Name)
+                and receiver.id == "pl"
+                and method_name == "concat"
+            ):
+                return self._infer_concat_call(node)
+
             # Pandera narrowing: Schema.validate(df) -> Schema's FrameType
             if method_name == "validate":
                 schema_ft = self._infer_validate_call(node)
@@ -918,6 +933,14 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     return self._infer_with_row_index_call(receiver_type, node)
                 elif method_name == "filter":
                     return self._infer_filter_call(receiver_type, node)
+                elif method_name == "explode":
+                    return self._infer_explode_call(receiver_type, node)
+                elif method_name == "vstack":
+                    return self._infer_vstack_call(receiver_type, node)
+                elif method_name in ("hstack", "extend"):
+                    return self._infer_hstack_call(receiver_type, node)
+                elif method_name in ("unpivot", "melt"):
+                    return self._infer_unpivot_call(receiver_type, node)
                 elif method_name in _IDENTITY_FRAME_METHODS:
                     return receiver_type
 
@@ -1270,6 +1293,156 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         return FrameType(
             columns=result_columns, strict=input_frame.strict, rest=input_frame.rest
         )
+
+    def _collect_concat_frames(
+        self, list_node: ast.expr
+    ) -> Optional[list[FrameType]]:
+        """Resolve a list/tuple-of-frames argument used by ``pl.concat([...])``."""
+        if not isinstance(list_node, (ast.List, ast.Tuple)):
+            return None
+        out: list[FrameType] = []
+        for elt in list_node.elts:
+            ft = self._infer_expr_type(elt)
+            if ft is None:
+                return None
+            out.append(ft)
+        return out
+
+    def _infer_concat_call(self, node: ast.Call) -> Optional[FrameType]:
+        if not node.args:
+            return None
+        frames = self._collect_concat_frames(node.args[0])
+        if frames is None:
+            return None
+        how = "vertical"
+        for kw in node.keywords:
+            if kw.arg == "how" and isinstance(kw.value, ast.Constant):
+                if isinstance(kw.value.value, str):
+                    how = kw.value.value
+        try:
+            if how == "vertical":
+                return concat_vertical(frames)
+            if how == "horizontal":
+                return concat_horizontal(frames)
+            if how in ("diagonal", "diagonal_relaxed"):
+                return concat_diagonal(frames)
+        except ReshapeError as e:
+            self.errors.append(str(e))
+            return None
+        # Unsupported how — treat as vertical with a warning.
+        try:
+            return concat_vertical(frames)
+        except ReshapeError as e:
+            self.errors.append(str(e))
+            return None
+
+    def _infer_vstack_call(
+        self, input_frame: FrameType, node: ast.Call
+    ) -> Optional[FrameType]:
+        if not node.args:
+            return input_frame
+        other = self._infer_expr_type(node.args[0])
+        if other is None:
+            return input_frame
+        try:
+            return concat_vertical([input_frame, other])
+        except ReshapeError as e:
+            self.errors.append(str(e))
+            return None
+
+    def _infer_hstack_call(
+        self, input_frame: FrameType, node: ast.Call
+    ) -> Optional[FrameType]:
+        if not node.args:
+            return input_frame
+        other = self._infer_expr_type(node.args[0])
+        if other is None:
+            return input_frame
+        try:
+            return concat_horizontal([input_frame, other])
+        except ReshapeError as e:
+            self.errors.append(str(e))
+            return None
+
+    def _infer_explode_call(
+        self, input_frame: FrameType, node: ast.Call
+    ) -> Optional[FrameType]:
+        targets: list[str] = []
+        for arg in node.args:
+            s = _str_constant(arg)
+            if s is not None:
+                targets.append(s)
+                continue
+            lst = _str_list_or_tuple(arg)
+            if lst is not None:
+                targets.extend(lst)
+        if not targets:
+            return input_frame
+
+        result_columns: dict[str, ColumnSpec] = dict(input_frame.columns)
+        for col in targets:
+            spec = result_columns.get(col)
+            if spec is None:
+                self.errors.append(f"explode: column '{col}' not found")
+                continue
+            inner = spec.dtype
+            outer_nullable = isinstance(inner, Nullable)
+            if outer_nullable:
+                inner = inner.inner  # type: ignore[union-attr]
+            if not isinstance(inner, ListT):
+                self.errors.append(
+                    f"explode: column '{col}' is {spec.dtype}, not List[T]"
+                )
+                continue
+            elem_dtype: DataType = inner.inner
+            if outer_nullable:
+                elem_dtype = Nullable(elem_dtype)
+            result_columns[col] = ColumnSpec(dtype=elem_dtype, required=spec.required)
+        return FrameType(
+            columns=result_columns, strict=input_frame.strict, rest=input_frame.rest
+        )
+
+    def _infer_unpivot_call(
+        self, input_frame: FrameType, node: ast.Call
+    ) -> Optional[FrameType]:
+        index: list[str] = []
+        on: list[str] = []
+        variable_name = "variable"
+        value_name = "value"
+        for kw in node.keywords:
+            if kw.arg == "index":
+                lst = _str_list_or_tuple(kw.value)
+                single = _str_constant(kw.value)
+                if lst is not None:
+                    index = lst
+                elif single is not None:
+                    index = [single]
+            elif kw.arg == "on":
+                lst = _str_list_or_tuple(kw.value)
+                single = _str_constant(kw.value)
+                if lst is not None:
+                    on = lst
+                elif single is not None:
+                    on = [single]
+            elif kw.arg == "variable_name":
+                cand = _str_constant(kw.value)
+                if cand is not None:
+                    variable_name = cand
+            elif kw.arg == "value_name":
+                cand = _str_constant(kw.value)
+                if cand is not None:
+                    value_name = cand
+        try:
+            return infer_unpivot(
+                input_frame,
+                index=index,
+                on=on,
+                variable_name=variable_name,
+                value_name=value_name,
+            )
+        except ReshapeError as e:
+            self.errors.append(str(e))
+            return None
 
     def _infer_filter_call(
         self, input_frame: FrameType, node: ast.Call
