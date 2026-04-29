@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 from typing import Optional, TYPE_CHECKING
 
 from polypolarism.types import DataType, FrameType, Nullable
-from polypolarism.dsl import parse_schema, ParseError
 from polypolarism.pandera_annotation import extract_dataframe_annotation
 from polypolarism.pandera_schema import SchemaRegistry, collect_schemas
 from polypolarism.ops.join import infer_join, JoinError
@@ -151,58 +150,19 @@ class FunctionAnalysis:
         return len(self.errors) > 0
 
 
-def _extract_df_schema(annotation: ast.expr) -> Optional[str]:
-    """Extract schema string from DF["{...}"] annotation."""
-    # Handle DF["{...}"]
-    if isinstance(annotation, ast.Subscript):
-        # Check if it's DF[...]
-        if isinstance(annotation.value, ast.Name) and annotation.value.id == "DF":
-            # Extract the string inside
-            if isinstance(annotation.slice, ast.Constant) and isinstance(
-                annotation.slice.value, str
-            ):
-                return annotation.slice.value
-    return None
-
-
-def _parse_frame_type(schema_str: str) -> Optional[FrameType]:
-    """Parse a schema string into FrameType."""
-    try:
-        return parse_schema(schema_str)
-    except ParseError:
-        return None
-
-
-def _parse_frame_type_with_error(
-    schema_str: str,
-) -> tuple[Optional[FrameType], Optional[str]]:
-    """Parse a schema string into FrameType, returning error message if failed."""
-    try:
-        return parse_schema(schema_str), None
-    except ParseError as e:
-        return None, str(e)
-
-
 def _resolve_declared_type(
     annotation: ast.expr,
     schema_registry: SchemaRegistry,
 ) -> tuple[Optional[FrameType], Optional[str]]:
-    """Resolve a declared FrameType from an annotation, trying Pandera first then DSL.
+    """Resolve a declared FrameType from a Pandera ``DataFrame[Schema]`` annotation.
 
-    Returns ``(frame_type, error)``. ``frame_type`` is None if neither form
-    matched. ``error`` is a parse-error message when the DSL form was
-    detected but failed to parse.
+    Returns ``(frame_type, error)``. Both are ``None`` when the annotation
+    doesn't declare a Pandera-backed frame type. ``error`` is reserved for
+    future schema-resolution errors; currently always ``None``.
     """
-    # Pandera: DataFrame[Schema] / LazyFrame[Schema]
     pandera_ft = extract_dataframe_annotation(annotation, schema_registry)
     if pandera_ft is not None:
         return pandera_ft, None
-
-    # DSL: DF["{...}"]
-    schema_str = _extract_df_schema(annotation)
-    if schema_str is not None:
-        return _parse_frame_type_with_error(schema_str)
-
     return None, None
 
 
@@ -210,10 +170,8 @@ def _annotation_declares_frame(
     annotation: ast.expr,
     schema_registry: SchemaRegistry,
 ) -> bool:
-    """Return True if the annotation is a DF[...] or DataFrame[Schema]/LazyFrame[Schema] form."""
-    if extract_dataframe_annotation(annotation, schema_registry) is not None:
-        return True
-    return _extract_df_schema(annotation) is not None
+    """Return True if the annotation is ``DataFrame[Schema]`` / ``LazyFrame[Schema]``."""
+    return extract_dataframe_annotation(annotation, schema_registry) is not None
 
 
 class ExpressionAnalyzer(ast.NodeVisitor):
