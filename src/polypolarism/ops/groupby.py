@@ -47,11 +47,25 @@ class AggFunction(Enum):
 
 @dataclass
 class AggExpr:
-    """Represents an aggregation expression."""
+    """Represents an aggregation expression.
+
+    Two construction shapes are supported:
+
+    - Direct form: ``column`` + ``function`` (and optional ``alias``). Used by
+      the simple ``pl.col("X").<agg>().alias("Y")`` pattern; ``infer_groupby_result``
+      validates the column exists and computes the result dtype from
+      ``infer_agg_result_type(function, col_dtype)``.
+    - Pre-resolved form: ``column`` + ``dtype`` (and optional ``alias``). Used by
+      the chain fallback (``pl.col("X").max().dt.year().alias("Y")``). The
+      caller has already validated the chain via the expression analyser, so
+      ``infer_groupby_result`` skips the column-existence check and uses
+      ``dtype`` directly.
+    """
 
     column: str
-    function: AggFunction
+    function: AggFunction | None = None
     alias: str | None = None
+    dtype: DataType | None = None
 
     @property
     def output_name(self) -> str:
@@ -247,12 +261,19 @@ def infer_groupby_result(
 
     # 2. Add aggregation result columns
     for agg_expr in agg_exprs:
+        # Pre-resolved chain form: dtype was computed upstream by the
+        # expression analyser, which already validated column references.
+        if agg_expr.dtype is not None:
+            result_columns[agg_expr.output_name] = agg_expr.dtype
+            continue
+
         col_name = agg_expr.column
         if not input_frame.has_column(col_name):
             raise GroupByTypeError(f"Aggregation column '{col_name}' not found in DataFrame")
 
         col_type = input_frame.get_column_type(col_name)
         assert col_type is not None  # We just checked has_column
+        assert agg_expr.function is not None  # Direct form must carry a function
 
         result_type = infer_agg_result_type(agg_expr.function, col_type)
         output_name = agg_expr.output_name

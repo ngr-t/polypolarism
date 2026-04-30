@@ -2064,6 +2064,111 @@ class TestM7ExternalHelperWarning:
         assert any("process" in w for w in f.warnings)
 
 
+class TestM8AggChains:
+    """Inside ``.agg(...)`` we now accept post-aggregation method chains."""
+
+    def test_post_agg_dt_year(self):
+        """``pl.col("ts").max().dt.year()`` returns Int32 in agg context."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                user_id: int
+                ts: pl.Datetime
+
+            def f(data: DataFrame[S]):
+                return data.group_by("user_id").agg(
+                    pl.col("ts").max().dt.year().alias("last_year"),
+                )
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["last_year"].dtype == Int32()
+
+    def test_post_agg_cum_sum_last(self):
+        """``count().cum_sum().last()`` is UInt32 (count) → UInt32 (cum) → UInt32 (last)."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                user_id: int
+
+            def f(data: DataFrame[S]):
+                return data.group_by("user_id").agg(
+                    pl.col("user_id").count().cum_sum().last().alias("running"),
+                )
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["running"].dtype == UInt32()
+
+    def test_post_agg_arithmetic(self):
+        """``sum().alias()`` plus arithmetic still resolves."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                user_id: int
+                amount: pl.Float64
+
+            def f(data: DataFrame[S]):
+                return data.group_by("user_id").agg(
+                    (pl.col("amount").sum() * 2).alias("doubled_total"),
+                )
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["doubled_total"].dtype == Float64()
+
+    def test_post_agg_str_namespace(self):
+        """``first().str.to_uppercase()`` in agg context returns Utf8."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                user_id: int
+                tag: str
+
+            def f(data: DataFrame[S]):
+                return data.group_by("user_id").agg(
+                    pl.col("tag").first().str.to_uppercase().alias("tag_upper"),
+                )
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["tag_upper"].dtype == Utf8()
+
+    def test_chain_on_unknown_column_errors(self):
+        """A chain that references a missing column still surfaces PLY001."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                user_id: int
+
+            def f(data: DataFrame[S]):
+                return data.group_by("user_id").agg(
+                    pl.col("missing").max().dt.year().alias("y"),
+                )
+        """
+        )
+        results = analyze_source(source)
+        assert any("PLY001" in e for e in results[0].errors)
+        assert any("missing" in e for e in results[0].errors)
+
+
 class TestFunctionAnalysisDataClass:
     """Test FunctionAnalysis data class."""
 

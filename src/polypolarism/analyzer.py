@@ -491,6 +491,41 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                             alias=alias,
                         )
 
+        # Chain fallback: anything more elaborate (post-aggregation method
+        # chains like ``pl.col("ts").max().dt.year()``, arithmetic on the
+        # aggregated value, sub-namespace methods on the aggregated value,
+        # etc.) is handled by reusing the expression analyser. We delegate to
+        # ``analyze_select_expr`` on the *original* node (it strips the
+        # ``.alias(...)`` itself), and turn its (name, dtype) into an
+        # AggExpr with a pre-resolved ``dtype`` override.
+        chain_name, chain_dtype = self.analyze_select_expr(node)
+        if chain_dtype is not None:
+            # Anchor the AggExpr to the deepest pl.col so the column-existence
+            # check elsewhere has a sensible source attribution; if there's no
+            # bare pl.col (e.g. a literal-driven expression) we fall back to
+            # the alias / inferred name.
+            anchor_col = self._find_deep_col(node) or chain_name or ""
+            return AggExpr(
+                column=anchor_col,
+                function=None,
+                alias=chain_name,
+                dtype=chain_dtype,
+            )
+
+        return None
+
+    def _find_deep_col(self, node: ast.expr) -> str | None:
+        """Walk down a method chain to find the innermost ``pl.col("X")`` reference."""
+        if isinstance(node, ast.Call):
+            direct = self._extract_col_name(node)
+            if direct is not None:
+                return direct
+            if isinstance(node.func, ast.Attribute):
+                return self._find_deep_col(node.func.value)
+        if isinstance(node, ast.Attribute):
+            return self._find_deep_col(node.value)
+        if isinstance(node, ast.BinOp):
+            return self._find_deep_col(node.left) or self._find_deep_col(node.right)
         return None
 
     def _extract_col_name(self, node: ast.expr) -> str | None:
