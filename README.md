@@ -365,6 +365,31 @@ Warning codes:
 JSON output (`--format json`) emits warnings as `severity: "warning"`
 diagnostics so editors and CI can route them separately from errors.
 
+### Schema diff block (M11)
+
+When a single function has at least two column-level mismatches
+(`MissingColumn`, `ExtraColumn`, or `TypeDifference` in any combination)
+the text formatter appends an aligned diff block under the per-line
+errors so the user can scan the whole shape difference at once:
+
+```
+  f (line 19): FAIL
+    - Column 'id' has type Int64, but declared type is Int32
+    - Missing column 'amount' of type Float64
+    - Column 'name' has type Utf8, but declared type is Float64
+    - Missing column 'extra' of type Int64
+    schema diff:
+      column  declared  inferred   status
+      ──────  ────────  ─────────  ────────
+      id      Int32     Int64      mismatch
+      amount  Float64   (missing)  missing
+      name    Float64   Utf8       mismatch
+      extra   Int64     (missing)  missing
+```
+
+Single-mismatch failures keep the original one-line output. JSON output
+is unchanged — each mismatch remains an individual diagnostic.
+
 ## Development
 
 ```bash

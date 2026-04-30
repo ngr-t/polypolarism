@@ -141,6 +141,52 @@ class TestFormatResults:
         assert "func2" in output
 
 
+class TestSchemaDiffBlock:
+    """When 2+ schema mismatches occur, the formatter appends a diff block."""
+
+    def test_single_mismatch_has_no_diff_block(self):
+        from polypolarism.checker import CheckError, CheckResult, TypeDifference
+        from polypolarism.types import Float64, Int64
+
+        errors: list[CheckError] = [TypeDifference("a", Int64(), Float64())]
+        result = CheckResult(function_name="f", passed=False, errors=errors)
+        output = format_results([result])
+        # Per-line error still shown
+        assert "Int64" in output and "Float64" in output
+        # No diff block heading
+        assert "schema diff" not in output
+
+    def test_multiple_mismatches_render_diff_block(self):
+        from polypolarism.checker import (
+            CheckError,
+            CheckResult,
+            ExtraColumn,
+            MissingColumn,
+            TypeDifference,
+        )
+        from polypolarism.types import Float64, Int64, Utf8
+
+        errors: list[CheckError] = [
+            TypeDifference("a", Int64(), Float64()),
+            TypeDifference("b", Float64(), Utf8()),
+            MissingColumn("c", Int64()),
+            ExtraColumn("d", Utf8()),
+        ]
+        result = CheckResult(function_name="f", passed=False, errors=errors)
+        output = format_results([result])
+        # Per-line errors still present
+        assert "Column 'a'" in output or "a" in output
+        # Diff block appears
+        assert "schema diff" in output
+        # Each affected column shows up in the block
+        for col in ("a", "b", "c", "d"):
+            assert col in output
+        # Status keywords are present
+        assert "mismatch" in output
+        assert "missing" in output
+        assert "extra" in output
+
+
 class TestMainExitCode:
     """Test CLI exit codes."""
 

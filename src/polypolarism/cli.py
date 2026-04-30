@@ -7,10 +7,57 @@ import sys
 from pathlib import Path
 
 from polypolarism.analyzer import analyze_source
-from polypolarism.checker import CheckResult, check_source
+from polypolarism.checker import (
+    CheckError,
+    CheckResult,
+    ExtraColumn,
+    MissingColumn,
+    TypeDifference,
+    check_source,
+)
 from polypolarism.output import FileResults, format_json, format_json_files
 
 __version__ = "0.1.0"
+
+
+def _format_schema_diff(errors: list[CheckError]) -> list[str]:
+    """Build an aligned per-column diff block from an error list.
+
+    Returns ``[]`` when fewer than two schema mismatches are present — for
+    a single error the per-line message is already the clearest output.
+    Mismatches that aren't column-level (e.g. ``InferenceFailure``, raw
+    strings) are skipped.
+    """
+    rows: list[tuple[str, str, str, str]] = []
+    for err in errors:
+        if isinstance(err, TypeDifference):
+            rows.append((err.column, str(err.declared), str(err.inferred), "mismatch"))
+        elif isinstance(err, MissingColumn):
+            rows.append((err.column, str(err.expected_type), "(missing)", "missing"))
+        elif isinstance(err, ExtraColumn):
+            rows.append((err.column, "(absent)", str(err.inferred_type), "extra"))
+
+    if len(rows) < 2:
+        return []
+
+    headers = ("column", "declared", "inferred", "status")
+    col_w = max(len(headers[0]), *(len(r[0]) for r in rows))
+    decl_w = max(len(headers[1]), *(len(r[1]) for r in rows))
+    inf_w = max(len(headers[2]), *(len(r[2]) for r in rows))
+    sep = "─"
+
+    lines: list[str] = ["    schema diff:"]
+    lines.append(
+        f"      {headers[0]:<{col_w}}  {headers[1]:<{decl_w}}  "
+        f"{headers[2]:<{inf_w}}  {headers[3]}"
+    )
+    lines.append(f"      {sep * col_w}  {sep * decl_w}  {sep * inf_w}  {sep * 8}")
+    for col, declared, inferred, status in rows:
+        lines.append(
+            f"      {col:<{col_w}}  {declared:<{decl_w}}  "
+            f"{inferred:<{inf_w}}  {status}"
+        )
+    return lines
 
 
 def _parse_error_result(file_path: Path, err: Exception) -> CheckResult:
@@ -99,6 +146,9 @@ def format_results(
         if not result.passed:
             for error in result.errors:
                 lines.append(f"    - {error}")
+            diff_block = _format_schema_diff(result.errors)
+            if diff_block:
+                lines.extend(diff_block)
         for warning in result.warnings:
             lines.append(f"    \033[33m! {warning}\033[0m")
 
