@@ -873,12 +873,17 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         namespace: str,
         method: str,
         receiver_type: DataType | None,
+        call_node: ast.Call | None = None,
     ) -> DataType | None:
         """Resolve ``<col_expr>.<namespace>.<method>(...)`` to a DataType.
 
         ``receiver_type`` is the dtype of the column the namespace was attached
         to (``None`` if it couldn't be resolved). The receiver's nullability
         is preserved on the result for almost all of these methods.
+
+        ``call_node`` is the full ``ast.Call`` (e.g. ``...struct.field("x")``);
+        passed in so per-namespace handlers that need positional arguments
+        (currently just ``struct.field``) can read them.
         """
         receiver_inner = receiver_type
         receiver_is_nullable = False
@@ -902,6 +907,25 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 result = receiver_inner
             elif method in self._LIST_ELEMENT_RETURN and isinstance(receiver_inner, ListT):
                 result = receiver_inner.inner
+        elif namespace == "struct":
+            if method == "field" and call_node is not None and call_node.args:
+                field_name = _str_constant(call_node.args[0])
+                if field_name is not None and isinstance(receiver_inner, Struct):
+                    field_dtype = receiver_inner.fields.get(field_name)
+                    if field_dtype is None:
+                        self.errors.append(
+                            tag(
+                                PLY001,
+                                f"struct.field: '{field_name}' not found in "
+                                f"{receiver_inner}. Available fields: "
+                                f"{list(receiver_inner.fields.keys())}",
+                            )
+                        )
+                        return None
+                    result = field_dtype
+            elif method == "rename_fields" and isinstance(receiver_inner, Struct):
+                # Returns a Struct with same dtypes but renamed; we keep dtypes.
+                result = receiver_inner
 
         if result is None:
             return None
@@ -931,16 +955,20 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         receiver = node.func.value
 
         # Sub-namespace: ``pl.col("x").str.contains(...)``,
-        # ``pl.col("ts").dt.year()``, ``pl.col("xs").list.get(0)`` etc.
+        # ``pl.col("ts").dt.year()``, ``pl.col("xs").list.get(0)``,
+        # ``pl.col("s").struct.field("name")`` etc.
         if isinstance(receiver, ast.Attribute) and receiver.attr in (
             "str",
             "dt",
             "list",
             "arr",
+            "struct",
         ):
             ns = receiver.attr
             col_name, col_type = self.analyze_select_expr(receiver.value)
-            ns_result = self._dispatch_namespace_method(ns, method, col_type)
+            # Struct.field needs the field name (positional arg) — pass the
+            # whole call node so the dispatcher can look at it.
+            ns_result = self._dispatch_namespace_method(ns, method, col_type, node)
             if ns_result is None:
                 return None
             return col_name, ns_result
@@ -1297,6 +1325,8 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     return self._infer_hstack_call(receiver_type, node)
                 elif method_name in ("unpivot", "melt"):
                     return self._infer_unpivot_call(receiver_type, node)
+                elif method_name == "unnest":
+                    return self._infer_unnest_call(receiver_type, node)
                 elif method_name in _IDENTITY_FRAME_METHODS:
                     return receiver_type
 
@@ -1624,6 +1654,36 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             self.errors.append(tag(PLY011, str(e)))
             return None
 
+    def _resolve_plural_col(self, node: ast.expr) -> list[str] | None:
+        """Detect ``pl.col("a", "b", ...)`` with multiple positional args.
+
+        Single-arg calls return ``None`` so they keep using the regular
+        ``analyze_select_expr`` path. Multi-arg or list-arg fans out to a
+        list of names, matching the polars semantics.
+        """
+        if not isinstance(node, ast.Call):
+            return None
+        if not isinstance(node.func, ast.Attribute):
+            return None
+        if node.func.attr != "col":
+            return None
+        if not (isinstance(node.func.value, ast.Name) and node.func.value.id == "pl"):
+            return None
+        if len(node.args) <= 1:
+            # Single arg can still be a list literal: ``pl.col(["a","b"])``.
+            if len(node.args) == 1:
+                multi = _str_list_or_tuple(node.args[0])
+                if multi is not None and len(multi) >= 2:
+                    return multi
+            return None
+        names: list[str] = []
+        for a in node.args:
+            s = _str_constant(a)
+            if s is None:
+                return None
+            names.append(s)
+        return names
+
     def _infer_select_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
         """Infer type of .select() call."""
         expr_analyzer = ExpressionAnalyzer(input_frame, warnings=self.warnings, registry=self.registry)
@@ -1636,6 +1696,18 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     spec = input_frame.columns.get(c)
                     if spec is not None:
                         result_columns[c] = spec.dtype
+                continue
+            plural = self._resolve_plural_col(arg)
+            if plural is not None:
+                for c in plural:
+                    spec = input_frame.columns.get(c)
+                    if spec is None:
+                        self.errors.append(
+                            tag(PLY001, f"Column '{c}' not found. Available columns: "
+                                f"{list(input_frame.columns.keys())}")
+                        )
+                        continue
+                    result_columns[c] = spec.dtype
                 continue
             name, dtype = expr_analyzer.analyze_select_expr(arg)
             if name and dtype:
@@ -1659,6 +1731,17 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             if sel is not None:
                 # cs.* selectors in with_columns are a no-op type-wise (re-include
                 # existing columns). Skip — keep the existing entries.
+                continue
+            plural = self._resolve_plural_col(arg)
+            if plural is not None:
+                # ``with_columns(pl.col("a", "b"))`` is equivalent to keeping
+                # the existing columns; nothing to add.
+                for c in plural:
+                    if c not in input_frame.columns:
+                        self.errors.append(
+                            tag(PLY001, f"Column '{c}' not found. Available columns: "
+                                f"{list(input_frame.columns.keys())}")
+                        )
                 continue
             name, dtype = expr_analyzer.analyze_select_expr(arg)
             if name and dtype:
@@ -1925,6 +2008,44 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         except ReshapeError as e:
             self.errors.append(tag(PLY022, str(e)))
             return None
+
+    def _infer_unnest_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
+        """``df.unnest("s")`` / ``unnest(["a","b"])`` flattens Struct columns."""
+        targets: list[str] = []
+        for arg in node.args:
+            single = _str_constant(arg)
+            multi = _str_list_or_tuple(arg)
+            if single is not None:
+                targets.append(single)
+            elif multi is not None:
+                targets.extend(multi)
+        if not targets:
+            return input_frame
+
+        result_columns: dict[str, ColumnSpec] = dict(input_frame.columns)
+        for col in targets:
+            spec = result_columns.get(col)
+            if spec is None:
+                self.errors.append(tag(PLY021, f"unnest: column '{col}' not found"))
+                continue
+            inner = spec.dtype
+            outer_nullable = isinstance(inner, Nullable)
+            if outer_nullable:
+                inner = inner.inner  # type: ignore[union-attr]
+            if not isinstance(inner, Struct):
+                self.errors.append(
+                    tag(PLY021, f"unnest: column '{col}' is {spec.dtype}, not Struct{{...}}")
+                )
+                continue
+            del result_columns[col]
+            for field_name, field_dtype in inner.fields.items():
+                wrapped: DataType = field_dtype
+                if outer_nullable and not isinstance(wrapped, Nullable):
+                    wrapped = Nullable(wrapped)
+                result_columns[field_name] = ColumnSpec(dtype=wrapped, required=spec.required)
+        return FrameType(
+            columns=result_columns, strict=input_frame.strict, rest=input_frame.rest
+        )
 
     def _infer_filter_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
         """Identity-typed, but walk every predicate sub-expression to validate columns."""

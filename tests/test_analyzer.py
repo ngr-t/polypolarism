@@ -2169,6 +2169,158 @@ class TestM8AggChains:
         assert any("missing" in e for e in results[0].errors)
 
 
+class TestM9StructAccess:
+    """``pl.col("s").struct.field("x")`` returns the inner field's dtype."""
+
+    def test_struct_field_access(self):
+        from polypolarism.types import Struct
+
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            from typing import Annotated
+
+            class S(pa.DataFrameModel):
+                user: Annotated[pl.Struct, {"id": pl.Int64(), "name": pl.Utf8()}]
+
+            def f(data: DataFrame[S]):
+                return data.select(
+                    pl.col("user").struct.field("id").alias("user_id"),
+                    pl.col("user").struct.field("name").alias("user_name"),
+                )
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["user_id"].dtype == Int64()
+        assert ft.columns["user_name"].dtype == Utf8()
+        # Round-trip touches Struct itself
+        del Struct  # only imported to make the test name dependency explicit
+
+    def test_struct_field_unknown_field_errors(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            from typing import Annotated
+
+            class S(pa.DataFrameModel):
+                user: Annotated[pl.Struct, {"id": pl.Int64()}]
+
+            def f(data: DataFrame[S]):
+                return data.select(pl.col("user").struct.field("missing").alias("x"))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is True
+        assert any("missing" in e for e in results[0].errors)
+
+
+class TestM9Unnest:
+    """``df.unnest("col")`` flattens a Struct column into its field columns."""
+
+    def test_unnest_single_struct_column(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            from typing import Annotated
+
+            class In(pa.DataFrameModel):
+                id: int
+                user: Annotated[pl.Struct, {"name": pl.Utf8(), "age": pl.Int64()}]
+
+            class Out(pa.DataFrameModel):
+                id: int
+                name: str
+                age: int
+
+            def f(data: DataFrame[In]) -> DataFrame[Out]:
+                return data.unnest("user")
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+
+    def test_unnest_list_form(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            from typing import Annotated
+
+            class In(pa.DataFrameModel):
+                a: Annotated[pl.Struct, {"x": pl.Int64()}]
+                b: Annotated[pl.Struct, {"y": pl.Float64()}]
+
+            def f(data: DataFrame[In]):
+                return data.unnest(["a", "b"])
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["x"].dtype == Int64()
+        assert ft.columns["y"].dtype == Float64()
+        assert "a" not in ft.columns
+        assert "b" not in ft.columns
+
+    def test_unnest_non_struct_column_errors(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                v: pl.Float64
+
+            def f(data: DataFrame[S]):
+                return data.unnest("v")
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is True
+        assert any("Struct" in e for e in results[0].errors)
+
+
+class TestM9PluralCol:
+    """``pl.col("a", "b", ...)`` selects multiple columns in select / with_columns."""
+
+    def test_plural_col_in_select(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                a: int
+                b: pl.Float64
+                c: str
+
+            def f(data: DataFrame[S]):
+                return data.select(pl.col("a", "b"))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["a"].dtype == Int64()
+        assert ft.columns["b"].dtype == Float64()
+        assert "c" not in ft.columns
+
+    def test_plural_col_unknown_errors(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                a: int
+
+            def f(data: DataFrame[S]):
+                return data.select(pl.col("a", "missing"))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is True
+        assert any("missing" in e for e in results[0].errors)
+
+
 class TestFunctionAnalysisDataClass:
     """Test FunctionAnalysis data class."""
 

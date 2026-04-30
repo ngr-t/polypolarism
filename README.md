@@ -243,6 +243,13 @@ wrapper is preserved on the result.
 | `unique`, `sort`, `reverse`, `head`, `tail`, `slice`, `drop_nulls`, `sample`, `shift` | preserves receiver dtype |
 | `get(i)`, `first`, `last`, `sum`, `mean`, `min`, `max`, `median` | element dtype (requires `List[T]` receiver) |
 
+**`pl.col("s").struct.<m>(...)`** (M9)
+
+| Methods | Return |
+|---|---|
+| `field("name")` | dtype of that field on the receiver `Struct{...}`; errors if the field doesn't exist |
+| `rename_fields(...)` | preserves receiver `Struct{...}` |
+
 ### Frame restructuring (M4)
 
 | Form | Result |
@@ -254,6 +261,7 @@ wrapper is preserved on the result.
 | `df.vstack(other)` | shorthand for vertical `pl.concat([df, other])` |
 | `df.hstack(other)` / `df.extend(other)` | shorthand for horizontal `pl.concat([df, other])` |
 | `df.unpivot(index=[...], on=[...], variable_name="variable", value_name="value")` / `df.melt(...)` | output schema `{index..., variable_name: Utf8, value_name: T}` where `T` unifies the dtypes of the `on` columns |
+| `df.unnest("s")` / `df.unnest(["a","b"])` (M9) | each named `Struct{...}` column is replaced by its fields; receiver `Nullable[Struct]` widens each field to `Nullable[T]`; errors on missing column or non-`Struct` |
 
 `pivot()` and `partition_by()` are intentionally not yet inferred — they
 are deferred to a later milestone because the result schema depends on
@@ -271,6 +279,12 @@ runtime data.
 | `pl.col("v").mean().over("k")` and other aggregations followed by `.over(...)` | preserves receiver dtype |
 | `df.group_by_dynamic("ts", every="1d").agg(...)` / `df.rolling("ts", period="1d").agg(...)` | same shape as `df.group_by(...).agg(...)` |
 | `df.join_asof(other, on=..., left_on=..., right_on=...)` | same column shape as `df.join(other, how="left")` (right side `Nullable`) |
+
+### Plural `pl.col` (M9)
+
+`pl.col("a", "b", ...)` and `pl.col(["a", "b"])` inside `select` /
+`with_columns` fan out to the named columns (their dtypes flow through
+unchanged). Missing names raise `[PLY001]`.
 
 ### `pl.*` expression constructors (M6)
 
