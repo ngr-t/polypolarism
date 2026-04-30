@@ -27,29 +27,48 @@ def extract_dataframe_annotation(
       (e.g. ``pa.DataFrame[Schema]``, ``pandera.typing.polars.DataFrame[Schema]``)
     - Forward refs as string constants: ``DataFrame["Schema"]``
 
+    The returned FrameType has ``is_lazy=True`` for ``LazyFrame[...]``
+    annotations and ``is_lazy=False`` for ``DataFrame[...]``.
+
     Returns ``None`` if the annotation is not in a recognised form or the
     schema name is unknown to the registry.
     """
     if not isinstance(annotation, ast.Subscript):
         return None
 
-    if not _is_dataframe_head(annotation.value):
+    head_name = _dataframe_head_name(annotation.value)
+    if head_name is None:
         return None
 
     schema_name = _extract_schema_name(annotation.slice)
     if schema_name is None:
         return None
 
-    return registry.to_frame_type(schema_name)
+    base = registry.to_frame_type(schema_name)
+    if base is None:
+        return None
+    # Stamp the laziness onto a copy so the registry's cached value stays neutral.
+    return FrameType(
+        columns=base.columns,
+        strict=base.strict,
+        rest=base.rest,
+        is_lazy=(head_name == "LazyFrame"),
+    )
+
+
+def _dataframe_head_name(node: ast.expr) -> str | None:
+    """Return ``"DataFrame"`` / ``"LazyFrame"`` when ``node`` is one of those
+    (bare or qualified, e.g. ``pa.DataFrame``); ``None`` otherwise."""
+    if isinstance(node, ast.Name) and node.id in _HEAD_NAMES:
+        return node.id
+    if isinstance(node, ast.Attribute) and node.attr in _HEAD_NAMES:
+        return node.attr
+    return None
 
 
 def _is_dataframe_head(node: ast.expr) -> bool:
     """Check whether ``node`` is ``DataFrame``/``LazyFrame`` (bare or qualified)."""
-    if isinstance(node, ast.Name):
-        return node.id in _HEAD_NAMES
-    if isinstance(node, ast.Attribute):
-        return node.attr in _HEAD_NAMES
-    return False
+    return _dataframe_head_name(node) is not None
 
 
 def _extract_schema_name(slice_: ast.expr) -> str | None:

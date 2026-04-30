@@ -149,6 +149,20 @@ def check_function(analysis: FunctionAnalysis) -> CheckResult:
     declared = analysis.declared_return_type
     inferred = analysis.inferred_return_type
 
+    # Eager/lazy mismatch on the return type (M15).
+    if declared.is_lazy != inferred.is_lazy:
+        expected_kind = "LazyFrame" if declared.is_lazy else "DataFrame"
+        actual_kind = "LazyFrame" if inferred.is_lazy else "DataFrame"
+        fix = (
+            ".collect() before returning"
+            if inferred.is_lazy
+            else ".lazy() before returning"
+        )
+        errors.append(
+            f"[PLY032] Return type expected {expected_kind}[...] but inferred "
+            f"{actual_kind}[...]; {fix}."
+        )
+
     # Required/optional + dtype check for declared columns
     for col_name, declared_spec in declared.columns.items():
         inferred_spec = inferred.columns.get(col_name)

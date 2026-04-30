@@ -22,6 +22,9 @@ from polypolarism.diagnostics import (
     PLY020,
     PLY021,
     PLY022,
+    PLY030,
+    PLY031,
+    PLY032,
     tag,
 )
 from polypolarism.expr_infer import (
@@ -96,13 +99,12 @@ _IDENTITY_FRAME_METHODS: frozenset[str] = frozenset(
         "sample",
         "unique",
         "clone",
-        "lazy",
         "set_sorted",
         "shrink_to_fit",
         "rechunk",
-        # LazyFrame-specific identity (M13).
-        "collect_async",
-        "collect_batches",
+        # LazyFrame-only identity (M13). Eager/lazy validation happens via
+        # _LAZY_ONLY_METHODS / _EAGER_ONLY_METHODS below; the dispatch itself
+        # preserves the receiver's column shape unchanged.
         "cache",
         "first",
         "last",
@@ -116,6 +118,80 @@ _IDENTITY_FRAME_METHODS: frozenset[str] = frozenset(
         "sink_ipc",
         "sink_ndjson",
         "sink_batches",
+    }
+)
+
+
+# Methods that exist *only* on LazyFrame in polars. Calling them on a
+# DataFrame is a runtime AttributeError; statically we surface PLY031.
+_LAZY_ONLY_METHODS: frozenset[str] = frozenset(
+    {
+        "collect",
+        "collect_async",
+        "collect_batches",
+        "cache",
+        "inspect",
+        "explain",
+        "show_graph",
+        "profile",
+        "fetch",
+        "with_context",
+        "sink_csv",
+        "sink_parquet",
+        "sink_ipc",
+        "sink_ndjson",
+        "sink_batches",
+    }
+)
+
+
+# Methods that exist *only* on DataFrame in polars. Calling them on a
+# LazyFrame triggers PLY030 with a ``.collect()`` hint.
+_EAGER_ONLY_METHODS: frozenset[str] = frozenset(
+    {
+        "to_pandas",
+        "to_numpy",
+        "to_arrow",
+        "to_dict",
+        "to_dicts",
+        "to_struct",
+        "to_init_repr",
+        "to_jax",
+        "to_torch",
+        "to_series",
+        "to_dummies",
+        "write_csv",
+        "write_parquet",
+        "write_ipc",
+        "write_ipc_stream",
+        "write_json",
+        "write_ndjson",
+        "write_avro",
+        "write_excel",
+        "write_database",
+        "write_delta",
+        "write_iceberg",
+        "write_clipboard",
+        "get_column",
+        "get_column_index",
+        "get_columns",
+        "iter_columns",
+        "iter_rows",
+        "iter_slices",
+        "row",
+        "rows",
+        "rows_by_key",
+        "item",
+        "n_chunks",
+        "estimated_size",
+        "shape",
+        "height",
+        "flags",
+        "glimpse",
+        "describe",
+        "transpose",
+        "partition_by",
+        "n_unique",
     }
 )
 
@@ -171,6 +247,27 @@ def _wrap_like(receiver: DataType, new_inner: DataType) -> DataType:
     if isinstance(receiver, Nullable):
         return Nullable(new_inner)
     return new_inner
+
+
+def _lazy_like(result: FrameType | None, source: FrameType | None) -> FrameType | None:
+    """Stamp ``source.is_lazy`` onto a freshly-built ``result`` FrameType.
+
+    ``ops/{join,groupby,reshape}.py`` build new FrameTypes without knowing
+    about laziness — the analyser post-processes their output through this
+    helper so the eager/lazy distinction is preserved across the operation.
+    """
+    if result is None or source is None:
+        return result
+    result.is_lazy = source.is_lazy
+    return result
+
+
+def _set_lazy(result: FrameType | None, lazy: bool) -> FrameType | None:
+    """Force ``is_lazy`` to a specific value (for ``df.lazy()`` / ``lf.collect()``)."""
+    if result is None:
+        return None
+    result.is_lazy = lazy
+    return result
 
 
 def _str_constant(node: ast.expr) -> str | None:
@@ -1300,6 +1397,8 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             return
         arg = call.args[0]
         if isinstance(arg, ast.Name) and arg.id in self.var_types:
+            # Preserve laziness from the variable being narrowed.
+            schema_ft.is_lazy = self.var_types[arg.id].is_lazy
             self.var_types[arg.id] = schema_ft
 
     def visit_Assign(self, node: ast.Assign) -> None:
@@ -1453,50 +1552,83 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     return piped
                 return receiver_type
 
-            # LazyFrame.collect() is identity for our static type system
-            if method_name == "collect":
-                return self._infer_expr_type(receiver)
+            # LazyFrame ↔ DataFrame transitions (M15): preserve column shape
+            # but flip ``is_lazy`` so downstream eager/lazy validation works.
+            if method_name in ("collect", "collect_async", "collect_batches"):
+                receiver_type = self._infer_expr_type(receiver)
+                if receiver_type is not None and not receiver_type.is_lazy:
+                    self.errors.append(
+                        tag(
+                            PLY031,
+                            f"`.{method_name}()` is only available on LazyFrame, "
+                            f"but the receiver is a DataFrame. Drop the call — "
+                            f"it's already eager.",
+                        )
+                    )
+                return _set_lazy(receiver_type, False)
+            if method_name == "lazy":
+                return _set_lazy(self._infer_expr_type(receiver), True)
 
-            # Handle .agg() call (comes after .group_by())
+            # Handle .agg() call (comes after .group_by()). The receiver of
+            # the group_by call is the underlying DataFrame/LazyFrame whose
+            # laziness we need to preserve onto the agg result.
             if method_name == "agg":
-                return self._infer_agg_call(receiver, node)
+                source = None
+                if (
+                    isinstance(receiver, ast.Call)
+                    and isinstance(receiver.func, ast.Attribute)
+                ):
+                    source = self._infer_expr_type(receiver.func.value)
+                return _lazy_like(self._infer_agg_call(receiver, node), source)
 
             # Handle other DataFrame methods
             receiver_type = self._infer_expr_type(receiver)
+            if receiver_type is not None:
+                self._validate_eager_lazy_method(method_name, receiver_type, node)
             if receiver_type:
+                # All of these helpers operate on column shape only; the
+                # eager/lazy bit is restamped via ``_lazy_like``.
                 if method_name == "join":
-                    return self._infer_join_call(receiver_type, node)
+                    return _lazy_like(self._infer_join_call(receiver_type, node), receiver_type)
                 elif method_name in ("group_by", "group_by_dynamic", "rolling"):
                     # Opaque receiver — the actual frame type comes from .agg().
                     return None
                 elif method_name == "join_asof":
-                    return self._infer_join_asof_call(receiver_type, node)
+                    return _lazy_like(
+                        self._infer_join_asof_call(receiver_type, node), receiver_type
+                    )
                 elif method_name == "select":
-                    return self._infer_select_call(receiver_type, node)
+                    return _lazy_like(self._infer_select_call(receiver_type, node), receiver_type)
                 elif method_name == "with_columns":
-                    return self._infer_with_columns_call(receiver_type, node)
+                    return _lazy_like(
+                        self._infer_with_columns_call(receiver_type, node), receiver_type
+                    )
                 elif method_name == "drop":
-                    return self._infer_drop_call(receiver_type, node)
+                    return _lazy_like(self._infer_drop_call(receiver_type, node), receiver_type)
                 elif method_name == "rename":
-                    return self._infer_rename_call(receiver_type, node)
+                    return _lazy_like(self._infer_rename_call(receiver_type, node), receiver_type)
                 elif method_name == "cast":
-                    return self._infer_cast_call(receiver_type, node)
+                    return _lazy_like(self._infer_cast_call(receiver_type, node), receiver_type)
                 elif method_name == "drop_nulls":
-                    return self._infer_drop_nulls_call(receiver_type, node)
+                    return _lazy_like(
+                        self._infer_drop_nulls_call(receiver_type, node), receiver_type
+                    )
                 elif method_name == "with_row_index":
-                    return self._infer_with_row_index_call(receiver_type, node)
+                    return _lazy_like(
+                        self._infer_with_row_index_call(receiver_type, node), receiver_type
+                    )
                 elif method_name == "filter":
-                    return self._infer_filter_call(receiver_type, node)
+                    return _lazy_like(self._infer_filter_call(receiver_type, node), receiver_type)
                 elif method_name == "explode":
-                    return self._infer_explode_call(receiver_type, node)
+                    return _lazy_like(self._infer_explode_call(receiver_type, node), receiver_type)
                 elif method_name == "vstack":
-                    return self._infer_vstack_call(receiver_type, node)
+                    return _lazy_like(self._infer_vstack_call(receiver_type, node), receiver_type)
                 elif method_name in ("hstack", "extend"):
-                    return self._infer_hstack_call(receiver_type, node)
+                    return _lazy_like(self._infer_hstack_call(receiver_type, node), receiver_type)
                 elif method_name in ("unpivot", "melt"):
-                    return self._infer_unpivot_call(receiver_type, node)
+                    return _lazy_like(self._infer_unpivot_call(receiver_type, node), receiver_type)
                 elif method_name == "unnest":
-                    return self._infer_unnest_call(receiver_type, node)
+                    return _lazy_like(self._infer_unnest_call(receiver_type, node), receiver_type)
                 elif method_name == "pivot":
                     return self._infer_pivot_call(receiver_type, node)
                 elif method_name in _IDENTITY_FRAME_METHODS:
@@ -1504,14 +1636,48 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
 
         return None
 
+    def _validate_eager_lazy_method(
+        self, method: str, receiver: FrameType, node: ast.Call
+    ) -> None:
+        """Surface PLY030 / PLY031 when an eager-only or lazy-only method is
+        called on the wrong side of the eager / lazy split."""
+        if receiver.is_lazy and method in _EAGER_ONLY_METHODS:
+            self.errors.append(
+                tag(
+                    PLY030,
+                    f"`.{method}()` is only available on DataFrame, but the "
+                    f"receiver is a LazyFrame. Insert `.collect()` before "
+                    f"`.{method}()` or work with the eager API throughout.",
+                )
+            )
+        elif (not receiver.is_lazy) and method in _LAZY_ONLY_METHODS:
+            self.errors.append(
+                tag(
+                    PLY031,
+                    f"`.{method}()` is only available on LazyFrame, but the "
+                    f"receiver is a DataFrame. Call `.lazy()` before "
+                    f"`.{method}()` or use the eager equivalent.",
+                )
+            )
+
     def _infer_validate_call(self, node: ast.Call) -> FrameType | None:
-        """Resolve ``Schema.validate(df)`` to the schema's FrameType."""
+        """Resolve ``Schema.validate(df_or_lf)`` to the schema's FrameType.
+
+        ``Schema.validate`` is eager/lazy-polymorphic, so the result inherits
+        the laziness of the argument it was called on.
+        """
         if not isinstance(node.func, ast.Attribute):
             return None
         schema_node = node.func.value
         if not isinstance(schema_node, ast.Name):
             return None
-        return self.schema_registry.to_frame_type(schema_node.id)
+        ft = self.schema_registry.to_frame_type(schema_node.id)
+        if ft is None or not node.args:
+            return ft
+        arg_type = self._infer_expr_type(node.args[0])
+        if arg_type is not None:
+            ft.is_lazy = arg_type.is_lazy
+        return ft
 
     def _infer_pipe_call(
         self,
@@ -1533,10 +1699,13 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             return None
         callable_arg = node.args[0]
 
-        # 1) Schema.validate
+        # 1) Schema.validate — preserves laziness of the piped-in receiver
         if isinstance(callable_arg, ast.Attribute) and callable_arg.attr == "validate":
             if isinstance(callable_arg.value, ast.Name):
-                return self.schema_registry.to_frame_type(callable_arg.value.id)
+                ft = self.schema_registry.to_frame_type(callable_arg.value.id)
+                if ft is not None and receiver_type is not None:
+                    ft.is_lazy = receiver_type.is_lazy
+                return ft
 
         # 2) registry helper — synthesise a function call
         if isinstance(callable_arg, ast.Name):
@@ -1622,6 +1791,23 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 if param_info is None:
                     continue
                 param_name, expected_type = param_info
+                # Eager/lazy must match — can't pass a LazyFrame where a
+                # DataFrame is expected (and vice versa).
+                if arg_type.is_lazy != expected_type.is_lazy:
+                    expected_kind = "LazyFrame" if expected_type.is_lazy else "DataFrame"
+                    actual_kind = "LazyFrame" if arg_type.is_lazy else "DataFrame"
+                    fix = (
+                        ".collect() the LazyFrame first"
+                        if arg_type.is_lazy
+                        else ".lazy() the DataFrame first"
+                    )
+                    self.errors.append(
+                        tag(
+                            PLY032,
+                            f"Argument '{param_name}' expected {expected_kind}[...] "
+                            f"but got {actual_kind}[...]; {fix}.",
+                        )
+                    )
                 if not _is_frame_subtype(arg_type, expected_type):
                     # Generate detailed error
                     for col_name, expected_col_spec in expected_type.columns.items():

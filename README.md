@@ -263,7 +263,7 @@ wrapper is preserved on the result.
 | `df.unpivot(index=[...], on=[...], variable_name="variable", value_name="value")` / `df.melt(...)` | output schema `{index..., variable_name: Utf8, value_name: T}` where `T` unifies the dtypes of the `on` columns |
 | `df.unnest("s")` / `df.unnest(["a","b"])` (M9) | each named `Struct{...}` column is replaced by its fields; receiver `Nullable[Struct]` widens each field to `Nullable[T]`; errors on missing column or non-`Struct` |
 | `df.pivot(on=, index=, values=)` (M12) | output schema is data-dependent and so cannot be inferred. Polypolarism emits `[PLW005]` with a copy-pasteable Pandera schema sketch and trusts the user's `result: DataFrame[Schema]` annotation when the result is bound to a typed variable. |
-| **LazyFrame** (M13): `lf.collect()`, `lf.collect_async()`, `lf.collect_batches()`, `lf.cache()`, `lf.first()`, `lf.last()`, `lf.inspect()`, `lf.top_k(...)`, `lf.bottom_k(...)`, `lf.sink_csv(...)`, `lf.sink_parquet(...)`, `lf.sink_ipc(...)`, `lf.sink_ndjson(...)`, `lf.sink_batches(...)`, `df.lazy()` | identity-typed (`LazyFrame[Schema]` and `DataFrame[Schema]` share the same static `FrameType`, so eager↔lazy round-trips preserve the schema). Sinks terminate the plan at runtime but the chain stays statically typed for downstream operations. |
+| **LazyFrame** (M13): `lf.collect()`, `lf.collect_async()`, `lf.collect_batches()`, `lf.cache()`, `lf.first()`, `lf.last()`, `lf.inspect()`, `lf.top_k(...)`, `lf.bottom_k(...)`, `lf.sink_csv(...)`, `lf.sink_parquet(...)`, `lf.sink_ipc(...)`, `lf.sink_ndjson(...)`, `lf.sink_batches(...)`, `df.lazy()` | column shape preserved through the call. As of M15, `LazyFrame[Schema]` and `DataFrame[Schema]` are *statically distinguished*: `lazy()` flips the receiver to lazy and `collect*()` flips it to eager. Calling a lazy-only method on a `DataFrame` (or vice versa) emits `PLY031` / `PLY030`. Crossing eager↔lazy in function-call arguments or return types emits `PLY032`. |
 
 `df.partition_by("k")` (M14) returns a list of frames — assigning it
 to a variable binds the variable as a `FrameList(element=...)` whose
@@ -339,6 +339,9 @@ Errors are tagged with a stable `[PLY###]` prefix for IDE/CI consumers:
 | `PLY020` | `concat` schema mismatch (vertical / horizontal overlap / diagonal unify) |
 | `PLY021` | `explode`: column not found or not `List[T]` |
 | `PLY022` | `unpivot`: column not found or `on`-columns dtype mismatch |
+| `PLY030` | eager-only method called on a `LazyFrame` (e.g. `lf.write_csv(...)`) — suggests `.collect()` |
+| `PLY031` | lazy-only method called on a `DataFrame` (e.g. `df.sink_csv(...)`, `df.collect()`) — suggests `.lazy()` or removing the call |
+| `PLY032` | function-call argument or return type mixes up `DataFrame[S]` and `LazyFrame[S]` — suggests the appropriate `.collect()` / `.lazy()` |
 
 ### Apply-style helpers and warning codes (M7)
 

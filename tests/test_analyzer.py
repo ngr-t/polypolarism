@@ -2688,6 +2688,140 @@ class TestM14PartitionBy:
         assert any("PLY001" in e and "'k'" in e for e in results[0].errors)
 
 
+class TestM15LazyEagerDistinction:
+    """LazyFrame[T] is statically distinct from DataFrame[T]."""
+
+    LF_HEADER = """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame, LazyFrame
+"""
+
+    def test_writing_csv_on_lazy_emits_ply030(self):
+        source = textwrap.dedent(
+            self.LF_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                id: int
+
+            def f(lf: LazyFrame[S]):
+                return lf.write_csv("out.csv")
+        """
+        )
+        results = analyze_source(source)
+        assert any("PLY030" in e and "write_csv" in e for e in results[0].errors)
+        assert any("collect" in e for e in results[0].errors)
+
+    def test_sink_on_eager_emits_ply031(self):
+        source = textwrap.dedent(
+            self.LF_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                id: int
+
+            def f(df: DataFrame[S]):
+                return df.sink_csv("out.csv")
+        """
+        )
+        results = analyze_source(source)
+        assert any("PLY031" in e and "sink_csv" in e for e in results[0].errors)
+
+    def test_collect_on_eager_emits_ply031(self):
+        source = textwrap.dedent(
+            self.LF_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                id: int
+
+            def f(df: DataFrame[S]):
+                return df.collect()
+        """
+        )
+        results = analyze_source(source)
+        assert any("PLY031" in e for e in results[0].errors)
+
+    def test_function_call_lazy_arg_to_eager_param_errors(self):
+        source = textwrap.dedent(
+            self.LF_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                id: int
+
+            def helper(df: DataFrame[S]) -> DataFrame[S]:
+                return df
+
+            def caller(lf: LazyFrame[S]):
+                return helper(lf)
+        """
+        )
+        results = analyze_source(source)
+        caller = next(r for r in results if r.name == "caller")
+        assert any("PLY032" in e for e in caller.errors)
+        assert any(".collect()" in e for e in caller.errors)
+
+    def test_return_lazy_when_eager_declared_errors(self):
+        source = textwrap.dedent(
+            self.LF_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                id: int
+
+            def f(lf: LazyFrame[S]) -> DataFrame[S]:
+                return lf
+        """
+        )
+        # check_function adds the return-type lazy mismatch.
+        from polypolarism.checker import check_source
+        results_chk = check_source(source)
+        assert any("PLY032" in str(e) for e in results_chk[0].errors)
+
+    def test_lazy_to_eager_via_collect_is_clean(self):
+        source = textwrap.dedent(
+            self.LF_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                id: int
+
+            def f(lf: LazyFrame[S]) -> DataFrame[S]:
+                return lf.collect()
+        """
+        )
+        from polypolarism.checker import check_source
+        results_chk = check_source(source)
+        assert results_chk[0].passed is True, results_chk[0].errors
+
+    def test_eager_to_lazy_via_lazy_method(self):
+        source = textwrap.dedent(
+            self.LF_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                id: int
+
+            def f(df: DataFrame[S]) -> LazyFrame[S]:
+                return df.lazy()
+        """
+        )
+        from polypolarism.checker import check_source
+        results_chk = check_source(source)
+        assert results_chk[0].passed is True, results_chk[0].errors
+
+    def test_chain_lazy_through_filter_select_collect(self):
+        source = textwrap.dedent(
+            self.LF_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                id: int
+                value: pl.Float64
+
+            def f(lf: LazyFrame[S]) -> DataFrame[S]:
+                return lf.filter(pl.col("value") > 0).select(pl.col("id"), pl.col("value")).collect()
+        """
+        )
+        from polypolarism.checker import check_source
+        results_chk = check_source(source)
+        assert results_chk[0].passed is True, results_chk[0].errors
+
+
 class TestFunctionAnalysisDataClass:
     """Test FunctionAnalysis data class."""
 

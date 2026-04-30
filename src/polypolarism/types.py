@@ -359,17 +359,26 @@ class FrameType:
     The constructor accepts ``dict[str, ColumnSpec | DataType]`` for ergonomics
     — bare DataType values are wrapped in ``ColumnSpec(dtype=val)`` — but the
     stored ``columns`` field is always ``dict[str, ColumnSpec]``.
+
+    ``is_lazy`` distinguishes ``LazyFrame[S]`` (``True``) from
+    ``DataFrame[S]`` (``False``). It does *not* participate in ``__eq__`` so
+    existing schema-shape assertions (``assert ft == FrameType({"x": Int64()})``)
+    keep working — laziness is enforced explicitly in the function-call
+    argument check, the declared-vs-inferred return-type check, and the
+    eager-only / lazy-only method dispatch.
     """
 
     columns: dict[str, ColumnSpec]
     strict: bool
     rest: RowVar | None  # For future row polymorphism extension
+    is_lazy: bool
 
     def __init__(
         self,
         columns: Mapping[str, ColumnSpec | DataType] | None = None,
         strict: bool = False,
         rest: RowVar | None = None,
+        is_lazy: bool = False,
     ) -> None:
         normalized: dict[str, ColumnSpec] = {}
         if columns:
@@ -386,6 +395,7 @@ class FrameType:
         self.columns = normalized
         self.strict = strict
         self.rest = rest
+        self.is_lazy = is_lazy
 
     def has_column(self, name: str) -> bool:
         """Check if a column exists."""
