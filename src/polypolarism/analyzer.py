@@ -100,6 +100,22 @@ _IDENTITY_FRAME_METHODS: frozenset[str] = frozenset(
         "set_sorted",
         "shrink_to_fit",
         "rechunk",
+        # LazyFrame-specific identity (M13).
+        "collect_async",
+        "collect_batches",
+        "cache",
+        "first",
+        "last",
+        "inspect",
+        "top_k",
+        "bottom_k",
+        # Sinks: terminate the lazy pipeline at runtime, but for static
+        # type tracking we treat them as identity so chains continue.
+        "sink_csv",
+        "sink_parquet",
+        "sink_ipc",
+        "sink_ndjson",
+        "sink_batches",
     }
 )
 

@@ -2499,6 +2499,115 @@ class TestM12Pivot:
         assert ft.columns["B"].dtype == Float64()
 
 
+class TestM13LazyFrame:
+    """LazyFrame-specific methods: identity passthrough + sinks + collect_async."""
+
+    LF_HEADER = """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame, LazyFrame
+"""
+
+    def test_collect_async_preserves_schema(self):
+        source = textwrap.dedent(
+            self.LF_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                id: int
+                value: pl.Float64
+
+            def f(lf: LazyFrame[S]) -> DataFrame[S]:
+                return lf.collect_async()
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["id"].dtype == Int64()
+
+    @pytest.mark.parametrize(
+        "method",
+        ["cache()", "first()", "last()", "inspect()", "top_k(5, by='id')",
+         "bottom_k(5, by='id')"],
+    )
+    def test_lazy_identity_methods(self, method: str):
+        source = textwrap.dedent(
+            self.LF_HEADER
+            + f"""
+            class S(pa.DataFrameModel):
+                id: int
+                value: pl.Float64
+
+            def f(lf: LazyFrame[S]) -> LazyFrame[S]:
+                return lf.{method}
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert "id" in ft.columns and "value" in ft.columns
+
+    def test_sink_csv_keeps_chain(self):
+        """sink_csv terminates lazily but we keep the schema for chain continuity."""
+        source = textwrap.dedent(
+            self.LF_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                id: int
+
+            def f(lf: LazyFrame[S]) -> LazyFrame[S]:
+                return lf.sink_csv("out.csv", lazy=True)
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+
+    def test_collect_batches_preserves_schema(self):
+        source = textwrap.dedent(
+            self.LF_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                id: int
+
+            def f(lf: LazyFrame[S]) -> DataFrame[S]:
+                return lf.collect_batches()
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+
+    def test_full_lazy_pipeline(self):
+        """Lazy chain end-to-end: filter → with_columns → group_by → collect."""
+        source = textwrap.dedent(
+            self.LF_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                k: str
+                v: pl.Float64
+
+            class Out(pa.DataFrameModel):
+                k: str
+                v_sum: pl.Float64
+
+            def f(lf: LazyFrame[In]) -> DataFrame[Out]:
+                return (
+                    lf.filter(pl.col("v") > 0)
+                      .with_columns(pl.col("v").fill_null(0.0).alias("v"))
+                      .group_by("k")
+                      .agg(pl.col("v").sum().alias("v_sum"))
+                      .collect()
+                )
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["v_sum"].dtype == Float64()
+
+
 class TestFunctionAnalysisDataClass:
     """Test FunctionAnalysis data class."""
 
