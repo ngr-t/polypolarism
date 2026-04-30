@@ -2608,6 +2608,86 @@ class TestM13LazyFrame:
         assert ft.columns["v_sum"].dtype == Float64()
 
 
+class TestM14PartitionBy:
+    """``df.partition_by("k")`` returns ``list[FrameType]`` — element-typed."""
+
+    def test_partition_subscript_first_element(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                k: str
+                v: pl.Float64
+
+            def f(df: DataFrame[S]) -> DataFrame[S]:
+                parts = df.partition_by("k")
+                return parts[0]
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert "k" in ft.columns and "v" in ft.columns
+
+    def test_partition_for_loop_propagates_element_type(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                k: str
+                v: pl.Float64
+
+            class Out(pa.DataFrameModel):
+                v: pl.Float64
+
+            def f(df: DataFrame[S]):
+                last: DataFrame[Out] = df  # placeholder so we can read it back
+                for part in df.partition_by("k"):
+                    last = part.select(pl.col("v"))
+                return last
+        """
+        )
+        results = analyze_source(source)
+        # No PLY001 — pl.col("v") was resolved using the loop var's element type.
+        assert not any("PLY001" in e for e in results[0].errors), results[0].errors
+
+    def test_partition_include_key_false_drops_key(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                k: str
+                v: pl.Float64
+
+            def f(df: DataFrame[S]):
+                parts = df.partition_by("k", include_key=False)
+                first = parts[0]
+                return first.select(pl.col("v"))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+
+    def test_partition_include_key_false_drops_key_errors_on_key_ref(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                k: str
+                v: pl.Float64
+
+            def f(df: DataFrame[S]):
+                parts = df.partition_by("k", include_key=False)
+                first = parts[0]
+                return first.select(pl.col("k"))
+        """
+        )
+        results = analyze_source(source)
+        # k was excluded from each partition; selecting it now raises PLY001.
+        assert any("PLY001" in e and "'k'" in e for e in results[0].errors)
+
+
 class TestFunctionAnalysisDataClass:
     """Test FunctionAnalysis data class."""
 

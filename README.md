@@ -265,8 +265,13 @@ wrapper is preserved on the result.
 | `df.pivot(on=, index=, values=)` (M12) | output schema is data-dependent and so cannot be inferred. Polypolarism emits `[PLW005]` with a copy-pasteable Pandera schema sketch and trusts the user's `result: DataFrame[Schema]` annotation when the result is bound to a typed variable. |
 | **LazyFrame** (M13): `lf.collect()`, `lf.collect_async()`, `lf.collect_batches()`, `lf.cache()`, `lf.first()`, `lf.last()`, `lf.inspect()`, `lf.top_k(...)`, `lf.bottom_k(...)`, `lf.sink_csv(...)`, `lf.sink_parquet(...)`, `lf.sink_ipc(...)`, `lf.sink_ndjson(...)`, `lf.sink_batches(...)`, `df.lazy()` | identity-typed (`LazyFrame[Schema]` and `DataFrame[Schema]` share the same static `FrameType`, so eager↔lazy round-trips preserve the schema). Sinks terminate the plan at runtime but the chain stays statically typed for downstream operations. |
 
-`partition_by()` is still deferred — it returns `list[FrameType]`, which
-needs a list-of-frame return type that polypolarism doesn't model yet.
+`df.partition_by("k")` (M14) returns a list of frames — assigning it
+to a variable binds the variable as a `FrameList(element=...)` whose
+element type carries through subscript indexing (`parts[0]`) and
+for-loop iteration (`for p in parts:`). With `include_key=False` the
+partition keys are dropped from each element schema. Only
+`partition_by` produces a `FrameList` today; other operations that
+return multiple frames are out of scope.
 
 ### Window / time-series (M5)
 

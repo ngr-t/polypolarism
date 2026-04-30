@@ -415,3 +415,19 @@ class RowVar:
     """Row variable for row polymorphism (future extension)."""
 
     name: str
+
+
+@dataclass
+class FrameList:
+    """A list of frames sharing the same ``element`` FrameType.
+
+    Used to model ``df.partition_by("k")`` and any future operation that
+    yields multiple frames at once. Subscript indexing (``parts[0]``) and
+    for-loop iteration (``for p in parts:``) bind the element type to the
+    target name.
+    """
+
+    element: FrameType
+
+    def __str__(self) -> str:
+        return f"list[FrameType({len(self.element.columns)} cols)]"

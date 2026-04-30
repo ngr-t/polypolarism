@@ -1227,6 +1227,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         self.schema_registry = schema_registry or SchemaRegistry()
         # Track variable -> FrameType mapping
         self.var_types: dict[str, FrameType] = dict(input_types)
+        # Track variable -> FrameList element type (for partition_by results
+        # and any other op that yields a list of frames).
+        self.var_lists: dict[str, FrameType] = {}
         self.return_type: FrameType | None = None
         # Bare ``Schema.validate(df)`` narrowing only fires at the function's
         # top level. We toggle this off when descending into if/for/while/try.
@@ -1244,6 +1247,14 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         self._visit_with_narrowing_disabled(node)
 
     def visit_For(self, node: ast.For) -> None:
+        # ``for part in df.partition_by(...):`` / ``for part in parts:`` —
+        # bind the loop target to the FrameList element type so column
+        # references inside the loop body resolve. The binding stays in
+        # place after the loop, mirroring Python semantics.
+        if isinstance(node.target, ast.Name):
+            elem = self._resolve_frame_list_element(node.iter)
+            if elem is not None:
+                self.var_types[node.target.id] = elem
         self._visit_with_narrowing_disabled(node)
 
     def visit_AsyncFor(self, node: ast.AsyncFor) -> None:
@@ -1295,9 +1306,17 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         """Handle variable assignments."""
         if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
             var_name = node.targets[0].id
+            # ``parts = df.partition_by("k")`` — bind to FrameList element type.
+            list_elem = self._infer_frame_list(node.value)
+            if list_elem is not None:
+                self.var_lists[var_name] = list_elem
+                self.var_types.pop(var_name, None)
+                self.generic_visit(node)
+                return
             inferred = self._infer_expr_type(node.value)
             if inferred:
                 self.var_types[var_name] = inferred
+                self.var_lists.pop(var_name, None)
         self.generic_visit(node)
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
@@ -1327,11 +1346,80 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         if isinstance(node, ast.Name):
             return self.var_types.get(node.id)
 
+        # Subscript on a FrameList variable: ``parts[0]`` → element FrameType.
+        # Whatever index expression the user wrote is irrelevant for typing —
+        # every element shares the same schema.
+        if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name):
+            elem = self.var_lists.get(node.value.id)
+            if elem is not None:
+                return elem
+
         # Method call chain or function call
         if isinstance(node, ast.Call):
             return self._infer_call_type(node)
 
         return None
+
+    # -- M14: partition_by / FrameList helpers --------------------------------
+
+    def _is_partition_by_call(self, node: ast.expr) -> bool:
+        return (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "partition_by"
+        )
+
+    def _infer_frame_list(self, node: ast.expr) -> FrameType | None:
+        """If ``node`` is a partition_by call (or names a FrameList variable),
+        return the element FrameType. Otherwise ``None``."""
+        if isinstance(node, ast.Name):
+            return self.var_lists.get(node.id)
+        if self._is_partition_by_call(node):
+            assert isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            receiver_type = self._infer_expr_type(node.func.value)
+            if receiver_type is None:
+                return None
+            return self._compute_partition_element(receiver_type, node)
+        return None
+
+    def _compute_partition_element(
+        self, receiver_type: FrameType, node: ast.Call
+    ) -> FrameType:
+        """``df.partition_by(*by, include_key=True)`` element schema.
+
+        Each partition has the same columns as the receiver, minus the
+        partition keys when ``include_key=False``.
+        """
+        keys: list[str] = []
+        for arg in node.args:
+            single = _str_constant(arg)
+            multi = _str_list_or_tuple(arg)
+            if single is not None:
+                keys.append(single)
+            elif multi is not None:
+                keys.extend(multi)
+        include_key = True
+        for kw in node.keywords:
+            if kw.arg == "include_key" and isinstance(kw.value, ast.Constant):
+                include_key = bool(kw.value.value)
+        if include_key:
+            return receiver_type
+        result_columns = {
+            name: spec for name, spec in receiver_type.columns.items() if name not in keys
+        }
+        return FrameType(
+            columns=result_columns,
+            strict=receiver_type.strict,
+            rest=receiver_type.rest,
+        )
+
+    def _resolve_frame_list_element(self, node: ast.expr) -> FrameType | None:
+        """Reach the element type of ``for x in <node>:``.
+
+        Accepts both already-bound variables (``parts``) and inline
+        expressions (``df.partition_by("k")``).
+        """
+        return self._infer_frame_list(node)
 
     def _infer_call_type(self, node: ast.Call) -> FrameType | None:
         """Infer the type of a method or function call."""
