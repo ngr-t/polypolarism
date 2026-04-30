@@ -262,10 +262,10 @@ wrapper is preserved on the result.
 | `df.hstack(other)` / `df.extend(other)` | shorthand for horizontal `pl.concat([df, other])` |
 | `df.unpivot(index=[...], on=[...], variable_name="variable", value_name="value")` / `df.melt(...)` | output schema `{index..., variable_name: Utf8, value_name: T}` where `T` unifies the dtypes of the `on` columns |
 | `df.unnest("s")` / `df.unnest(["a","b"])` (M9) | each named `Struct{...}` column is replaced by its fields; receiver `Nullable[Struct]` widens each field to `Nullable[T]`; errors on missing column or non-`Struct` |
+| `df.pivot(on=, index=, values=)` (M12) | output schema is data-dependent and so cannot be inferred. Polypolarism emits `[PLW005]` with a copy-pasteable Pandera schema sketch and trusts the user's `result: DataFrame[Schema]` annotation when the result is bound to a typed variable. |
 
-`pivot()` and `partition_by()` are intentionally not yet inferred — they
-are deferred to a later milestone because the result schema depends on
-runtime data.
+`partition_by()` is still deferred — it returns `list[FrameType]`, which
+needs a list-of-frame return type that polypolarism doesn't model yet.
 
 ### Window / time-series (M5)
 
@@ -361,6 +361,7 @@ Warning codes:
 | `PLW002` | `pipe` with a callable that isn't in the analysed module |
 | `PLW003` | function call to a name that isn't defined in the analysed module |
 | `PLW004` | lambda / inline callable used where its return dtype is unknowable |
+| `PLW005` | `pivot()` output schema is data-dependent; bind to a `DataFrame[Schema]` variable |
 
 JSON output (`--format json`) emits warnings as `severity: "warning"`
 diagnostics so editors and CI can route them separately from errors.

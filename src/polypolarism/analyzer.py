@@ -10,6 +10,7 @@ from polypolarism.diagnostics import (
     PLW002,
     PLW003,
     PLW004,
+    PLW005,
     PLY001,
     PLY002,
     PLY003,
@@ -1291,6 +1292,11 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             frame_type, _ = _resolve_declared_type(node.annotation, self.schema_registry)
             if frame_type is not None:
                 self.var_types[var_name] = frame_type
+                # Still walk the RHS so warnings (e.g. PLW005 from pivot) and
+                # column-resolution errors surface even though the declared
+                # annotation wins for the variable's static type.
+                if node.value:
+                    self._infer_expr_type(node.value)
                 return
             # Fall back to inference from value
             if node.value:
@@ -1387,6 +1393,8 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     return self._infer_unpivot_call(receiver_type, node)
                 elif method_name == "unnest":
                     return self._infer_unnest_call(receiver_type, node)
+                elif method_name == "pivot":
+                    return self._infer_pivot_call(receiver_type, node)
                 elif method_name in _IDENTITY_FRAME_METHODS:
                     return receiver_type
 
@@ -2068,6 +2076,67 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         except ReshapeError as e:
             self.errors.append(tag(PLY022, str(e)))
             return None
+
+    def _infer_pivot_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
+        """``df.pivot(on=..., index=..., values=...)``.
+
+        The output schema depends on the *runtime values* of the ``on``
+        column, which polypolarism cannot see. Instead of guessing, we emit
+        ``PLW005`` with a copy-pasteable annotation suggestion built from
+        the call site. Users who assign the result to a
+        ``DataFrame[Schema]``-annotated variable get the schema applied
+        through the existing ``AnnAssign`` path.
+        """
+        index_cols: list[str] = []
+        on_col: str | None = None
+        values_col: str | None = None
+        for kw in node.keywords:
+            if kw.arg == "index":
+                lst = _str_list_or_tuple(kw.value)
+                single = _str_constant(kw.value)
+                if lst is not None:
+                    index_cols = lst
+                elif single is not None:
+                    index_cols = [single]
+            elif kw.arg == "on":
+                cand = _str_constant(kw.value)
+                if cand is not None:
+                    on_col = cand
+            elif kw.arg == "values":
+                cand = _str_constant(kw.value)
+                if cand is not None:
+                    values_col = cand
+
+        # Build a minimally helpful annotation hint when the call shape is
+        # readable. Otherwise just emit the generic warning.
+        hint = ""
+        if index_cols and values_col is not None:
+            value_dtype = input_frame.get_column_type(values_col)
+            value_str = str(value_dtype) if value_dtype is not None else "T"
+            index_lines = []
+            for c in index_cols:
+                idx_dtype = input_frame.get_column_type(c)
+                idx_str = str(idx_dtype) if idx_dtype is not None else "T"
+                index_lines.append(f"{c}: pl.{idx_str}")
+            on_label = f"each value of '{on_col}'" if on_col else "each pivoted column"
+            hint = (
+                " Suggested annotation:\n"
+                "      class PivotedOut(pa.DataFrameModel):\n"
+                + "".join(f"          {line}\n" for line in index_lines)
+                + f"          # one column per {on_label}, dtype pl.{value_str}\n"
+                "      result: DataFrame[PivotedOut] = df.pivot(...)"
+            )
+
+        self.warnings.append(
+            tag(
+                PLW005,
+                "pivot: output schema depends on the runtime values of the "
+                "`on` column, so polypolarism cannot infer it. Assign the "
+                "result to a `DataFrame[Schema]`-annotated variable to give "
+                "the analyser a schema to check against." + hint,
+            )
+        )
+        return None
 
     def _infer_unnest_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
         """``df.unnest("s")`` / ``unnest(["a","b"])`` flattens Struct columns."""

@@ -2446,6 +2446,59 @@ class TestM10SelectorArithmetic:
         assert "name" not in ft.columns
 
 
+class TestM12Pivot:
+    """``df.pivot(...)`` is data-dependent — we warn and require a typed annotation."""
+
+    def test_pivot_emits_plw005_with_actionable_message(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                k: str
+                cat: str
+                v: pl.Float64
+
+            def f(data: DataFrame[S]):
+                return data.pivot(on="cat", index=["k"], values="v")
+        """
+        )
+        results = analyze_source(source)
+        f = results[0]
+        assert any("PLW005" in w for w in f.warnings)
+        # The message should mention pivot and a typed-annotation hint.
+        assert any("pivot" in w and "DataFrame[" in w for w in f.warnings)
+
+    def test_pivot_assigned_to_typed_var_uses_annotation(self):
+        """``result: DataFrame[Out] = df.pivot(...)`` lets the annotation win."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                k: str
+                cat: str
+                v: pl.Float64
+
+            class Out(pa.DataFrameModel):
+                k: str
+                A: pl.Float64
+                B: pl.Float64
+
+            def f(data: DataFrame[In]) -> DataFrame[Out]:
+                result: DataFrame[Out] = data.pivot(on="cat", index=["k"], values="v")
+                return result
+        """
+        )
+        results = analyze_source(source)
+        # The pivot itself emits PLW005 …
+        assert any("PLW005" in w for w in results[0].warnings)
+        # … but the function passes because the annotation gave us the schema.
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["A"].dtype == Float64()
+        assert ft.columns["B"].dtype == Float64()
+
+
 class TestFunctionAnalysisDataClass:
     """Test FunctionAnalysis data class."""
 

@@ -34,6 +34,7 @@ PLW001 = "PLW001"  # map_elements / map_batches without ``return_dtype=`` keywor
 PLW002 = "PLW002"  # ``df.pipe(callable)`` where the callable can't be resolved
 PLW003 = "PLW003"  # function call to a name that isn't in the analysed module
 PLW004 = "PLW004"  # lambda / inline callable used where its return dtype is unknowable
+PLW005 = "PLW005"  # pivot result schema is data-dependent; user should annotate
 
 
 def tag(code: str, message: str) -> str:
