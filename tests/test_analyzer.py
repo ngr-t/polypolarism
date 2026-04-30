@@ -2321,6 +2321,131 @@ class TestM9PluralCol:
         assert any("missing" in e for e in results[0].errors)
 
 
+class TestM10SelectorArithmetic:
+    """``cs.exclude(...)`` and selector ``|`` / ``&`` / ``-`` / ``~``."""
+
+    def test_cs_exclude_names(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            import polars.selectors as cs
+
+            class S(pa.DataFrameModel):
+                id: int
+                value: pl.Float64
+                name: str
+
+            def f(data: DataFrame[S]):
+                return data.select(cs.exclude("name"))
+        """
+        )
+        results = analyze_source(source)
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert "id" in ft.columns
+        assert "value" in ft.columns
+        assert "name" not in ft.columns
+
+    def test_cs_exclude_selector(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            import polars.selectors as cs
+
+            class S(pa.DataFrameModel):
+                id: int
+                price: pl.Float64
+                name: str
+
+            def f(data: DataFrame[S]):
+                return data.select(cs.exclude(cs.string()))
+        """
+        )
+        results = analyze_source(source)
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert "id" in ft.columns
+        assert "price" in ft.columns
+        assert "name" not in ft.columns
+
+    def test_selector_subtraction(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            import polars.selectors as cs
+
+            class S(pa.DataFrameModel):
+                id: int
+                price: pl.Float64
+                name: str
+
+            def f(data: DataFrame[S]):
+                return data.select(cs.numeric() - cs.by_name("id"))
+        """
+        )
+        results = analyze_source(source)
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert "price" in ft.columns
+        assert "id" not in ft.columns
+        assert "name" not in ft.columns
+
+    def test_selector_union_and_intersection(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            import polars.selectors as cs
+
+            class S(pa.DataFrameModel):
+                id: int
+                price_a: pl.Float64
+                price_b: pl.Float64
+                name: str
+
+            def f(data: DataFrame[S]):
+                return data.select(
+                    cs.numeric() & cs.starts_with("price_"),  # intersection
+                )
+
+            def g(data: DataFrame[S]):
+                return data.select(cs.starts_with("price_") | cs.by_name("name"))
+        """
+        )
+        results = analyze_source(source)
+        f = next(r for r in results if r.name == "f")
+        g = next(r for r in results if r.name == "g")
+        f_ft = f.inferred_return_type
+        g_ft = g.inferred_return_type
+        assert f_ft is not None
+        assert "price_a" in f_ft.columns and "price_b" in f_ft.columns
+        assert "id" not in f_ft.columns and "name" not in f_ft.columns
+        assert g_ft is not None
+        assert "price_a" in g_ft.columns and "name" in g_ft.columns
+        assert "id" not in g_ft.columns
+
+    def test_selector_complement(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            import polars.selectors as cs
+
+            class S(pa.DataFrameModel):
+                id: int
+                price: pl.Float64
+                name: str
+
+            def f(data: DataFrame[S]):
+                return data.select(~cs.string())
+        """
+        )
+        results = analyze_source(source)
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert "id" in ft.columns
+        assert "price" in ft.columns
+        assert "name" not in ft.columns
+
+
 class TestFunctionAnalysisDataClass:
     """Test FunctionAnalysis data class."""
 

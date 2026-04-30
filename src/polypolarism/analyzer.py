@@ -205,8 +205,44 @@ def _selector_dtype_filter(name: str):
 def _resolve_selector(node: ast.expr, frame: FrameType) -> list[str] | None:
     """Resolve a ``polars.selectors`` (``cs.*``) call to a list of column names.
 
-    Returns ``None`` if the node isn't a recognised selector.
+    Returns ``None`` if the node isn't a recognised selector. Also handles
+    selector algebra:
+    - ``cs.a | cs.b``: union
+    - ``cs.a & cs.b``: intersection
+    - ``cs.a - cs.b``: difference (left minus right)
+    - ``~cs.a``: complement (every column not matched by ``cs.a``)
+    - ``cs.exclude(names_or_selector)``: shorthand for ``~`` against a name
+      list or another selector.
     """
+    # Selector algebra — recurse into operands first so ``cs.numeric() - cs.by_name(...)``
+    # works regardless of how deeply nested the operators are.
+    if isinstance(node, ast.BinOp):
+        left = _resolve_selector(node.left, frame)
+        right = _resolve_selector(node.right, frame)
+        if left is None or right is None:
+            return None
+        right_set = set(right)
+        if isinstance(node.op, ast.BitOr):
+            seen: set[str] = set()
+            out: list[str] = []
+            for c in [*left, *right]:
+                if c not in seen:
+                    seen.add(c)
+                    out.append(c)
+            return out
+        if isinstance(node.op, ast.BitAnd):
+            return [c for c in left if c in right_set]
+        if isinstance(node.op, ast.Sub):
+            return [c for c in left if c not in right_set]
+        return None
+
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Invert):
+        sub = _resolve_selector(node.operand, frame)
+        if sub is None:
+            return None
+        excluded = set(sub)
+        return [c for c in frame.columns if c not in excluded]
+
     if not isinstance(node, ast.Call):
         return None
     if not isinstance(node.func, ast.Attribute):
@@ -263,6 +299,30 @@ def _resolve_selector(node: ast.expr, frame: FrameType) -> list[str] | None:
         if name == "ends_with":
             return [c for c in frame.columns if c.endswith(needle)]
         return [c for c in frame.columns if needle in c]
+
+    if name == "exclude":
+        # ``cs.exclude("a", "b")``, ``cs.exclude(["a", "b"])``, or
+        # ``cs.exclude(cs.<other_selector>())``. The result is every column
+        # that does *not* match the inner specification.
+        excluded: set[str] = set()
+        for arg in node.args:
+            single = _str_constant(arg)
+            multi = _str_list_or_tuple(arg)
+            if single is not None:
+                excluded.add(single)
+            elif multi is not None:
+                excluded.update(multi)
+            else:
+                inner = _resolve_selector(arg, frame)
+                if inner is not None:
+                    excluded.update(inner)
+        return [c for c in frame.columns if c not in excluded]
+
+    if name in ("first", "last"):
+        if not frame.columns:
+            return []
+        cols = list(frame.columns.keys())
+        return [cols[0]] if name == "first" else [cols[-1]]
 
     return None
 

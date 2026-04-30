@@ -312,6 +312,9 @@ positional arguments to `select`, `with_columns`, or `drop`.
 | `cs.starts_with("prefix")` / `ends_with("suffix")` / `contains("part")` | column-name pattern |
 | `cs.by_name("a", "b", ...)` | exact-name list |
 | `cs.by_dtype(pl.Int64, pl.Float64)` | matching dtypes |
+| `cs.first()` / `cs.last()` (M10) | first or last column of the frame |
+| `cs.exclude(names_or_selector)` (M10) | every column not matched by the names or inner selector |
+| `~sel` / `sel1 | sel2` / `sel1 & sel2` / `sel1 - sel2` (M10) | complement / union / intersection / difference of selectors |
 
 ### Diagnostic codes (M6)
 
