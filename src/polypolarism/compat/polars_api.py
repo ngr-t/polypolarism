@@ -17,6 +17,7 @@ from polypolarism.types import (
     DataType,
     Date,
     Datetime,
+    Decimal,
     Duration,
     Enum,
     Float16,
@@ -35,6 +36,11 @@ from polypolarism.types import (
     UInt128,
     Utf8,
 )
+
+# Polars' own ``pl.Decimal()`` defaults (precision=38, scale=0). Used when
+# the analyzer sees a bare ``pl.Decimal`` reference; explicit
+# ``pl.Decimal(p, s)`` is parsed at the call site to preserve p / s.
+DECIMAL_DEFAULT = Decimal(38, 0)
 
 # Single source of truth for ``pl.<Name>`` attribute → DataType. Both the
 # analyzer (for column / cast inference) and pandera_dtype (for schema
@@ -70,6 +76,7 @@ DTYPE_NAME_MAP: dict[str, DataType] = {
     "Datetime": Datetime(),
     "Duration": Duration(),
     "Categorical": Categorical(),
+    "Decimal": DECIMAL_DEFAULT,
     "Enum": Enum(),
     "Null": Null(),
 }

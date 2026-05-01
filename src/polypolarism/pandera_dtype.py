@@ -27,6 +27,7 @@ from polypolarism.types import (
     DataType,
     Date,
     Datetime,
+    Decimal,
     Duration,
     Float64,
     Int64,
@@ -137,8 +138,44 @@ def _parse_plain_dtype(node: ast.expr) -> DataType | None:
         return None
 
     if isinstance(node, ast.Call):
+        # ``pl.Decimal(precision, scale)`` preserves its arguments. Other
+        # parametrized dtypes (Datetime, Duration, Array width, ...) drop
+        # arguments today — see DTYPE_NAME_MAP comment in compat.
+        if _is_pl_attr(node.func, "Decimal"):
+            decimal_dt = _parse_decimal_call(node)
+            if decimal_dt is not None:
+                return decimal_dt
         return _parse_plain_dtype(node.func)
 
+    return None
+
+
+def _parse_decimal_call(node: ast.Call) -> DataType | None:
+    """Parse ``pl.Decimal(precision, scale)`` into ``Decimal(p, s)``.
+
+    Returns ``None`` if the args aren't simple integer literals (we don't
+    yet trace variable bindings into dtype constructors).
+    """
+    precision = _int_arg(node, position=0, name="precision")
+    scale = _int_arg(node, position=1, name="scale")
+    if precision is None and scale is None and not node.args and not node.keywords:
+        # Bare ``pl.Decimal()`` — use the default.
+        return DTYPE_NAME_MAP["Decimal"]
+    if precision is None or scale is None:
+        return None
+    return Decimal(precision, scale)
+
+
+def _int_arg(call: ast.Call, *, position: int, name: str) -> int | None:
+    """Extract an integer arg from ``call`` by position or keyword."""
+    if position < len(call.args):
+        node = call.args[position]
+        if isinstance(node, ast.Constant) and isinstance(node.value, int):
+            return node.value
+    for kw in call.keywords:
+        if kw.arg == name and isinstance(kw.value, ast.Constant):
+            if isinstance(kw.value.value, int):
+                return kw.value.value
     return None
 
 

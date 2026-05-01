@@ -121,6 +121,50 @@ class TestPolarsLandmarkDtypes:
         assert _parse("pl.Int128") == ColumnSpec(Int128(), required=True)
         assert _parse("pl.UInt128") != _parse("pl.Int128")
 
+    def test_pl_decimal_bare_uses_default(self):
+        from polypolarism.types import Decimal
+
+        # Landmark: polars 1.35 (Decimal stabilized).
+        # Bare ``pl.Decimal`` resolves to polars' default precision=38, scale=0.
+        assert _parse("pl.Decimal") == ColumnSpec(Decimal(38, 0), required=True)
+
+    def test_pl_decimal_call_no_args(self):
+        from polypolarism.types import Decimal
+
+        assert _parse("pl.Decimal()") == ColumnSpec(Decimal(38, 0), required=True)
+
+    def test_pl_decimal_positional_args_preserved(self):
+        from polypolarism.types import Decimal
+
+        # Crucial: precision and scale must round-trip — losing them would
+        # make Decimal columns interchangeable with each other regardless
+        # of declared shape.
+        assert _parse("pl.Decimal(20, 4)") == ColumnSpec(Decimal(20, 4), required=True)
+
+    def test_pl_decimal_keyword_args_preserved(self):
+        from polypolarism.types import Decimal
+
+        assert _parse("pl.Decimal(precision=10, scale=2)") == ColumnSpec(
+            Decimal(10, 2), required=True
+        )
+
+    def test_pl_decimal_distinct_precision_distinct_type(self):
+        assert _parse("pl.Decimal(20, 4)") != _parse("pl.Decimal(20, 2)")
+        assert _parse("pl.Decimal(20, 4)") != _parse("pl.Decimal(10, 4)")
+
+    def test_pl_float16_bare(self):
+        from polypolarism.types import Float16
+
+        # Landmark: polars 1.36 (Float16 introduced).
+        assert _parse("pl.Float16") == ColumnSpec(Float16(), required=True)
+
+    def test_pl_float16_distinct_from_float32(self):
+        from polypolarism.types import Float16, Float32
+
+        assert _parse("pl.Float16") == ColumnSpec(Float16(), required=True)
+        assert _parse("pl.Float32") == ColumnSpec(Float32(), required=True)
+        assert _parse("pl.Float16") != _parse("pl.Float32")
+
 
 class TestOptional:
     def test_optional_int(self):
