@@ -13,6 +13,21 @@ dispatch branch, or table that needs to migrate to
 This inventory is a snapshot. Line numbers will drift as the refactor
 proceeds; the section names and table sizes are the durable anchors.
 
+## Known gaps vs current Polars 1.x
+
+Identified during the 1.x release-by-release survey
+([churn doc](polars-pandera-churn.md)) and addressed by ADR-0001
+implementation steps 8–9:
+
+| Gap | Where | Closed by |
+|---|---|---|
+| `Int128`, `UInt128`, `Float16` not in dtype map | `analyzer.py:210–227` and `pandera_dtype.py:75–94` | step 8 |
+| `Enum`, `Decimal` not in `analyzer.py`'s dtype map (present in `pandera_dtype.py`) | `analyzer.py:210–227` | step 8 |
+| Selector-as-DSL audit (1.32 change) — dispatch may need adjustment | `analyzer.py:424–496` | step 9 |
+| `Categorical(ordering=)` semantics rework (1.32) — not currently modeled | `analyzer.py` (Categorical handling) | future profile field if needed |
+| `hist` bin-closure shift (1.27) — not currently modeled | (no current dispatch) | additive when modeled |
+| Left-join row-order de-guarantee (1.16) — relevant if we ever model `set_sorted` flags through joins | `ops/join.py` | future, only if sort tracking is added |
+
 ## `src/polypolarism/analyzer.py`
 
 ### Method-classification frozensets
@@ -27,7 +42,7 @@ proceeds; the section names and table sizes are the durable anchors.
 
 | Lines | Symbol | Notes |
 |---|---|---|
-| 210–227 | `_PL_DTYPE_NAME_MAP` | Maps `Int8…Int64`, `UInt8…UInt64`, `Float32/64`, `Utf8`/`String`, `Boolean`, `Date`, `Datetime`, `Duration`. **Duplicated** in `pandera_dtype.py:75–94`. The `String` → `Utf8()` alias at line 222 is the only intra-1.x rename currently handled. |
+| 210–227 | `_PL_DTYPE_NAME_MAP` | Maps `Int8…Int64`, `UInt8…UInt64`, `Float32/64`, `Utf8`/`String`, `Boolean`, `Date`, `Datetime`, `Duration`. **Duplicated** in `pandera_dtype.py:75–94`. The `String` → `Utf8()` alias at line 222 is the only intra-1.x rename currently handled. **Gap vs current 1.x**: `Int128` (1.18), `UInt128` (1.34), `Float16` (1.36) are absent; `Enum` (stabilized 1.25) and `Decimal` (stabilized 1.35) are present in `pandera_dtype.py:_PL_DTYPE_MAP` (`Categorical`, `Null`) but not in `analyzer.py`'s map — see ADR-0001 step 8. |
 
 ### Top-level `pl.*` shorthand
 
@@ -39,7 +54,7 @@ proceeds; the section names and table sizes are the durable anchors.
 
 | Lines | Symbol | Notes |
 |---|---|---|
-| 424–496 | selector dispatch | `cs.all`, `cs.numeric`, `cs.integer`, `cs.float`, `cs.string`, `cs.boolean`, `cs.temporal`, `cs.by_name`, `cs.by_dtype`, `cs.starts_with`, `cs.ends_with`, `cs.contains`, `cs.exclude`, `cs.first`, `cs.last`. Selector algebra (`|`, `&`, `-`, `~`) handled inline. |
+| 424–496 | selector dispatch | `cs.all`, `cs.numeric`, `cs.integer`, `cs.float`, `cs.string`, `cs.boolean`, `cs.temporal`, `cs.by_name`, `cs.by_dtype`, `cs.starts_with`, `cs.ends_with`, `cs.contains`, `cs.exclude`, `cs.first`, `cs.last`. Selector algebra (`|`, `&`, `-`, `~`) handled inline. **Polars 1.32 change**: `pl.selectors.*` now returns `Selector` objects rather than raw `Expr`. The current dispatch treats results as expressions; needs an audit (ADR-0001 step 9) — likely no behavior change since we operate on AST text, not on runtime objects, but worth verifying with a fixture covering selector algebra under post-1.32 polars. |
 
 ### Aggregation name → enum
 

@@ -28,8 +28,23 @@ genuine semantic shifts:
   reordering (0.20), horizontal aggregation extracted to `sum_horizontal`
   etc. (0.19).
 
-Within Polars 1.x, churn so far has been minor — bug fixes and additive
-features dominate.
+Within Polars 1.x (1.0 → 1.40, July 2024 → April 2026), most minors are
+additive, but the cumulative drift is non-trivial. A static checker has
+to handle:
+
+- **New dtypes**: `Int128` (1.18), `Enum` stabilized (1.25), `UInt128`
+  (1.34), `Decimal` stabilized (1.35), `Float16` (1.36) — all things AST
+  callers can write as `pl.SomeDtype`.
+- **Selector-as-DSL** (1.32): `pl.selectors.*` now returns `Selector`
+  objects, not raw `Expr`. Downstream destructuring may diverge.
+- **`Categorical` / `(Frozen)Categories` rework** (1.32): `pl.Categorical`
+  surface and dtype-equality story changed.
+- **`hist` bin-closure shift** (1.27) and **left-join row-order
+  de-guarantee** (1.16): semantics under fixed signatures.
+
+Within any single supported-pair window (e.g. 1.39 ↔ 1.40), the diff is
+small. Across 1.0 → 1.40 the diff is meaningful, and the analyzer's
+current dtype tables in particular lag the language by several minors.
 
 **Pandera** has one mechanical rename relevant to AST analysis:
 `SchemaModel` → `DataFrameModel` (deprecated 0.20). That class-name set is
@@ -128,10 +143,14 @@ fragile for marginal UX gain.
 
 ### D. Versioned dispatcher with per-minor profile fields shipped today
 
-Rejected for now. Within Polars 1.x's two-minor window we have no
-observed divergence relevant to static analysis. Modeling speculative
-divergences leads to dead code that rots. The `PolarsProfile` *scaffold*
-ships, but with no fields until a real fixture failure motivates one.
+Rejected for now. Within any one two-minor window the divergence is
+small. The cumulative 1.x drift (selector-as-DSL, `Categorical` rework,
+`hist` bin-closure) is real, but it has *not* moved across our
+supported-pair window in a way that requires per-minor branching today —
+both supported minors are post-1.32. The `PolarsProfile` scaffold ships
+but with no fields until a real fixture failure motivates one. New dtypes
+go into the (single, version-agnostic) dtype table — they're additive,
+not a profile concern.
 
 ## Consequences
 
@@ -175,12 +194,15 @@ ships, but with no fields until a real fixture failure motivates one.
 | 5 | Move `_AGG_INFER_MAP` into `compat/polars_api.py` | `ops/groupby.py` |
 | 6 | Add empty `METHOD_ALIASES = {}` scaffold + canonicalize-at-entry shim in dispatch | `analyzer.py`, `compat/polars_api.py` |
 | 7 | Move `_BASE_NAMES`, `_HEAD_NAMES`, `Field` detection into `compat/pandera_api.py` | `pandera_schema.py`, `pandera_annotation.py` |
-| 8 | Add `PolarsProfile` scaffold (name-only) + default `POLARS_1_X` | `compat/polars_api.py` |
-| 9 | `--polars-version` CLI flag + `[tool.polypolarism]` config reader | `cli.py` |
-| 10 | Document support window + new config in `README.md` | `README.md` |
+| 8 | **Catch up the dtype table to current 1.x**: add `Int128`, `UInt128`, `Float16`, `Enum`, `Decimal` to the unified dtype map; add fixtures exercising each | `compat/polars_api.py`, `tests/fixtures/` |
+| 9 | **Audit selector dispatch against 1.32 `Selector` DSL change**: confirm `analyzer.py:424-496` still produces correct types after `pl.selectors.*` returns `Selector` objects; adjust as needed | `analyzer.py` (post-refactor: `compat/polars_api.py`) |
+| 10 | Add `PolarsProfile` scaffold (name-only) + default `POLARS_1_X` | `compat/polars_api.py` |
+| 11 | `--polars-version` CLI flag + `[tool.polypolarism]` config reader | `cli.py` |
+| 12 | Document support window + new config in `README.md` | `README.md` |
 
 Steps 1–7 are pure refactors — existing 265 tests must stay green and
-serve as the regression net. Steps 8–10 add the new capability and
+serve as the regression net. Steps 8–9 close the cumulative-drift gap
+identified in the churn survey. Steps 10–12 add the new capability and
 documentation.
 
 ## Verification
@@ -188,7 +210,13 @@ documentation.
 - After steps 1–7: `uv run pytest` green, `uv run polypolarism
   tests/fixtures/valid/` and `tests/fixtures/invalid/` produce identical
   error counts to the pre-refactor baseline.
-- After step 9: `polypolarism --polars-version 1.x tests/fixtures/valid/`
-  runs; an unknown version produces a clear error from the CLI.
-- A `SchemaModel`-using fixture continues to type-check correctly with no
-  new output (silent acceptance preserved).
+- After step 8: fixtures using `Int128`, `UInt128`, `Float16`, `Enum`,
+  `Decimal` as Pandera schema dtypes type-check correctly.
+- After step 9: a fixture using `cs.numeric()` and downstream selector
+  algebra still produces the expected projected schema under the 1.32+
+  `Selector` semantics.
+- After step 11: `polypolarism --polars-version 1.x
+  tests/fixtures/valid/` runs; an unknown version produces a clear error
+  from the CLI.
+- A `SchemaModel`-using fixture continues to type-check correctly with
+  no new output (silent acceptance preserved).
