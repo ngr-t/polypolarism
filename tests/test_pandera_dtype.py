@@ -108,6 +108,19 @@ class TestPolarsLandmarkDtypes:
         assert _parse("pl.Enum") == ColumnSpec(Enum(), required=True)
         assert _parse("pl.Categorical") == ColumnSpec(Categorical(), required=True)
 
+    def test_pl_uint128_bare(self):
+        from polypolarism.types import UInt128
+
+        # Landmark: polars 1.34 (UInt128 introduced).
+        assert _parse("pl.UInt128") == ColumnSpec(UInt128(), required=True)
+
+    def test_pl_uint128_distinct_from_int128(self):
+        from polypolarism.types import Int128, UInt128
+
+        assert _parse("pl.UInt128") == ColumnSpec(UInt128(), required=True)
+        assert _parse("pl.Int128") == ColumnSpec(Int128(), required=True)
+        assert _parse("pl.UInt128") != _parse("pl.Int128")
+
 
 class TestOptional:
     def test_optional_int(self):
