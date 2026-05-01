@@ -227,6 +227,26 @@ _PL_DTYPE_NAME_MAP: dict[str, DataType] = {
 }
 
 
+# ``pl.<name>(col)`` top-level aggregation shorthand — equivalent to
+# ``pl.col(col).<name>()``. Used by ``analyze_agg_expr`` (inside
+# ``group_by().agg(...)``) and by ``_analyze_pl_func`` (inside
+# ``select`` / ``with_columns``) so the column survives downstream
+# references.
+_PL_AGG_SHORTHAND: dict[str, AggFunction] = {
+    "sum": AggFunction.SUM,
+    "mean": AggFunction.MEAN,
+    "min": AggFunction.MIN,
+    "max": AggFunction.MAX,
+    "first": AggFunction.FIRST,
+    "last": AggFunction.LAST,
+    "count": AggFunction.COUNT,
+    "n_unique": AggFunction.N_UNIQUE,
+    "median": AggFunction.MEDIAN,
+    "std": AggFunction.STD,
+    "var": AggFunction.VAR,
+}
+
+
 def _resolve_pl_dtype(node: ast.expr) -> DataType | None:
     """Resolve an AST node referring to a Polars dtype literal (``pl.Int32`` etc.)."""
     # Bare ``pl.Int32``
@@ -724,8 +744,20 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 }
 
                 if agg_func_name in func_map:
-                    # Extract column name from pl.col("col")
+                    # Form 1: ``pl.col("X").<agg>()`` — receiver is the col.
                     col_name = self._extract_col_name(col_expr)
+
+                    # Form 2: ``pl.<agg>("X")`` top-level shorthand — the
+                    # column name is the first positional arg of the call,
+                    # not buried inside a separate ``pl.col(...)`` receiver.
+                    if (
+                        col_name is None
+                        and isinstance(col_expr, ast.Name)
+                        and col_expr.id == "pl"
+                        and agg_node.args
+                    ):
+                        col_name = _str_constant(agg_node.args[0])
+
                     if col_name:
                         return AggExpr(
                             column=col_name,
@@ -1080,6 +1112,25 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 except ColumnNotFoundError as e:
                     self.errors.append(tag(PLY001, str(e)))
             return None, Struct(fields)
+
+        # ``pl.<agg>("col")`` top-level shorthand — equivalent to
+        # ``pl.col("col").<agg>()``. Recognised in ``select`` /
+        # ``with_columns`` so the column survives downstream lookups.
+        agg_func = _PL_AGG_SHORTHAND.get(name)
+        if agg_func is not None and node.args:
+            col = _str_constant(node.args[0])
+            if col is not None:
+                try:
+                    col_type = infer_col(col, self.current_frame)
+                except ColumnNotFoundError as e:
+                    self.errors.append(tag(PLY001, str(e)))
+                    return col, None  # type: ignore[return-value]
+                try:
+                    result_type = infer_agg_result_type(agg_func, col_type)
+                except GroupByTypeError as e:
+                    self.errors.append(tag(PLY011, str(e)))
+                    return col, None  # type: ignore[return-value]
+                return col, result_type
 
         if name == "coalesce":
             inferred: list[DataType] = []
@@ -2126,8 +2177,16 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         keys: list[str] = []
         if grouper == "group_by":
             for arg in groupby_receiver.args:
-                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-                    keys.append(arg.value)
+                # ``group_by("a")`` and ``group_by("a", "b")`` (positional
+                # strings), plus ``group_by(["a", "b"])`` / ``group_by(("a",))``
+                # (list/tuple of strings) are all equivalent in polars.
+                single = _str_constant(arg)
+                if single is not None:
+                    keys.append(single)
+                    continue
+                multi = _str_list_or_tuple(arg)
+                if multi is not None:
+                    keys.extend(multi)
         else:
             # group_by_dynamic / rolling: first positional / ``index_column`` is the time axis.
             index_col: str | None = None
@@ -2154,6 +2213,17 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         for arg in node.args:
             agg_expr = expr_analyzer.analyze_agg_expr(arg)
             if agg_expr:
+                agg_exprs.append(agg_expr)
+
+        # Kwarg-form ``agg(name=expr)`` — polars uses the kwarg name as the
+        # output column. It overrides any ``.alias(...)`` buried in the
+        # value, matching polars' own behaviour.
+        for kw in node.keywords:
+            if kw.arg is None:
+                continue
+            agg_expr = expr_analyzer.analyze_agg_expr(kw.value)
+            if agg_expr:
+                agg_expr.alias = kw.arg
                 agg_exprs.append(agg_expr)
 
         self.errors.extend(expr_analyzer.errors)
@@ -2223,6 +2293,15 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             if name and dtype:
                 result_columns[name] = dtype
 
+        # Kwarg form ``select(name=expr)`` — polars treats it as
+        # ``expr.alias("name")``. Same for ``with_columns``.
+        for kw in node.keywords:
+            if kw.arg is None:
+                continue
+            _, dtype = expr_analyzer.analyze_select_expr(kw.value)
+            if dtype is not None:
+                result_columns[kw.arg] = dtype
+
         self.errors.extend(expr_analyzer.errors)
 
         if result_columns:
@@ -2256,6 +2335,15 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             name, dtype = expr_analyzer.analyze_select_expr(arg)
             if name and dtype:
                 result_columns[name] = dtype
+
+        # Kwarg form ``with_columns(name=expr)`` — polars treats it as
+        # ``expr.alias("name")``.
+        for kw in node.keywords:
+            if kw.arg is None:
+                continue
+            _, dtype = expr_analyzer.analyze_select_expr(kw.value)
+            if dtype is not None:
+                result_columns[kw.arg] = dtype
 
         self.errors.extend(expr_analyzer.errors)
 
