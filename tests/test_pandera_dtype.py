@@ -61,6 +61,35 @@ class TestPolarsDtype:
         assert _parse("pl.Float64") == ColumnSpec(Float64(), required=True)
 
 
+class TestPolarsLandmarkDtypes:
+    """Dtypes added across the polars 1.x line. Pinning expectations here
+    catches regressions in the centralized DTYPE_NAME_MAP and lets future
+    landmark commits anchor at a specific minor."""
+
+    def test_pl_int128_bare(self):
+        from polypolarism.types import Int128
+
+        # Landmark: polars 1.18 (Int128 introduced).
+        assert _parse("pl.Int128") == ColumnSpec(Int128(), required=True)
+
+    def test_pl_int128_call(self):
+        from polypolarism.types import Int128
+
+        assert _parse("pl.Int128()") == ColumnSpec(Int128(), required=True)
+
+    def test_pl_int128_optional(self):
+        from polypolarism.types import Int128
+
+        assert _parse("Optional[pl.Int128]") == ColumnSpec(Int128(), required=False)
+
+    def test_pl_int128_field_nullable(self):
+        from polypolarism.types import Int128
+
+        assert _parse("pl.Int128", "pa.Field(nullable=True)") == ColumnSpec(
+            Nullable(Int128()), required=True
+        )
+
+
 class TestOptional:
     def test_optional_int(self):
         assert _parse("Optional[int]") == ColumnSpec(Int64(), required=False)
