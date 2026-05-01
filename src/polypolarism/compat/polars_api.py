@@ -80,3 +80,24 @@ DTYPE_NAME_MAP: dict[str, DataType] = {
     "Enum": Enum(),
     "Null": Null(),
 }
+
+
+# Join ``how`` literal values accepted by polars 1.x. ``outer`` was renamed
+# to ``full`` at 1.0; we don't accept the legacy spelling.
+JOIN_HOW_VALUES: frozenset[str] = frozenset({"inner", "left", "right", "full", "cross", "semi", "anti"})
+
+# Subset of ``how`` values where the analyzer infers a column-shape result
+# (vs. ``cross`` / ``semi`` / ``anti`` which have specific shape rules
+# handled elsewhere). Kept as a tuple for use in ``Literal[...]`` typing.
+JOIN_HOW_INFERRED: tuple[str, ...] = ("inner", "left", "right", "full")
+
+
+def join_left_nullable(how: str) -> bool:
+    """Whether the left-side columns should be wrapped in ``Nullable`` for
+    a given join type. Right and full joins introduce nulls on the left."""
+    return how in ("right", "full")
+
+
+def join_right_nullable(how: str) -> bool:
+    """Whether the right-side columns should be wrapped in ``Nullable``."""
+    return how in ("left", "full")

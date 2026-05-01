@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
+from polypolarism.compat.polars_api import join_left_nullable, join_right_nullable
 from polypolarism.types import DataType, FrameType, Nullable
 
 
@@ -92,8 +93,8 @@ def infer_join(
     result_columns: dict[str, DataType] = {}
 
     # Determine which columns from each side need to be made nullable
-    left_nullable = how in ("right", "full")
-    right_nullable = how in ("left", "full")
+    left_nullable = join_left_nullable(how)
+    right_nullable = join_right_nullable(how)
 
     # Determine key columns to skip from right side
     # When using 'on', the key column from right is not added (uses left's key)
