@@ -99,6 +99,65 @@ class TestCollectAfterValidate:
         )
 
 
+class TestTypingCastPassthrough:
+    """``typing.cast(T, expr)`` is a static-typing no-op — polypolarism should
+    look through it and infer from the inner expression."""
+
+    def test_return_cast_validate(self):
+        # ``return cast(DataFrame[Schema], Schema.validate(df))`` — the cast
+        # should not defeat narrowing; the inferred type comes from the
+        # inner ``Schema.validate(df)``.
+        src = textwrap.dedent(COMMON_SCHEMAS) + textwrap.dedent(
+            """
+            from typing import cast
+            def f(raw: DataFrame[RawSchema]) -> DataFrame[CleanSchema]:
+                return cast(DataFrame[CleanSchema], CleanSchema.validate(raw))
+            """
+        )
+        results = check_source(src)
+        assert all(r.passed for r in results), [r.errors for r in results]
+
+    def test_qualified_typing_cast(self):
+        # ``import typing; typing.cast(...)`` form should also pass through.
+        src = textwrap.dedent(COMMON_SCHEMAS) + textwrap.dedent(
+            """
+            import typing
+            def f(raw: DataFrame[RawSchema]) -> DataFrame[CleanSchema]:
+                return typing.cast(DataFrame[CleanSchema], CleanSchema.validate(raw))
+            """
+        )
+        results = check_source(src)
+        assert all(r.passed for r in results), [r.errors for r in results]
+
+    def test_assign_cast_narrows(self):
+        # ``df = cast(T, Schema.validate(df))`` — assignment narrowing.
+        src = textwrap.dedent(COMMON_SCHEMAS) + textwrap.dedent(
+            """
+            from typing import cast
+            def f(raw: DataFrame[RawSchema]) -> DataFrame[CleanSchema]:
+                df = cast(DataFrame[CleanSchema], CleanSchema.validate(raw))
+                return df.select(pl.col("id"), pl.col("value"))
+            """
+        )
+        results = check_source(src)
+        assert all(r.passed for r in results), [r.errors for r in results]
+
+    def test_cast_does_not_lie(self):
+        # The cast claim should NOT be trusted blindly — we still infer from
+        # the inner expression and report a mismatch.
+        src = textwrap.dedent(COMMON_SCHEMAS) + textwrap.dedent(
+            """
+            from typing import cast
+            def f(raw: DataFrame[RawSchema]) -> DataFrame[CleanSchema]:
+                return cast(DataFrame[CleanSchema], raw)
+            """
+        )
+        results = check_source(src)
+        # raw is RawSchema, declared CleanSchema — must surface a mismatch
+        # rather than passing because of the cast.
+        assert any(not r.passed for r in results)
+
+
 class TestNoNarrowingAcrossInvalidPattern:
     def test_validate_call_buried_in_if_does_not_narrow(self):
         # This is the documented limitation: only top-level statements narrow.

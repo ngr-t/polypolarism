@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ast
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from polypolarism.pandera_dtype import parse_field_annotation
 from polypolarism.types import ColumnSpec, FrameType
@@ -49,6 +50,32 @@ class SchemaRegistry:
 
     def __contains__(self, name: str) -> bool:
         return name in self.schemas
+
+
+def collect_schemas_with_imports(
+    tree: ast.Module, file_path: Path
+) -> SchemaRegistry:
+    """Like ``collect_schemas`` but also resolves project-local imports.
+
+    For each ``from X import Y`` / ``from .X import Y`` in ``tree``,
+    locates ``X`` on disk relative to ``file_path`` (or its ancestors up
+    to a project root) and merges schemas from that file into the
+    registry. Recurses transitively so a schema chain spanning multiple
+    files resolves end-to-end. Imports that don't resolve to a project
+    file (stdlib, third-party) are skipped silently — only files we can
+    actually parse contribute.
+
+    Schemas defined in ``tree`` itself take precedence over imports;
+    imported schemas only fill names not already present.
+    """
+    registry = collect_schemas(tree)
+    visited: set[Path] = set()
+    try:
+        visited.add(file_path.resolve())
+    except OSError:
+        pass
+    _merge_imports(tree, file_path, registry, visited)
+    return registry
 
 
 def collect_schemas(tree: ast.Module) -> SchemaRegistry:
@@ -127,6 +154,114 @@ def _apply_config(schema: Schema, config_node: ast.ClassDef) -> None:
                 if isinstance(target, ast.Name) and target.id == "strict":
                     if isinstance(stmt.value, ast.Constant) and isinstance(stmt.value.value, bool):
                         schema.strict = stmt.value.value
+
+
+_PROJECT_MARKERS = ("pyproject.toml", "setup.py", "setup.cfg")
+
+
+def _project_root(start: Path) -> Path | None:
+    """Nearest ancestor of ``start`` containing a project marker file.
+
+    Returns ``None`` if no marker is found on the way up to the
+    filesystem root. The marker bounds how far the import resolver may
+    walk upward — without one we conservatively only consider the file's
+    own directory so we don't reach into unrelated trees.
+    """
+    for ancestor in [start, *start.parents]:
+        for marker in _PROJECT_MARKERS:
+            if (ancestor / marker).is_file():
+                return ancestor
+    return None
+
+
+def _try_module_at(base: Path, parts: list[str]) -> Path | None:
+    """Look for ``base/parts.py`` or ``base/parts/__init__.py``."""
+    if not parts:
+        return None
+    module_file = base.joinpath(*parts).with_suffix(".py")
+    if module_file.is_file():
+        return module_file
+    pkg_init = base.joinpath(*parts) / "__init__.py"
+    if pkg_init.is_file():
+        return pkg_init
+    return None
+
+
+def _resolve_module_path(
+    module: str | None, current_file: Path, level: int = 0
+) -> Path | None:
+    """Best-effort resolution of an import target to a file on disk.
+
+    Restricted to the project tree (the dir containing
+    ``pyproject.toml`` / ``setup.py`` and below) so we don't pick up
+    stdlib or third-party packages. Both absolute and relative imports
+    are supported. Returns ``None`` when the target can't be found.
+    """
+    parts = module.split(".") if module else []
+
+    if level > 0:
+        base = current_file.parent
+        for _ in range(level - 1):
+            base = base.parent
+        return _try_module_at(base, parts)
+
+    if not parts:
+        return None
+
+    root = _project_root(current_file.parent)
+    bases: list[Path] = []
+    seen: set[Path] = set()
+    for ancestor in [current_file.parent, *current_file.parents]:
+        if ancestor in seen:
+            continue
+        seen.add(ancestor)
+        bases.append(ancestor)
+        if root is not None and ancestor == root:
+            break
+        if root is None:
+            # No project marker found — only consider the file's own dir
+            # so we don't accidentally import from unrelated trees.
+            break
+
+    for base in bases:
+        resolved = _try_module_at(base, parts)
+        if resolved is not None:
+            return resolved
+    return None
+
+
+def _merge_imports(
+    tree: ast.Module,
+    current_file: Path,
+    registry: SchemaRegistry,
+    visited: set[Path],
+) -> None:
+    """Recursively merge schemas from project-local imports into ``registry``."""
+    for node in tree.body:
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        resolved = _resolve_module_path(node.module, current_file, node.level)
+        if resolved is None:
+            continue
+        try:
+            real = resolved.resolve()
+        except OSError:
+            continue
+        if real in visited:
+            continue
+        visited.add(real)
+        try:
+            sub_source = resolved.read_text()
+            sub_tree = ast.parse(sub_source)
+        except (OSError, UnicodeDecodeError, SyntaxError):
+            continue
+
+        sub_registry = collect_schemas(sub_tree)
+        for name, schema in sub_registry.schemas.items():
+            registry.schemas.setdefault(name, schema)
+
+        # Recurse so chains like app -> schemas -> base resolve fully.
+        _merge_imports(sub_tree, resolved, registry, visited)
 
 
 def _topo_sort(candidates: dict[str, ast.ClassDef]) -> list[str]:

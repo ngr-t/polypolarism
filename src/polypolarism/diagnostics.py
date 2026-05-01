@@ -40,6 +40,7 @@ PLW002 = "PLW002"  # ``df.pipe(callable)`` where the callable can't be resolved
 PLW003 = "PLW003"  # function call to a name that isn't in the analysed module
 PLW004 = "PLW004"  # lambda / inline callable used where its return dtype is unknowable
 PLW005 = "PLW005"  # pivot result schema is data-dependent; user should annotate
+PLW006 = "PLW006"  # DataFrame[X] / LazyFrame[X] annotation references an unknown schema
 
 
 def tag(code: str, message: str) -> str:

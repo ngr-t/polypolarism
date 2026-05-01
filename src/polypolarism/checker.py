@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from polypolarism.analyzer import FunctionAnalysis, analyze_source
 from polypolarism.types import DataType, Nullable
@@ -192,15 +193,20 @@ def check_function(analysis: FunctionAnalysis) -> CheckResult:
     )
 
 
-def check_source(source: str) -> list[CheckResult]:
+def check_source(
+    source: str, file_path: Path | None = None
+) -> list[CheckResult]:
     """
     Check all functions with ``DataFrame[Schema]`` annotations in source code.
 
     Args:
         source: Python source code as a string
+        file_path: Optional path of the file ``source`` came from.
+            Forwarded to :func:`analyze_source` so cross-module
+            ``from X import Schema`` references resolve on disk.
 
     Returns:
         List of CheckResult for each function with DataFrame[Schema] annotations
     """
-    analyses = analyze_source(source)
+    analyses = analyze_source(source, file_path=file_path)
     return [check_function(analysis) for analysis in analyses]

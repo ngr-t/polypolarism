@@ -88,7 +88,7 @@ def check_file(file_path: Path) -> list[CheckResult]:
     except (UnicodeDecodeError, OSError) as err:
         return [_parse_error_result(file_path, err)]
     try:
-        return check_source(source)
+        return check_source(source, file_path=file_path)
     except SyntaxError as err:
         return [_parse_error_result(file_path, err)]
 
@@ -220,8 +220,8 @@ def _check_file_with_locations(
     except (UnicodeDecodeError, OSError) as err:
         return [_parse_error_result(file_path, err)], {}, {}
     try:
-        analyses = analyze_source(source)
-        results = check_source(source)
+        analyses = analyze_source(source, file_path=file_path)
+        results = check_source(source, file_path=file_path)
     except SyntaxError as err:
         return [_parse_error_result(file_path, err)], {}, {}
     function_lines = {a.name: a.lineno for a in analyses}

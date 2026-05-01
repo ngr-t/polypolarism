@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from polypolarism.diagnostics import (
     PLW001,
@@ -11,6 +12,7 @@ from polypolarism.diagnostics import (
     PLW003,
     PLW004,
     PLW005,
+    PLW006,
     PLY001,
     PLY002,
     PLY003,
@@ -50,8 +52,15 @@ from polypolarism.ops.reshape import (
 from polypolarism.ops.reshape import (
     unpivot as infer_unpivot,
 )
-from polypolarism.pandera_annotation import extract_dataframe_annotation
-from polypolarism.pandera_schema import SchemaRegistry, collect_schemas
+from polypolarism.pandera_annotation import (
+    extract_dataframe_annotation,
+    frame_annotation_schema_name,
+)
+from polypolarism.pandera_schema import (
+    SchemaRegistry,
+    collect_schemas,
+    collect_schemas_with_imports,
+)
 from polypolarism.types import (
     Boolean,
     ColumnSpec,
@@ -268,6 +277,39 @@ def _set_lazy(result: FrameType | None, lazy: bool) -> FrameType | None:
         return None
     result.is_lazy = lazy
     return result
+
+
+def _is_cast_func(node: ast.expr) -> bool:
+    """Recognise ``cast`` (from ``typing import cast``) and ``typing.cast``.
+
+    Also accepts ``t.cast`` or any ``<alias>.cast`` form — at AST time we
+    can't always resolve the import alias, and ``cast`` is unambiguous
+    enough as a name that treating it as the typing helper is safe.
+    """
+    if isinstance(node, ast.Name) and node.id == "cast":
+        return True
+    if isinstance(node, ast.Attribute) and node.attr == "cast":
+        return True
+    return False
+
+
+def _unwrap_cast(node: ast.expr) -> ast.expr:
+    """If ``node`` is ``cast(T, value)`` / ``typing.cast(T, value)``, return
+    the inner ``value`` expression — recursively, in case of nested casts.
+
+    ``typing.cast`` is a no-op at runtime; users add it so that mypy/pyright
+    see the call's static type as ``T``. polypolarism verifies the user's
+    claim by inferring the inner expression and checking it against the
+    surrounding context (function return type, narrowed variable, etc.).
+    Otherwise the cast would just hide ``Schema.validate(...)`` from us.
+    """
+    while (
+        isinstance(node, ast.Call)
+        and _is_cast_func(node.func)
+        and len(node.args) >= 2
+    ):
+        node = node.args[1]
+    return node
 
 
 def _str_constant(node: ast.expr) -> str | None:
@@ -1382,9 +1424,10 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         """
         if not self._narrowing_enabled:
             return
-        if not isinstance(node.value, ast.Call):
+        inner = _unwrap_cast(node.value)
+        if not isinstance(inner, ast.Call):
             return
-        call = node.value
+        call = inner
         if not isinstance(call.func, ast.Attribute):
             return
         if call.func.attr != "validate":
@@ -1441,6 +1484,11 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
 
     def _infer_expr_type(self, node: ast.expr) -> FrameType | None:
         """Infer the FrameType of an expression."""
+        # ``typing.cast(T, expr)`` / ``cast(T, expr)`` is a static-typing
+        # passthrough — defer to the inner expression so existing narrowing
+        # rules (Schema.validate, .pipe, etc.) keep working through the cast.
+        node = _unwrap_cast(node)
+
         # Variable reference
         if isinstance(node, ast.Name):
             return self.var_types.get(node.id)
@@ -2544,7 +2592,9 @@ def analyze_function(
     input_types: dict[str, FrameType] = {}
     declared_return: FrameType | None = None
     errors: list[str] = []
+    warnings: list[str] = []
     has_df_annotation = False
+    unresolved_schemas: list[str] = []
 
     # Extract input parameter types
     for arg in func_node.args.args:
@@ -2556,6 +2606,11 @@ def analyze_function(
                     input_types[arg.arg] = frame_type
                 elif parse_error:
                     errors.append(f"Parameter '{arg.arg}': {parse_error}")
+            else:
+                schema_name = frame_annotation_schema_name(arg.annotation)
+                if schema_name is not None:
+                    has_df_annotation = True
+                    unresolved_schemas.append(schema_name)
 
     # Extract return type
     if func_node.returns:
@@ -2566,13 +2621,31 @@ def analyze_function(
             )
             if parse_error:
                 errors.append(f"Return type: {parse_error}")
+        else:
+            schema_name = frame_annotation_schema_name(func_node.returns)
+            if schema_name is not None:
+                has_df_annotation = True
+                unresolved_schemas.append(schema_name)
 
     # If no DataFrame annotations found, skip this function
     if not has_df_annotation:
         return None
 
+    # Surface unresolved-schema names so the user sees the file isn't
+    # being silently skipped because of a missing import. Deduplicate to
+    # one warning per name.
+    for name in dict.fromkeys(unresolved_schemas):
+        warnings.append(
+            tag(
+                PLW006,
+                f"schema '{name}' referenced in annotation but not found. "
+                f"Define it in this module, or import it from a project-local "
+                f"module via `from <module> import {name}`. "
+                f"Stdlib/third-party imports aren't followed.",
+            )
+        )
+
     # Analyze function body with registry
-    warnings: list[str] = []
     body_analyzer = FunctionBodyAnalyzer(
         input_types, errors, registry, schema_registry, warnings=warnings
     )
@@ -2591,7 +2664,9 @@ def analyze_function(
     )
 
 
-def analyze_source(source: str) -> list[FunctionAnalysis]:
+def analyze_source(
+    source: str, file_path: Path | None = None
+) -> list[FunctionAnalysis]:
     """
     Analyze Python source code for DataFrame type annotations.
 
@@ -2602,6 +2677,12 @@ def analyze_source(source: str) -> list[FunctionAnalysis]:
 
     Args:
         source: Python source code as a string
+        file_path: Optional path of the file the source came from.
+            When provided, ``from <module> import <Schema>`` statements
+            are followed on disk so schemas defined in sibling/related
+            project files are resolvable. Without it, only schemas
+            defined in ``source`` itself are visible (legacy behaviour
+            for tests that pass raw strings).
 
     Returns:
         List of FunctionAnalysis results for functions with
@@ -2609,8 +2690,12 @@ def analyze_source(source: str) -> list[FunctionAnalysis]:
     """
     tree = ast.parse(source)
 
-    # Pass 0: Collect Pandera DataFrameModel schemas at top level
-    schema_registry = collect_schemas(tree)
+    # Pass 0: Collect Pandera DataFrameModel schemas — from this module
+    # plus any project-local modules it imports from.
+    if file_path is not None:
+        schema_registry = collect_schemas_with_imports(tree, file_path)
+    else:
+        schema_registry = collect_schemas(tree)
 
     # Pass 1: Collect all function nodes
     func_nodes: list[ast.FunctionDef] = []

@@ -15,6 +15,22 @@ from polypolarism.types import FrameType
 _HEAD_NAMES = frozenset({"DataFrame", "LazyFrame"})
 
 
+def frame_annotation_schema_name(annotation: ast.expr) -> str | None:
+    """Return the schema name from a ``DataFrame[X]`` / ``LazyFrame[X]`` shape.
+
+    Returns the bare name ``X`` regardless of whether the registry knows
+    it — purely syntactic. Use this to detect annotations the user
+    *intended* as Pandera-backed even when import resolution failed
+    (so we can warn instead of silently treating the file as empty).
+    Returns ``None`` for annotations not in this shape.
+    """
+    if not isinstance(annotation, ast.Subscript):
+        return None
+    if _dataframe_head_name(annotation.value) is None:
+        return None
+    return _extract_schema_name(annotation.slice)
+
+
 def extract_dataframe_annotation(
     annotation: ast.expr,
     registry: SchemaRegistry,
