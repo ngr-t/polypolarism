@@ -59,11 +59,6 @@ Carrying both names indefinitely costs one entry in a frozenset.
 The rest of Pandera's evolution (added `pandera.polars` module, pyarrow dtype
 support, pinning `polars >= 1.0`) does not affect AST-level introspection.
 
-A version-by-version inventory of the relevant churn lives at
-[`docs/research/polars-pandera-churn.md`](../research/polars-pandera-churn.md).
-A file:line map of every coupling site in the current code lives at
-[`docs/research/coupling-inventory.md`](../research/coupling-inventory.md).
-
 ## Decision
 
 1. **Support Polars 1.x only** — concretely, the latest two 1.x minor
@@ -228,9 +223,11 @@ not a profile concern.
 | 11 | **Done** in `src/polypolarism/version_check.py`: detection from CLI flag, `[tool.polypolarism]`, `uv.lock`, dependencies; PLW010 warning on below-floor; `--polars-version` / `--pandera-version` / `--no-version-check` CLI flags. | `version_check.py`, `cli.py`, `diagnostics.py` |
 | 12 | **Done.** New "Supported versions" section, `--polars-version` / `--pandera-version` / `--no-version-check` CLI examples, `[tool.polypolarism]` config block, dtype list refreshed for `Int128` / `UInt128` / `Float16` / `Enum` / `Decimal(p, s)`, `cs.integer()` / `cs.float()` lists updated, `PLW010` added to the warning code table. | `README.md` |
 
-All 12 steps complete. Remaining future work is documented in
-`docs/research/coupling-inventory.md` under "Known gaps" — none of those
-gaps block the supported window.
+All 12 steps complete. Known remaining gaps (Categorical ordering
+rework from polars 1.32, `hist` bin-closure from 1.27, left-join
+row-order de-guarantee from 1.16) are not modeled today and don't block
+the supported window — they become profile fields if a real fixture
+ever exposes a divergence.
 
 ## Verification
 
