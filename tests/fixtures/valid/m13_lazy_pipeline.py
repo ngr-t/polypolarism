@@ -1,4 +1,4 @@
-"""M13: LazyFrame end-to-end pipeline carries the FrameType through."""
+"""LazyFrame end-to-end pipeline carries the FrameType through."""
 
 import pandera.polars as pa
 import polars as pl

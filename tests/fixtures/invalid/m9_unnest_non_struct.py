@@ -1,4 +1,4 @@
-"""M9 invalid: unnest on a non-Struct column."""
+"""unnest on a non-Struct column."""
 
 import pandera.polars as pa
 import polars as pl

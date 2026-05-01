@@ -1,4 +1,4 @@
-"""M2: filter predicates with is_not_null, comparison and logical ops are typed."""
+"""filter predicates with is_not_null, comparison and logical ops are typed."""
 
 import pandera.polars as pa
 import polars as pl

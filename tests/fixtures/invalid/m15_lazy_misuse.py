@@ -1,4 +1,4 @@
-"""M15 invalid: write_csv on LazyFrame triggers PLY030."""
+"""write_csv on LazyFrame triggers PLY030."""
 
 import pandera.polars as pa
 from pandera.typing.polars import LazyFrame

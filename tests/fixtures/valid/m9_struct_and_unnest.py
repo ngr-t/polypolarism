@@ -1,4 +1,4 @@
-"""M9: struct.field access + df.unnest flatten the Struct column."""
+"""struct.field access + df.unnest flatten the Struct column."""
 
 from typing import Annotated
 

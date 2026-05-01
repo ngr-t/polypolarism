@@ -1,4 +1,4 @@
-"""M4 invalid: explode on a column that isn't List[T]."""
+"""explode on a column that isn't List[T]."""
 
 import pandera.polars as pa
 import polars as pl

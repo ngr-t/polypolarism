@@ -1,4 +1,4 @@
-"""M1 invalid: drop on a column that doesn't exist."""
+"""drop on a column that doesn't exist."""
 
 import pandera.polars as pa
 from pandera.typing.polars import DataFrame

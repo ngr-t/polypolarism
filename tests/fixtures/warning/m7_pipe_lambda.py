@@ -1,4 +1,4 @@
-"""M7 warning: df.pipe(lambda ...) emits PLW004 — lambdas can't be analysed."""
+"""df.pipe(lambda ...) emits PLW004 — lambdas can't be analysed."""
 
 import pandera.polars as pa
 import polars as pl

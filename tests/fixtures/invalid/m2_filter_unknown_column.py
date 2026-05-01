@@ -1,4 +1,4 @@
-"""M2 invalid: filter predicate references a column that doesn't exist."""
+"""filter predicate references a column that doesn't exist."""
 
 import pandera.polars as pa
 import polars as pl

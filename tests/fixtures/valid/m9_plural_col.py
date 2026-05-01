@@ -1,4 +1,4 @@
-"""M9: pl.col("a", "b", ...) selects multiple named columns."""
+"""pl.col("a", "b", ...) selects multiple named columns."""
 
 import pandera.polars as pa
 import polars as pl

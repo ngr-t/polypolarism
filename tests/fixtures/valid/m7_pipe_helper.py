@@ -1,4 +1,4 @@
-"""M7: df.pipe(typed_helper) carries the helper's declared return type."""
+"""df.pipe(typed_helper) carries the helper's declared return type."""
 
 import pandera.polars as pa
 import polars as pl

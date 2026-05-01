@@ -1,4 +1,4 @@
-"""M4: unpivot produces fixed schema; hstack merges disjoint frames."""
+"""unpivot produces fixed schema; hstack merges disjoint frames."""
 
 import pandera.polars as pa
 import polars as pl

@@ -1,4 +1,4 @@
-"""M2: std / var / median / quantile / product in group_by aggregation."""
+"""std / var / median / quantile / product in group_by aggregation."""
 
 import pandera.polars as pa
 import polars as pl

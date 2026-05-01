@@ -1,4 +1,4 @@
-"""M6: pl.struct / pl.concat_str / pl.coalesce / pl.format expression constructors."""
+"""pl.struct / pl.concat_str / pl.coalesce / pl.format expression constructors."""
 
 import pandera.polars as pa
 import polars as pl

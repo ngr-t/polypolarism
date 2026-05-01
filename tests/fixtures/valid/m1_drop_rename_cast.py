@@ -1,4 +1,4 @@
-"""M1: drop / rename / cast reshape the FrameType."""
+"""drop / rename / cast reshape the FrameType."""
 
 import pandera.polars as pa
 import polars as pl

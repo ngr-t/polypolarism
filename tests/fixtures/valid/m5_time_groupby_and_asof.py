@@ -1,4 +1,4 @@
-"""M5: group_by_dynamic + join_asof — time-window groupby and asof join."""
+"""group_by_dynamic + join_asof — time-window groupby and asof join."""
 
 import pandera.polars as pa
 import polars as pl

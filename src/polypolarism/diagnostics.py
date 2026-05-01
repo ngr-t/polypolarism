@@ -27,7 +27,7 @@ PLY020 = "PLY020"  # concat schema mismatch / horizontal overlap
 PLY021 = "PLY021"  # explode: column missing or not List[T]
 PLY022 = "PLY022"  # unpivot: column missing / value dtype unification failure
 
-# Eager / lazy distinction (M15)
+# Eager / lazy distinction
 PLY030 = "PLY030"  # eager-only method called on a LazyFrame (suggest .collect())
 PLY031 = "PLY031"  # lazy-only method called on a DataFrame (suggest .lazy())
 PLY032 = "PLY032"  # function expected DataFrame[S] but got LazyFrame[S] (or vice versa)

@@ -1,4 +1,4 @@
-"""M14: partition_by element types flow through subscript and for-loop."""
+"""partition_by element types flow through subscript and for-loop."""
 
 import pandera.polars as pa
 import polars as pl

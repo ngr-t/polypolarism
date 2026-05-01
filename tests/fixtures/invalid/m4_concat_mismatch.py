@@ -1,4 +1,4 @@
-"""M4 invalid: vertical concat with mismatched column sets."""
+"""vertical concat with mismatched column sets."""
 
 import pandera.polars as pa
 import polars as pl

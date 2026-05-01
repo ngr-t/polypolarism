@@ -1,4 +1,4 @@
-"""M7 warning: map_elements without return_dtype= emits PLW001."""
+"""map_elements without return_dtype= emits PLW001."""
 
 import pandera.polars as pa
 import polars as pl

@@ -1,4 +1,4 @@
-"""M10: cs.exclude + selector union/intersection/difference/complement."""
+"""cs.exclude + selector union/intersection/difference/complement."""
 
 import pandera.polars as pa
 import polars as pl

@@ -111,7 +111,7 @@ _IDENTITY_FRAME_METHODS: frozenset[str] = frozenset(
         "set_sorted",
         "shrink_to_fit",
         "rechunk",
-        # LazyFrame-only identity (M13). Eager/lazy validation happens via
+        # LazyFrame-only identity. Eager/lazy validation happens via
         # _LAZY_ONLY_METHODS / _EAGER_ONLY_METHODS below; the dispatch itself
         # preserves the receiver's column shape unchanged.
         "cache",
@@ -861,7 +861,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             "neg",
             "shrink_dtype",
             "rechunk",
-            # M5 cumulative / window — preserve receiver dtype.
+            # Cumulative / window — preserve receiver dtype.
             "cum_sum",
             "cum_max",
             "cum_min",
@@ -875,10 +875,10 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         }
     )
 
-    # M5 shift-like methods: receiver dtype, but head positions become NULL.
+    # Shift-like methods: receiver dtype, but head positions become NULL.
     _SHIFT_LIKE_METHODS = frozenset({"shift", "diff", "pct_change"})
 
-    # M5 rolling reductions to Float64.
+    # Rolling reductions to Float64.
     _ROLLING_FLOAT_METHODS = frozenset(
         {
             "rolling_mean",
@@ -1299,18 +1299,18 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         if method == "cum_count":
             return receiver_name, UInt32()
 
-        # M5 shift-like: head positions become NULL → wrap in Nullable.
+        # Shift-like: head positions become NULL → wrap in Nullable.
         if method in self._SHIFT_LIKE_METHODS and receiver_type is not None:
             inner = receiver_type.inner if isinstance(receiver_type, Nullable) else receiver_type
             return receiver_name, Nullable(inner)
 
-        # M5 rolling reductions returning Float64.
+        # Rolling reductions returning Float64.
         if method in self._ROLLING_FLOAT_METHODS and receiver_type is not None:
             if isinstance(receiver_type, Nullable):
                 return receiver_name, Nullable(Float64())
             return receiver_name, Float64()
 
-        # M7: ``pl.col("x").map_elements(fn, return_dtype=pl.Float64)`` /
+        # ``pl.col("x").map_elements(fn, return_dtype=pl.Float64)`` /
         # ``map_batches(fn, return_dtype=...)``. The return type is what the
         # user declared; without ``return_dtype`` it's uninferable, so we
         # fall back to the receiver dtype and emit ``PLW001`` so the user
@@ -1652,7 +1652,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
 
         return None
 
-    # -- M14: partition_by / FrameList helpers --------------------------------
+    # -- partition_by / FrameList helpers --------------------------------
 
     def _is_partition_by_call(self, node: ast.expr) -> bool:
         return (
@@ -1755,7 +1755,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     return piped
                 return receiver_type
 
-            # LazyFrame ↔ DataFrame transitions (M15): preserve column shape
+            # LazyFrame ↔ DataFrame transitions: preserve column shape
             # but flip ``is_lazy`` so downstream eager/lazy validation works.
             if method_name in ("collect", "collect_async", "collect_batches"):
                 receiver_type = self._infer_expr_type(receiver)
@@ -2349,7 +2349,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
 
         return FrameType(columns=result_columns)
 
-    # -- M1 frame methods --------------------------------------------------
+    # -- frame methods --------------------------------------------------
 
     def _collect_drop_targets(
         self, node: ast.Call, input_frame: FrameType | None = None
@@ -2414,7 +2414,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             return input_frame
         first = node.args[0]
         if not isinstance(first, ast.Dict):
-            # ``cast(pl.Int64)`` whole-frame form not handled in M1 — fall back to identity.
+            # ``cast(pl.Int64)`` whole-frame form not handled — fall back to identity.
             return input_frame
         result_columns: dict[str, ColumnSpec] = dict(input_frame.columns)
         for key_node, val_node in zip(first.keys, first.values, strict=False):

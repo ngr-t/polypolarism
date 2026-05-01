@@ -1,4 +1,4 @@
-"""M2: pl.col(...).fill_null(value) strips Nullable from the receiver."""
+"""pl.col(...).fill_null(value) strips Nullable from the receiver."""
 
 import pandera.polars as pa
 import polars as pl

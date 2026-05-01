@@ -1,4 +1,4 @@
-"""M1: drop_nulls strips Nullable; with_row_index adds UInt32 column."""
+"""drop_nulls strips Nullable; with_row_index adds UInt32 column."""
 
 import pandera.polars as pa
 import polars as pl

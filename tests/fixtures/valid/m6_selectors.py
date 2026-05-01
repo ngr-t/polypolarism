@@ -1,4 +1,4 @@
-"""M6: polars.selectors (cs.*) expand to matching columns in select / drop."""
+"""polars.selectors (cs.*) expand to matching columns in select / drop."""
 
 import pandera.polars as pa
 import polars as pl

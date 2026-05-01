@@ -1,4 +1,4 @@
-"""M7: map_elements with return_dtype= is precisely typed."""
+"""map_elements with return_dtype= is precisely typed."""
 
 import pandera.polars as pa
 import polars as pl

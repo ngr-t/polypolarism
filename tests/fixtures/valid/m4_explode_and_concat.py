@@ -1,4 +1,4 @@
-"""M4: explode + diagonal concat — pipeline that flattens lists then unions."""
+"""explode + diagonal concat — pipeline that flattens lists then unions."""
 
 from typing import Annotated
 

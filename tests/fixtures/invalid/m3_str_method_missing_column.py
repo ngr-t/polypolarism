@@ -1,4 +1,4 @@
-"""M3 invalid: a .str method called on a column that doesn't exist."""
+"""a .str method called on a column that doesn't exist."""
 
 import pandera.polars as pa
 import polars as pl

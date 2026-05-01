@@ -175,7 +175,7 @@ numeric input dtype.
 literal expressions, `pl.col(...)` references, arithmetic, and
 `.alias(...)`.
 
-### Frame reshape (M1)
+### Frame reshape
 
 | Method | Effect on FrameType |
 |---|---|
@@ -191,7 +191,7 @@ literal expressions, `pl.col(...)` references, arithmetic, and
 `UInt64`, `Float32`, `Float64`, `Utf8` (alias `String`), `Boolean`,
 `Date`, `Datetime` (incl. `pl.Datetime("us", "UTC")`), `Duration`.
 
-### Expression predicates and narrowing (M2)
+### Expression predicates and narrowing
 
 | Form | Inferred type |
 |---|---|
@@ -208,7 +208,7 @@ literal expressions, `pl.col(...)` references, arithmetic, and
 the same expression analyser, so referencing a missing column produces a
 `Column 'X' not found` error.
 
-### Sub-namespaces (M3)
+### Sub-namespaces
 
 Method chains on `.str` / `.dt` / `.list` (alias `.arr`) are dispatched
 to per-namespace return-type tables. The receiver's `Nullable[...]`
@@ -243,14 +243,14 @@ wrapper is preserved on the result.
 | `unique`, `sort`, `reverse`, `head`, `tail`, `slice`, `drop_nulls`, `sample`, `shift` | preserves receiver dtype |
 | `get(i)`, `first`, `last`, `sum`, `mean`, `min`, `max`, `median` | element dtype (requires `List[T]` receiver) |
 
-**`pl.col("s").struct.<m>(...)`** (M9)
+**`pl.col("s").struct.<m>(...)`**
 
 | Methods | Return |
 |---|---|
 | `field("name")` | dtype of that field on the receiver `Struct{...}`; errors if the field doesn't exist |
 | `rename_fields(...)` | preserves receiver `Struct{...}` |
 
-### Frame restructuring (M4)
+### Frame restructuring
 
 | Form | Result |
 |---|---|
@@ -261,11 +261,11 @@ wrapper is preserved on the result.
 | `df.vstack(other)` | shorthand for vertical `pl.concat([df, other])` |
 | `df.hstack(other)` / `df.extend(other)` | shorthand for horizontal `pl.concat([df, other])` |
 | `df.unpivot(index=[...], on=[...], variable_name="variable", value_name="value")` / `df.melt(...)` | output schema `{index..., variable_name: Utf8, value_name: T}` where `T` unifies the dtypes of the `on` columns |
-| `df.unnest("s")` / `df.unnest(["a","b"])` (M9) | each named `Struct{...}` column is replaced by its fields; receiver `Nullable[Struct]` widens each field to `Nullable[T]`; errors on missing column or non-`Struct` |
-| `df.pivot(on=, index=, values=)` (M12) | output schema is data-dependent and so cannot be inferred. Polypolarism emits `[PLW005]` with a copy-pasteable Pandera schema sketch and trusts the user's `result: DataFrame[Schema]` annotation when the result is bound to a typed variable. |
-| **LazyFrame** (M13): `lf.collect()`, `lf.collect_async()`, `lf.collect_batches()`, `lf.cache()`, `lf.first()`, `lf.last()`, `lf.inspect()`, `lf.top_k(...)`, `lf.bottom_k(...)`, `lf.sink_csv(...)`, `lf.sink_parquet(...)`, `lf.sink_ipc(...)`, `lf.sink_ndjson(...)`, `lf.sink_batches(...)`, `df.lazy()` | column shape preserved through the call. As of M15, `LazyFrame[Schema]` and `DataFrame[Schema]` are *statically distinguished*: `lazy()` flips the receiver to lazy and `collect*()` flips it to eager. Calling a lazy-only method on a `DataFrame` (or vice versa) emits `PLY031` / `PLY030`. Crossing eager↔lazy in function-call arguments or return types emits `PLY032`. |
+| `df.unnest("s")` / `df.unnest(["a","b"])` | each named `Struct{...}` column is replaced by its fields; receiver `Nullable[Struct]` widens each field to `Nullable[T]`; errors on missing column or non-`Struct` |
+| `df.pivot(on=, index=, values=)` | output schema is data-dependent and so cannot be inferred. Polypolarism emits `[PLW005]` with a copy-pasteable Pandera schema sketch and trusts the user's `result: DataFrame[Schema]` annotation when the result is bound to a typed variable. |
+| **LazyFrame**: `lf.collect()`, `lf.collect_async()`, `lf.collect_batches()`, `lf.cache()`, `lf.first()`, `lf.last()`, `lf.inspect()`, `lf.top_k(...)`, `lf.bottom_k(...)`, `lf.sink_csv(...)`, `lf.sink_parquet(...)`, `lf.sink_ipc(...)`, `lf.sink_ndjson(...)`, `lf.sink_batches(...)`, `df.lazy()` | column shape preserved through the call. `LazyFrame[Schema]` and `DataFrame[Schema]` are *statically distinguished*: `lazy()` flips the receiver to lazy and `collect*()` flips it to eager. Calling a lazy-only method on a `DataFrame` (or vice versa) emits `PLY031` / `PLY030`. Crossing eager↔lazy in function-call arguments or return types emits `PLY032`. |
 
-`df.partition_by("k")` (M14) returns a list of frames — assigning it
+`df.partition_by("k")` returns a list of frames — assigning it
 to a variable binds the variable as a `FrameList(element=...)` whose
 element type carries through subscript indexing (`parts[0]`) and
 for-loop iteration (`for p in parts:`). With `include_key=False` the
@@ -273,7 +273,7 @@ partition keys are dropped from each element schema. Only
 `partition_by` produces a `FrameList` today; other operations that
 return multiple frames are out of scope.
 
-### Window / time-series (M5)
+### Window / time-series
 
 | Form | Inferred type |
 |---|---|
@@ -286,13 +286,13 @@ return multiple frames are out of scope.
 | `df.group_by_dynamic("ts", every="1d").agg(...)` / `df.rolling("ts", period="1d").agg(...)` | same shape as `df.group_by(...).agg(...)` |
 | `df.join_asof(other, on=..., left_on=..., right_on=...)` | same column shape as `df.join(other, how="left")` (right side `Nullable`) |
 
-### Plural `pl.col` (M9)
+### Plural `pl.col`
 
 `pl.col("a", "b", ...)` and `pl.col(["a", "b"])` inside `select` /
 `with_columns` fan out to the named columns (their dtypes flow through
 unchanged). Missing names raise `[PLY001]`.
 
-### `pl.*` expression constructors (M6)
+### `pl.*` expression constructors
 
 | Form | Inferred type |
 |---|---|
@@ -301,7 +301,7 @@ unchanged). Missing names raise `[PLY001]`.
 | `pl.coalesce(*exprs)` | unification of operand dtypes; non-`Nullable` if any operand is non-`Nullable` |
 | `pl.struct(pl.col("a"), pl.col("b"), ...)` | `Struct{a: T_a, b: T_b, ...}` (from receiver column names) |
 
-### `polars.selectors` (M6)
+### `polars.selectors`
 
 `cs.*` selectors are expanded to a list of matching columns when used as
 positional arguments to `select`, `with_columns`, or `drop`.
@@ -318,11 +318,11 @@ positional arguments to `select`, `with_columns`, or `drop`.
 | `cs.starts_with("prefix")` / `ends_with("suffix")` / `contains("part")` | column-name pattern |
 | `cs.by_name("a", "b", ...)` | exact-name list |
 | `cs.by_dtype(pl.Int64, pl.Float64)` | matching dtypes |
-| `cs.first()` / `cs.last()` (M10) | first or last column of the frame |
-| `cs.exclude(names_or_selector)` (M10) | every column not matched by the names or inner selector |
-| `~sel` / `sel1 | sel2` / `sel1 & sel2` / `sel1 - sel2` (M10) | complement / union / intersection / difference of selectors |
+| `cs.first()` / `cs.last()` | first or last column of the frame |
+| `cs.exclude(names_or_selector)` | every column not matched by the names or inner selector |
+| `~sel` / `sel1 | sel2` / `sel1 & sel2` / `sel1 - sel2` | complement / union / intersection / difference of selectors |
 
-### Diagnostic codes (M6)
+### Diagnostic codes
 
 Errors are tagged with a stable `[PLY###]` prefix for IDE/CI consumers:
 
@@ -343,7 +343,7 @@ Errors are tagged with a stable `[PLY###]` prefix for IDE/CI consumers:
 | `PLY031` | lazy-only method called on a `DataFrame` (e.g. `df.sink_csv(...)`, `df.collect()`) — suggests `.lazy()` or removing the call |
 | `PLY032` | function-call argument or return type mixes up `DataFrame[S]` and `LazyFrame[S]` — suggests the appropriate `.collect()` / `.lazy()` |
 
-### Apply-style helpers and warning codes (M7)
+### Apply-style helpers and warning codes
 
 Some patterns are **not statically decidable** without help from the
 user. Polypolarism detects them, falls back to a best-effort inference,
@@ -375,7 +375,7 @@ Warning codes:
 JSON output (`--format json`) emits warnings as `severity: "warning"`
 diagnostics so editors and CI can route them separately from errors.
 
-### Schema diff block (M11)
+### Schema diff block
 
 When a single function has at least two column-level mismatches
 (`MissingColumn`, `ExtraColumn`, or `TypeDifference` in any combination)

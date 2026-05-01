@@ -1,4 +1,4 @@
-"""M5: cumulative + over + rolling — window-style expressions are typed."""
+"""cumulative + over + rolling — window-style expressions are typed."""
 
 import pandera.polars as pa
 import polars as pl

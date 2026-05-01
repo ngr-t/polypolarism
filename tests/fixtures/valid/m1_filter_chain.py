@@ -1,4 +1,4 @@
-"""M1: filter / sort / head are identity-typed; chains preserve schema."""
+"""filter / sort / head are identity-typed; chains preserve schema."""
 
 import pandera.polars as pa
 import polars as pl

@@ -509,7 +509,7 @@ class TestAnalyzeWithColumn:
 
 
 class TestM1IdentityMethods:
-    """Schema-preserving (identity-typed) DataFrame methods added in M1."""
+    """Schema-preserving (identity-typed) DataFrame methods."""
 
     @pytest.mark.parametrize(
         "method_call",

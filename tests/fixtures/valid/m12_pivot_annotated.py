@@ -1,4 +1,4 @@
-"""M12: pivot() output schema is data-dependent — annotation wins."""
+"""pivot() output schema is data-dependent — annotation wins."""
 
 import pandera.polars as pa
 import polars as pl

@@ -1,4 +1,4 @@
-"""M6 invalid: ensure errors carry [PLY###] codes."""
+"""ensure errors carry [PLY###] codes."""
 
 import pandera.polars as pa
 import polars as pl

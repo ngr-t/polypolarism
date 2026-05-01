@@ -1,4 +1,4 @@
-"""M3: pl.col(...).list methods dispatch on element/list dtype."""
+"""pl.col(...).list methods dispatch on element/list dtype."""
 
 from typing import Annotated
 
