@@ -11,6 +11,8 @@ parametrized dtypes (``pl.Datetime("us", "UTC")``, ``pl.Decimal(20, 4)``,
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from polypolarism.types import (
     Boolean,
     Categorical,
@@ -36,6 +38,9 @@ from polypolarism.types import (
     UInt128,
     Utf8,
 )
+
+if TYPE_CHECKING:
+    from polypolarism.ops.groupby import AggFunction
 
 # Polars' own ``pl.Decimal()`` defaults (precision=38, scale=0). Used when
 # the analyzer sees a bare ``pl.Decimal`` reference; explicit
@@ -84,7 +89,9 @@ DTYPE_NAME_MAP: dict[str, DataType] = {
 
 # Join ``how`` literal values accepted by polars 1.x. ``outer`` was renamed
 # to ``full`` at 1.0; we don't accept the legacy spelling.
-JOIN_HOW_VALUES: frozenset[str] = frozenset({"inner", "left", "right", "full", "cross", "semi", "anti"})
+JOIN_HOW_VALUES: frozenset[str] = frozenset(
+    {"inner", "left", "right", "full", "cross", "semi", "anti"}
+)
 
 # Subset of ``how`` values where the analyzer infers a column-shape result
 # (vs. ``cross`` / ``semi`` / ``anti`` which have specific shape rules
@@ -101,3 +108,57 @@ def join_left_nullable(how: str) -> bool:
 def join_right_nullable(how: str) -> bool:
     """Whether the right-side columns should be wrapped in ``Nullable``."""
     return how in ("left", "full")
+
+
+# Aggregation method-name → AggFunction enum. Single source of truth for
+# the analyzer's recognition of ``.sum()`` / ``.mean()`` / etc. on
+# expressions and ``pl.sum("col")`` / ``pl.mean("col")`` top-level calls.
+#
+# ``AGG_NAME_MAP`` covers every aggregation polypolarism currently models;
+# ``AGG_SHORTHAND_NAMES`` is the strict subset that polars exposes as a
+# top-level shorthand (``pl.<name>("col")``) — ``list``, ``quantile``, and
+# ``product`` are method-only.
+def _build_agg_name_map() -> dict[str, AggFunction]:
+    # Imported lazily to avoid the compat -> ops/groupby -> compat cycle
+    # that would otherwise form (ops/groupby imports compat for join, but
+    # compat needs the AggFunction enum). The enum lives in ops/groupby
+    # for now; a future refactor may pull it here too.
+    from polypolarism.ops.groupby import AggFunction
+
+    return {
+        "sum": AggFunction.SUM,
+        "mean": AggFunction.MEAN,
+        "count": AggFunction.COUNT,
+        "n_unique": AggFunction.N_UNIQUE,
+        "list": AggFunction.LIST,
+        "first": AggFunction.FIRST,
+        "last": AggFunction.LAST,
+        "min": AggFunction.MIN,
+        "max": AggFunction.MAX,
+        "std": AggFunction.STD,
+        "var": AggFunction.VAR,
+        "median": AggFunction.MEDIAN,
+        "quantile": AggFunction.QUANTILE,
+        "product": AggFunction.PRODUCT,
+    }
+
+
+AGG_SHORTHAND_NAMES: frozenset[str] = frozenset(
+    {"sum", "mean", "min", "max", "first", "last", "count", "n_unique", "median", "std", "var"}
+)
+
+
+def agg_function_for(name: str):
+    """Look up the ``AggFunction`` enum value for a polars aggregation method
+    name. Returns ``None`` if the name isn't a known aggregation."""
+    return _AGG_NAME_MAP_CACHE().get(name)
+
+
+_AGG_NAME_MAP_INSTANCE: dict[str, AggFunction] | None = None
+
+
+def _AGG_NAME_MAP_CACHE() -> dict[str, AggFunction]:  # noqa: N802
+    global _AGG_NAME_MAP_INSTANCE
+    if _AGG_NAME_MAP_INSTANCE is None:
+        _AGG_NAME_MAP_INSTANCE = _build_agg_name_map()
+    return _AGG_NAME_MAP_INSTANCE

@@ -6,7 +6,11 @@ import ast
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from polypolarism.compat.polars_api import DTYPE_NAME_MAP
+from polypolarism.compat.polars_api import (
+    AGG_SHORTHAND_NAMES,
+    DTYPE_NAME_MAP,
+    agg_function_for,
+)
 from polypolarism.diagnostics import (
     PLW001,
     PLW002,
@@ -214,23 +218,15 @@ _PL_DTYPE_NAME_MAP: dict[str, DataType] = DTYPE_NAME_MAP
 
 
 # ``pl.<name>(col)`` top-level aggregation shorthand — equivalent to
-# ``pl.col(col).<name>()``. Used by ``analyze_agg_expr`` (inside
-# ``group_by().agg(...)``) and by ``_analyze_pl_func`` (inside
-# ``select`` / ``with_columns``) so the column survives downstream
-# references.
-_PL_AGG_SHORTHAND: dict[str, AggFunction] = {
-    "sum": AggFunction.SUM,
-    "mean": AggFunction.MEAN,
-    "min": AggFunction.MIN,
-    "max": AggFunction.MAX,
-    "first": AggFunction.FIRST,
-    "last": AggFunction.LAST,
-    "count": AggFunction.COUNT,
-    "n_unique": AggFunction.N_UNIQUE,
-    "median": AggFunction.MEDIAN,
-    "std": AggFunction.STD,
-    "var": AggFunction.VAR,
-}
+# ``pl.col(col).<name>()``. Lookup goes through ``compat.polars_api`` so
+# the analyzer and the dispatch tables share one source of truth. The
+# strict subset of names polars exposes as ``pl.<name>("col")`` (i.e.
+# everything in AGG_NAME_MAP minus ``list``, ``quantile``, ``product``)
+# lives in ``AGG_SHORTHAND_NAMES``.
+def _pl_agg_shorthand(name: str) -> AggFunction | None:
+    if name not in AGG_SHORTHAND_NAMES:
+        return None
+    return agg_function_for(name)
 
 
 def _resolve_pl_dtype(node: ast.expr) -> DataType | None:
@@ -705,25 +701,8 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 agg_func_name = agg_node.func.attr
                 col_expr = agg_node.func.value
 
-                # Map function names to AggFunction enum
-                func_map = {
-                    "sum": AggFunction.SUM,
-                    "mean": AggFunction.MEAN,
-                    "count": AggFunction.COUNT,
-                    "n_unique": AggFunction.N_UNIQUE,
-                    "list": AggFunction.LIST,
-                    "first": AggFunction.FIRST,
-                    "last": AggFunction.LAST,
-                    "min": AggFunction.MIN,
-                    "max": AggFunction.MAX,
-                    "std": AggFunction.STD,
-                    "var": AggFunction.VAR,
-                    "median": AggFunction.MEDIAN,
-                    "quantile": AggFunction.QUANTILE,
-                    "product": AggFunction.PRODUCT,
-                }
-
-                if agg_func_name in func_map:
+                agg_func_value = agg_function_for(agg_func_name)
+                if agg_func_value is not None:
                     # Form 1: ``pl.col("X").<agg>()`` — receiver is the col.
                     col_name = self._extract_col_name(col_expr)
 
@@ -741,7 +720,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                     if col_name:
                         return AggExpr(
                             column=col_name,
-                            function=func_map[agg_func_name],
+                            function=agg_func_value,
                             alias=alias,
                         )
 
@@ -1094,7 +1073,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         # ``pl.<agg>("col")`` top-level shorthand — equivalent to
         # ``pl.col("col").<agg>()``. Recognised in ``select`` /
         # ``with_columns`` so the column survives downstream lookups.
-        agg_func = _PL_AGG_SHORTHAND.get(name)
+        agg_func = _pl_agg_shorthand(name)
         if agg_func is not None and node.args:
             col = _str_constant(node.args[0])
             if col is not None:
