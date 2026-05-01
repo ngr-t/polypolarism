@@ -13,12 +13,9 @@ import contextlib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from polypolarism.compat.pandera_api import SCHEMA_BASE_NAMES as _BASE_NAMES
 from polypolarism.pandera_dtype import parse_field_annotation
 from polypolarism.types import ColumnSpec, FrameType
-
-# Class names treated as the Pandera schema base. Qualified forms (pa.DataFrameModel,
-# pandera.polars.DataFrameModel) are matched on the trailing attribute name.
-_BASE_NAMES = frozenset({"DataFrameModel", "SchemaModel"})
 
 
 @dataclass

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import ast
 
+from polypolarism.compat.pandera_api import FIELD_CALLABLE_NAME
 from polypolarism.compat.polars_api import DTYPE_NAME_MAP
 from polypolarism.types import (
     Boolean,
@@ -261,10 +262,10 @@ def _is_field_with_nullable(node: ast.expr) -> bool:
         return False
     func = node.func
     if isinstance(func, ast.Name):
-        if func.id != "Field":
+        if func.id != FIELD_CALLABLE_NAME:
             return False
     elif isinstance(func, ast.Attribute):
-        if func.attr != "Field":
+        if func.attr != FIELD_CALLABLE_NAME:
             return False
     else:
         return False

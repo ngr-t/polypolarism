@@ -9,10 +9,9 @@ from __future__ import annotations
 
 import ast
 
+from polypolarism.compat.pandera_api import FRAME_ANNOTATION_HEADS as _HEAD_NAMES
 from polypolarism.pandera_schema import SchemaRegistry
 from polypolarism.types import FrameType
-
-_HEAD_NAMES = frozenset({"DataFrame", "LazyFrame"})
 
 
 def frame_annotation_schema_name(annotation: ast.expr) -> str | None:
