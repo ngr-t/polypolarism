@@ -80,6 +80,20 @@ class Int8(DataType):
 
 
 @dataclass(frozen=True)
+class Int128(DataType):
+    """128-bit signed integer (polars 1.18+)."""
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, Int128)
+
+    def __hash__(self) -> int:
+        return hash("Int128")
+
+    def __str__(self) -> str:
+        return "Int128"
+
+
+@dataclass(frozen=True)
 class UInt32(DataType):
     """32-bit unsigned integer."""
 
@@ -133,6 +147,34 @@ class UInt64(DataType):
 
     def __str__(self) -> str:
         return "UInt64"
+
+
+@dataclass(frozen=True)
+class UInt128(DataType):
+    """128-bit unsigned integer (polars 1.34+)."""
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, UInt128)
+
+    def __hash__(self) -> int:
+        return hash("UInt128")
+
+    def __str__(self) -> str:
+        return "UInt128"
+
+
+@dataclass(frozen=True)
+class Float16(DataType):
+    """16-bit floating point (polars 1.36+)."""
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, Float16)
+
+    def __hash__(self) -> int:
+        return hash("Float16")
+
+    def __str__(self) -> str:
+        return "Float16"
 
 
 @dataclass(frozen=True)
@@ -270,6 +312,27 @@ class Categorical(DataType):
 
     def __str__(self) -> str:
         return "Categorical"
+
+
+@dataclass(frozen=True)
+class Enum(DataType):
+    """Enum type (polars 1.25+ stabilized).
+
+    Distinct from ``Categorical`` because the value space is fixed at
+    schema-declaration time. The analyzer treats every ``pl.Enum`` as
+    structurally equal to every other for now — the variant lists from
+    ``pa.Field(..., dtype_kwargs={"categories": [...]})`` are not yet
+    inspected.
+    """
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, Enum)
+
+    def __hash__(self) -> int:
+        return hash("Enum")
+
+    def __str__(self) -> str:
+        return "Enum"
 
 
 @dataclass(frozen=True)

@@ -6,6 +6,7 @@ import ast
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from polypolarism.compat.polars_api import DTYPE_NAME_MAP
 from polypolarism.diagnostics import (
     PLW001,
     PLW002,
@@ -205,26 +206,11 @@ _EAGER_ONLY_METHODS: frozenset[str] = frozenset(
 )
 
 
-# Map ``pl.<Name>`` attribute references and call expressions to our DataType.
-# Datetime/Duration with parameters are handled via Call form.
-_PL_DTYPE_NAME_MAP: dict[str, DataType] = {
-    "Int8": Int8(),
-    "Int16": Int16(),
-    "Int32": Int32(),
-    "Int64": Int64(),
-    "UInt8": UInt8(),
-    "UInt16": UInt16(),
-    "UInt32": UInt32(),
-    "UInt64": UInt64(),
-    "Float32": Float32(),
-    "Float64": Float64(),
-    "Utf8": Utf8(),
-    "String": Utf8(),  # polars 1.x alias
-    "Boolean": Boolean(),
-    "Date": Date(),
-    "Datetime": Datetime(),
-    "Duration": Duration(),
-}
+# Map ``pl.<Name>`` attribute references to our DataType. Single source of
+# truth lives in ``compat.polars_api``; aliased here so existing call sites
+# keep their familiar name. Parametrized dtypes (``Datetime``, ``Duration``,
+# ``Decimal``) are still handled via Call form below.
+_PL_DTYPE_NAME_MAP: dict[str, DataType] = DTYPE_NAME_MAP
 
 
 # ``pl.<name>(col)`` top-level aggregation shorthand — equivalent to

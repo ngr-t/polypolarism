@@ -20,28 +20,19 @@ from __future__ import annotations
 
 import ast
 
+from polypolarism.compat.polars_api import DTYPE_NAME_MAP
 from polypolarism.types import (
     Boolean,
-    Categorical,
     ColumnSpec,
     DataType,
     Date,
     Datetime,
     Duration,
-    Float32,
     Float64,
-    Int8,
-    Int16,
-    Int32,
     Int64,
     List,
-    Null,
     Nullable,
     Struct,
-    UInt8,
-    UInt16,
-    UInt32,
-    UInt64,
     Utf8,
 )
 
@@ -72,26 +63,7 @@ _STDLIB_TEMPORAL_ATTR_MAP: dict[str, DataType] = {
 }
 
 
-_PL_DTYPE_MAP: dict[str, DataType] = {
-    "Int8": Int8(),
-    "Int16": Int16(),
-    "Int32": Int32(),
-    "Int64": Int64(),
-    "UInt8": UInt8(),
-    "UInt16": UInt16(),
-    "UInt32": UInt32(),
-    "UInt64": UInt64(),
-    "Float32": Float32(),
-    "Float64": Float64(),
-    "Utf8": Utf8(),
-    "String": Utf8(),
-    "Boolean": Boolean(),
-    "Date": Date(),
-    "Datetime": Datetime(),
-    "Duration": Duration(),
-    "Categorical": Categorical(),
-    "Null": Null(),
-}
+_PL_DTYPE_MAP: dict[str, DataType] = DTYPE_NAME_MAP
 
 
 def parse_field_annotation(
