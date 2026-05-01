@@ -11,6 +11,7 @@ parametrized dtypes (``pl.Datetime("us", "UTC")``, ``pl.Decimal(20, 4)``,
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from polypolarism.types import (
@@ -42,6 +43,26 @@ from polypolarism.types import List as ListT
 
 if TYPE_CHECKING:
     from polypolarism.ops.groupby import AggFunction
+
+@dataclass(frozen=True)
+class PolarsProfile:
+    """Version-conditional behavior knobs.
+
+    ADR-0001 ships this as a name-only scaffold. Fields get added when a
+    real fixture exposes a divergence between supported minors that the
+    analyzer cares about — speculative fields rot. The selection
+    mechanism (``--polars-version`` / ``[tool.polypolarism]``) is wired in
+    `version_check.py`; the *consumption* path (analyzer dispatch
+    branching on profile fields) doesn't exist yet because there are no
+    fields to branch on.
+    """
+
+    name: str
+
+
+POLARS_1_X = PolarsProfile(name="1.x")
+DEFAULT_POLARS_PROFILE = POLARS_1_X
+
 
 # Polars' own ``pl.Decimal()`` defaults (precision=38, scale=0). Used when
 # the analyzer sees a bare ``pl.Decimal`` reference; explicit

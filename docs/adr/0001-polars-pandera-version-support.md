@@ -215,23 +215,23 @@ not a profile concern.
 
 | Step | Action | Files |
 |---|---|---|
-| 1 | Create `src/polypolarism/compat/{__init__.py, polars_api.py, pandera_api.py}` | new |
-| 2 | Move dtype name map, agg shorthand, namespace tables, method classifications into `compat/polars_api.py` | `analyzer.py` → `compat/polars_api.py` |
-| 3 | Replace `pandera_dtype.py:_PL_DTYPE_MAP` with re-export from `compat/polars_api.py` | `pandera_dtype.py` |
-| 4 | Move `JoinHow` + nullability rules into `compat/polars_api.py` | `ops/join.py` |
-| 5 | Move `_AGG_INFER_MAP` into `compat/polars_api.py` | `ops/groupby.py` |
-| 6 | Add empty `METHOD_ALIASES = {}` scaffold + canonicalize-at-entry shim in dispatch | `analyzer.py`, `compat/polars_api.py` |
-| 7 | Move `_BASE_NAMES`, `_HEAD_NAMES`, `Field` detection into `compat/pandera_api.py` | `pandera_schema.py`, `pandera_annotation.py` |
-| 8 | **Done.** `Int128`, `UInt128`, `Float16`, `Enum`, `Decimal(p, s)` added to the unified `compat/polars_api.py:DTYPE_NAME_MAP`. Fixtures: `dtype_int128.py`, `dtype_enum.py`, `dtype_uint128.py`, `dtype_decimal.py`, `dtype_float16.py`. New `_parse_decimal_call` extracts precision/scale (the only parametrized dtype where args matter for type identity). | `compat/polars_api.py`, `pandera_dtype.py`, `types.py`, `tests/fixtures/` |
-| 9 | **Done.** Audited selector dispatch against five 1.32-affected patterns (chained agg, arithmetic, `fill_null`, `by_dtype`, `exclude` in `drop`) — all currently infer correctly. Pinned in `tests/fixtures/valid/selector_dsl_1_32.py`. | `analyzer.py`, `tests/fixtures/` |
-| 10 | Add `PolarsProfile` scaffold (name-only) + default `POLARS_1_X` | `compat/polars_api.py` |
-| 11 | **Done** in `src/polypolarism/version_check.py`: detection from CLI flag, `[tool.polypolarism]`, `uv.lock`, dependencies; PLW010 warning on below-floor; `--polars-version` / `--pandera-version` / `--no-version-check` CLI flags. Folds into `compat/polars_api.py` during the refactor. | `version_check.py`, `cli.py`, `diagnostics.py` |
+| 1 | **Done.** `compat/{__init__.py, polars_api.py, pandera_api.py}`. | new |
+| 2 | **Done.** All dispatch tables (DTYPE_NAME_MAP, AGG name lookups, `IDENTITY_FRAME_METHODS` / `LAZY_ONLY_METHODS` / `EAGER_ONLY_METHODS`, the five sub-namespace tables) moved into `compat/polars_api.py`. analyzer.py keeps thin local aliases for legibility. | `analyzer.py` → `compat/polars_api.py` |
+| 3 | **Done.** `pandera_dtype.py:_PL_DTYPE_MAP` re-exports `DTYPE_NAME_MAP` — single source of truth. | `pandera_dtype.py` |
+| 4 | **Done.** `JOIN_HOW_VALUES` / `JOIN_HOW_INFERRED` / `join_left_nullable` / `join_right_nullable` in compat; `ops/join.py:infer_join` consumes them. | `ops/join.py` |
+| 5 | **Done (adapted).** Polars-surface part of agg table (`agg_function_for(name)`, `AGG_SHORTHAND_NAMES`) in compat. Inference logic (`_AGG_INFER_MAP`, `_infer_*` per-function) stays in `ops/groupby.py` because it's behavior, not surface. | `ops/groupby.py`, `analyzer.py` |
+| 6 | **Done.** `METHOD_ALIASES = {}` scaffold + `canonicalize_method()` shim called at frame-method dispatch entry. Empty today; one entry away from supporting any future intra-1.x rename. | `analyzer.py`, `compat/polars_api.py` |
+| 7 | **Done.** `SCHEMA_BASE_NAMES`, `FRAME_ANNOTATION_HEADS`, `FIELD_CALLABLE_NAME` in `compat/pandera_api.py`. | `pandera_schema.py`, `pandera_annotation.py` |
+| 8 | **Done.** `Int128`, `UInt128`, `Float16`, `Enum`, `Decimal(p, s)` added to `DTYPE_NAME_MAP`. Fixtures per landmark version. New `_parse_decimal_call` extracts precision/scale (the only parametrized dtype where args matter for type identity). | `compat/polars_api.py`, `pandera_dtype.py`, `types.py`, `tests/fixtures/` |
+| 9 | **Done.** Audited selector dispatch against five 1.32-affected patterns — all currently infer correctly. Pinned in `tests/fixtures/valid/selector_dsl_1_32.py`. | `analyzer.py`, `tests/fixtures/` |
+| 10 | **Done.** `PolarsProfile` scaffold + default `POLARS_1_X` in compat. Name-only; fields get added when a real divergence appears. | `compat/polars_api.py` |
+| 11 | **Done** in `src/polypolarism/version_check.py`: detection from CLI flag, `[tool.polypolarism]`, `uv.lock`, dependencies; PLW010 warning on below-floor; `--polars-version` / `--pandera-version` / `--no-version-check` CLI flags. | `version_check.py`, `cli.py`, `diagnostics.py` |
 | 12 | Document support window + new CLI flags in `README.md` | `README.md` |
 
-Steps 1–7 are pure refactors — existing tests must stay green and serve
-as the regression net. Steps 8–9 close the cumulative-drift gap
-identified in the churn survey. Step 11 has shipped (see version_check.py
-and the PLW010 diagnostic); step 12 documents it.
+Steps 1–10 land as a sequence of pure refactors and additive landmarks
+— each commit kept the existing test suite (now 596 tests) green. Step
+11 ships the version-detection feature. Step 12 (README) is the only
+remaining open item.
 
 ## Verification
 
