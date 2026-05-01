@@ -222,8 +222,8 @@ not a profile concern.
 | 5 | Move `_AGG_INFER_MAP` into `compat/polars_api.py` | `ops/groupby.py` |
 | 6 | Add empty `METHOD_ALIASES = {}` scaffold + canonicalize-at-entry shim in dispatch | `analyzer.py`, `compat/polars_api.py` |
 | 7 | Move `_BASE_NAMES`, `_HEAD_NAMES`, `Field` detection into `compat/pandera_api.py` | `pandera_schema.py`, `pandera_annotation.py` |
-| 8 | **Catch up the dtype table to current 1.x**: add `Int128`, `UInt128`, `Float16`, `Enum`, `Decimal` to the unified dtype map; add fixtures exercising each | `compat/polars_api.py`, `tests/fixtures/` |
-| 9 | **Audit selector dispatch against 1.32 `Selector` DSL change**: confirm `analyzer.py:424-496` still produces correct types after `pl.selectors.*` returns `Selector` objects; adjust as needed | `analyzer.py` (post-refactor: `compat/polars_api.py`) |
+| 8 | **Done.** `Int128`, `UInt128`, `Float16`, `Enum`, `Decimal(p, s)` added to the unified `compat/polars_api.py:DTYPE_NAME_MAP`. Fixtures: `dtype_int128.py`, `dtype_enum.py`, `dtype_uint128.py`, `dtype_decimal.py`, `dtype_float16.py`. New `_parse_decimal_call` extracts precision/scale (the only parametrized dtype where args matter for type identity). | `compat/polars_api.py`, `pandera_dtype.py`, `types.py`, `tests/fixtures/` |
+| 9 | **Done.** Audited selector dispatch against five 1.32-affected patterns (chained agg, arithmetic, `fill_null`, `by_dtype`, `exclude` in `drop`) — all currently infer correctly. Pinned in `tests/fixtures/valid/selector_dsl_1_32.py`. | `analyzer.py`, `tests/fixtures/` |
 | 10 | Add `PolarsProfile` scaffold (name-only) + default `POLARS_1_X` | `compat/polars_api.py` |
 | 11 | **Done** in `src/polypolarism/version_check.py`: detection from CLI flag, `[tool.polypolarism]`, `uv.lock`, dependencies; PLW010 warning on below-floor; `--polars-version` / `--pandera-version` / `--no-version-check` CLI flags. Folds into `compat/polars_api.py` during the refactor. | `version_check.py`, `cli.py`, `diagnostics.py` |
 | 12 | Document support window + new CLI flags in `README.md` | `README.md` |

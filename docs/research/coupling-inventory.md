@@ -19,11 +19,12 @@ Identified during the 1.x release-by-release survey
 ([churn doc](polars-pandera-churn.md)) and addressed by ADR-0001
 implementation steps 8–9:
 
-| Gap | Where | Closed by |
+| Gap | Where | Status |
 |---|---|---|
-| `Int128`, `UInt128`, `Float16` not in dtype map | `analyzer.py:210–227` and `pandera_dtype.py:75–94` | step 8 |
-| `Enum`, `Decimal` not in `analyzer.py`'s dtype map (present in `pandera_dtype.py`) | `analyzer.py:210–227` | step 8 |
-| Selector-as-DSL audit (1.32 change) — dispatch may need adjustment | `analyzer.py:424–496` | step 9 |
+| ~~`Int128`, `UInt128`, `Float16` not in dtype map~~ | `compat/polars_api.py:DTYPE_NAME_MAP` | **closed** (commits 4dc2115, f4961d8, ef575bf) |
+| ~~`Enum`, `Decimal` not in `analyzer.py`'s dtype map~~ | `compat/polars_api.py:DTYPE_NAME_MAP` | **closed** (commits e3c2ca2, ef575bf) |
+| ~~Decimal Call-form precision/scale dropped~~ | `pandera_dtype.py:_parse_decimal_call` | **closed** (ef575bf) |
+| ~~Selector-as-DSL audit (1.32 change)~~ | `analyzer.py:424–496`, `tests/fixtures/valid/selector_dsl_1_32.py` | **closed** (36cbca8) |
 | `Categorical(ordering=)` semantics rework (1.32) — not currently modeled | `analyzer.py` (Categorical handling) | future profile field if needed |
 | `hist` bin-closure shift (1.27) — not currently modeled | (no current dispatch) | additive when modeled |
 | Left-join row-order de-guarantee (1.16) — relevant if we ever model `set_sorted` flags through joins | `ops/join.py` | future, only if sort tracking is added |
@@ -42,7 +43,7 @@ implementation steps 8–9:
 
 | Lines | Symbol | Notes |
 |---|---|---|
-| 210–227 | `_PL_DTYPE_NAME_MAP` | Maps `Int8…Int64`, `UInt8…UInt64`, `Float32/64`, `Utf8`/`String`, `Boolean`, `Date`, `Datetime`, `Duration`. **Duplicated** in `pandera_dtype.py:75–94`. The `String` → `Utf8()` alias at line 222 is the only intra-1.x rename currently handled. **Gap vs current 1.x**: `Int128` (1.18), `UInt128` (1.34), `Float16` (1.36) are absent; `Enum` (stabilized 1.25) and `Decimal` (stabilized 1.35) are present in `pandera_dtype.py:_PL_DTYPE_MAP` (`Categorical`, `Null`) but not in `analyzer.py`'s map — see ADR-0001 step 8. |
+| 200–204 | `_PL_DTYPE_NAME_MAP` | Now an alias re-exporting `compat.polars_api.DTYPE_NAME_MAP` — single source of truth. Covers all numeric (`Int8…Int128`, `UInt8…UInt128`), float (`Float16/32/64`), string (`Utf8`/`String`), boolean, temporal (`Date`/`Datetime`/`Duration`), and parametric (`Categorical`, `Enum`, `Decimal`, `Null`) dtypes through polars 1.40. `pandera_dtype.py:_PL_DTYPE_MAP` aliases the same map. |
 
 ### Top-level `pl.*` shorthand
 
@@ -174,7 +175,7 @@ Aggregation contract:
 
 | Lines | What |
 |---|---|
-| 75–94 | `_PL_DTYPE_MAP` — **near-duplicate** of `analyzer.py:210–227`, plus `Categorical` and `Null`. The duplication is the headline thing the `compat/` refactor eliminates. |
+| 75 | `_PL_DTYPE_MAP` — now an alias re-exporting `compat.polars_api.DTYPE_NAME_MAP`. Duplication eliminated. |
 | 209 | `pl.List` / `pl.Array` wrapping |
 | 217 | `pl.Struct` field dict |
 | 249–262 | `_is_field_with_nullable` — recognizes `Field(nullable=True)` and `pa.Field(nullable=True)` |
