@@ -9,6 +9,9 @@ from pathlib import Path
 from polypolarism.compat.polars_api import (
     AGG_SHORTHAND_NAMES,
     DTYPE_NAME_MAP,
+    EAGER_ONLY_METHODS,
+    IDENTITY_FRAME_METHODS,
+    LAZY_ONLY_METHODS,
     agg_function_for,
     canonicalize_method,
 )
@@ -100,115 +103,13 @@ class AnalysisError(Exception):
     pass
 
 
-# Methods whose return frame has the same schema as the receiver.
-# `lazy()` and `collect()` cross between DataFrame/LazyFrame, but in our
-# static type system both are identity. `set_sorted` mutates only metadata.
-_IDENTITY_FRAME_METHODS: frozenset[str] = frozenset(
-    {
-        "sort",
-        "head",
-        "tail",
-        "limit",
-        "slice",
-        "reverse",
-        "sample",
-        "unique",
-        "clone",
-        "set_sorted",
-        "shrink_to_fit",
-        "rechunk",
-        # LazyFrame-only identity. Eager/lazy validation happens via
-        # _LAZY_ONLY_METHODS / _EAGER_ONLY_METHODS below; the dispatch itself
-        # preserves the receiver's column shape unchanged.
-        "cache",
-        "first",
-        "last",
-        "inspect",
-        "top_k",
-        "bottom_k",
-        # Sinks: terminate the lazy pipeline at runtime, but for static
-        # type tracking we treat them as identity so chains continue.
-        "sink_csv",
-        "sink_parquet",
-        "sink_ipc",
-        "sink_ndjson",
-        "sink_batches",
-    }
-)
-
-
-# Methods that exist *only* on LazyFrame in polars. Calling them on a
-# DataFrame is a runtime AttributeError; statically we surface PLY031.
-_LAZY_ONLY_METHODS: frozenset[str] = frozenset(
-    {
-        "collect",
-        "collect_async",
-        "collect_batches",
-        "cache",
-        "inspect",
-        "explain",
-        "show_graph",
-        "profile",
-        "fetch",
-        "with_context",
-        "sink_csv",
-        "sink_parquet",
-        "sink_ipc",
-        "sink_ndjson",
-        "sink_batches",
-    }
-)
-
-
-# Methods that exist *only* on DataFrame in polars. Calling them on a
-# LazyFrame triggers PLY030 with a ``.collect()`` hint.
-_EAGER_ONLY_METHODS: frozenset[str] = frozenset(
-    {
-        "to_pandas",
-        "to_numpy",
-        "to_arrow",
-        "to_dict",
-        "to_dicts",
-        "to_struct",
-        "to_init_repr",
-        "to_jax",
-        "to_torch",
-        "to_series",
-        "to_dummies",
-        "write_csv",
-        "write_parquet",
-        "write_ipc",
-        "write_ipc_stream",
-        "write_json",
-        "write_ndjson",
-        "write_avro",
-        "write_excel",
-        "write_database",
-        "write_delta",
-        "write_iceberg",
-        "write_clipboard",
-        "get_column",
-        "get_column_index",
-        "get_columns",
-        "iter_columns",
-        "iter_rows",
-        "iter_slices",
-        "row",
-        "rows",
-        "rows_by_key",
-        "item",
-        "n_chunks",
-        "estimated_size",
-        "shape",
-        "height",
-        "flags",
-        "glimpse",
-        "describe",
-        "transpose",
-        "partition_by",
-        "n_unique",
-    }
-)
+# Frame method classification — the polars surface knowledge ("which
+# methods exist on which frame type, and which preserve shape") lives in
+# ``compat.polars_api``. These local aliases keep the existing call sites
+# legible.
+_IDENTITY_FRAME_METHODS = IDENTITY_FRAME_METHODS
+_LAZY_ONLY_METHODS = LAZY_ONLY_METHODS
+_EAGER_ONLY_METHODS = EAGER_ONLY_METHODS
 
 
 # Map ``pl.<Name>`` attribute references to our DataType. Single source of

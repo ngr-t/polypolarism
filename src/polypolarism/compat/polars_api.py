@@ -168,6 +168,112 @@ def canonicalize_method(name: str) -> str:
     return METHOD_ALIASES.get(name, name)
 
 
+# Frame methods whose return shape is identical to the receiver. Includes
+# both lazy and eager identity-shape methods (eager/lazy validation is
+# handled separately via EAGER_ONLY_METHODS / LAZY_ONLY_METHODS).
+IDENTITY_FRAME_METHODS: frozenset[str] = frozenset(
+    {
+        "sort",
+        "head",
+        "tail",
+        "limit",
+        "slice",
+        "reverse",
+        "sample",
+        "unique",
+        "clone",
+        "set_sorted",
+        "shrink_to_fit",
+        "rechunk",
+        "cache",
+        "first",
+        "last",
+        "inspect",
+        "top_k",
+        "bottom_k",
+        "sink_csv",
+        "sink_parquet",
+        "sink_ipc",
+        "sink_ndjson",
+        "sink_batches",
+    }
+)
+
+
+# Methods that exist only on LazyFrame. Calling them on a DataFrame
+# raises AttributeError at runtime — statically we surface PLY031.
+LAZY_ONLY_METHODS: frozenset[str] = frozenset(
+    {
+        "collect",
+        "collect_async",
+        "collect_batches",
+        "cache",
+        "inspect",
+        "explain",
+        "show_graph",
+        "profile",
+        "fetch",
+        "with_context",
+        "sink_csv",
+        "sink_parquet",
+        "sink_ipc",
+        "sink_ndjson",
+        "sink_batches",
+    }
+)
+
+
+# Methods that exist only on DataFrame. Calling them on a LazyFrame
+# triggers PLY030 with a ``.collect()`` hint.
+EAGER_ONLY_METHODS: frozenset[str] = frozenset(
+    {
+        "to_pandas",
+        "to_numpy",
+        "to_arrow",
+        "to_dict",
+        "to_dicts",
+        "to_struct",
+        "to_init_repr",
+        "to_jax",
+        "to_torch",
+        "to_series",
+        "to_dummies",
+        "write_csv",
+        "write_parquet",
+        "write_ipc",
+        "write_ipc_stream",
+        "write_json",
+        "write_ndjson",
+        "write_avro",
+        "write_excel",
+        "write_database",
+        "write_delta",
+        "write_iceberg",
+        "write_clipboard",
+        "get_column",
+        "get_column_index",
+        "get_columns",
+        "iter_columns",
+        "iter_rows",
+        "iter_slices",
+        "row",
+        "rows",
+        "rows_by_key",
+        "item",
+        "n_chunks",
+        "estimated_size",
+        "shape",
+        "height",
+        "flags",
+        "glimpse",
+        "describe",
+        "transpose",
+        "partition_by",
+        "n_unique",
+    }
+)
+
+
 def agg_function_for(name: str):
     """Look up the ``AggFunction`` enum value for a polars aggregation method
     name. Returns ``None`` if the name isn't a known aggregation."""
