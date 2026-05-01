@@ -148,6 +148,26 @@ AGG_SHORTHAND_NAMES: frozenset[str] = frozenset(
 )
 
 
+# Method-name renames within polars 1.x. Empty today — the supported window
+# is the latest two 1.x minors and no rename has happened across that
+# window. The slot exists so that the day a polars minor renames a method,
+# the fix is one entry here rather than touching every dispatch site.
+#
+# When a rename does ship, an entry like ``"new_name": "canonical_name"``
+# means "if the user wrote new_name (or if it's the rename target —
+# direction depends on which side we want as canonical), treat it as
+# canonical_name during dispatch." See ADR-0001 § Decision item 3 for the
+# policy.
+METHOD_ALIASES: dict[str, str] = {}
+
+
+def canonicalize_method(name: str) -> str:
+    """Return the canonical form of a polars method name. The dispatch
+    layer in analyzer.py calls this before looking up methods in any of
+    the classification frozensets so renames are absorbed in one place."""
+    return METHOD_ALIASES.get(name, name)
+
+
 def agg_function_for(name: str):
     """Look up the ``AggFunction`` enum value for a polars aggregation method
     name. Returns ``None`` if the name isn't a known aggregation."""

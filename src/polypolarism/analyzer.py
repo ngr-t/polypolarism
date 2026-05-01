@@ -10,6 +10,7 @@ from polypolarism.compat.polars_api import (
     AGG_SHORTHAND_NAMES,
     DTYPE_NAME_MAP,
     agg_function_for,
+    canonicalize_method,
 )
 from polypolarism.diagnostics import (
     PLW001,
@@ -1672,7 +1673,11 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
 
         # Method call: obj.method(args)
         if isinstance(node.func, ast.Attribute):
-            method_name = node.func.attr
+            # Canonicalize through compat — currently a no-op (METHOD_ALIASES
+            # is empty), but the entry-point exists so a future polars rename
+            # can be absorbed in one line rather than across every dispatch
+            # site below.
+            method_name = canonicalize_method(node.func.attr)
             receiver = node.func.value
 
             # ``pl.concat([...], how=...)`` — top-level pl function, not a frame method.
