@@ -89,6 +89,25 @@ class TestPolarsLandmarkDtypes:
             Nullable(Int128()), required=True
         )
 
+    def test_pl_enum_bare(self):
+        from polypolarism.types import Enum
+
+        # Landmark: polars 1.25 (Enum stabilized).
+        assert _parse("pl.Enum") == ColumnSpec(Enum(), required=True)
+
+    def test_pl_enum_call(self):
+        from polypolarism.types import Enum
+
+        assert _parse("pl.Enum()") == ColumnSpec(Enum(), required=True)
+
+    def test_pl_enum_distinct_from_categorical(self):
+        from polypolarism.types import Categorical, Enum
+
+        assert _parse("pl.Enum") != _parse("pl.Categorical")
+        # But each is internally consistent:
+        assert _parse("pl.Enum") == ColumnSpec(Enum(), required=True)
+        assert _parse("pl.Categorical") == ColumnSpec(Categorical(), required=True)
+
 
 class TestOptional:
     def test_optional_int(self):
