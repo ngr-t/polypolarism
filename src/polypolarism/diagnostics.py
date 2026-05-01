@@ -42,6 +42,9 @@ PLW004 = "PLW004"  # lambda / inline callable used where its return dtype is unk
 PLW005 = "PLW005"  # pivot result schema is data-dependent; user should annotate
 PLW006 = "PLW006"  # DataFrame[X] / LazyFrame[X] annotation references an unknown schema
 
+# Environment / version
+PLW010 = "PLW010"  # detected polars or pandera version below polypolarism's supported floor
+
 
 def tag(code: str, message: str) -> str:
     """Return ``"[CODE] message"``; idempotent if message is already tagged."""

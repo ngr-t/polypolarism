@@ -70,10 +70,18 @@ A file:line map of every coupling site in the current code lives at
    releases. Pre-1.0 surface is explicitly out of scope.
 2. **Continue supporting both `SchemaModel` and `DataFrameModel`** as
    Pandera base classes, silently. Do **not** emit a deprecation warning.
-3. **Version selection** is explicit, not auto-detected:
-   - `polypolarism --polars-version <ver>` CLI flag.
-   - `[tool.polypolarism] polars_version = "..."` in `pyproject.toml`.
-   - No automatic dependency-pin sniffing.
+3. **Version is best-effort detected for warning purposes only**, with
+   explicit override:
+   - Detection sources, in priority order: `--polars-version` /
+     `--pandera-version` CLI flag, `[tool.polypolarism]` in the target's
+     `pyproject.toml`, the target's `uv.lock` (exact version), the floor
+     in `[project.dependencies]` / `[dependency-groups.*]`.
+   - When the detected version is below the supported floor (polars 1.0,
+     pandera 0.19), `polypolarism` emits a `PLW010` warning to stderr.
+     `--no-version-check` suppresses the detection entirely.
+   - The detected version **does not feed analyzer dispatch today** — it
+     only gates the warning. When `PolarsProfile` later grows fields, the
+     same detection result will choose the profile.
 4. **Centralize all Polars/Pandera surface knowledge** into a new
    `src/polypolarism/compat/` module so that future churn is absorbed in
    one place rather than across `analyzer.py`, `expr_infer.py`,
@@ -104,11 +112,19 @@ are distinct from type errors), which adds more code than it removes. The
 Pandera case is fundamentally simpler than the Polars case — treat it as
 such.
 
-### Why explicit version selection (no sniffing)
+### Why detection-with-override (warnings only)
 
-Project pins lie: `polars>=1.0.0` could mean 1.0 or 1.32. Sniffing creates
-flakiness in return for marginal convenience. CLI flag plus
-`pyproject.toml` config is predictable and discoverable.
+Project pins lie: `polars>=1.0.0` could be a project running 1.0 or one
+running 1.40. For *behavior dispatch* that ambiguity is fatal — we'd pick
+the wrong profile silently. For *warnings* it's fine: the question is
+only "is the project somewhere below the supported floor?", which the
+floor in a `>=` spec answers correctly.
+
+So detection feeds the warning channel only. Lockfiles (`uv.lock`) give
+exact versions when present; `pyproject.toml` floors are good enough
+otherwise. Users who want to assert a specific version (because their
+lockfile is elsewhere, or they're auditing CI for a particular target)
+get `--polars-version` and `[tool.polypolarism]` as overrides.
 
 ### Why centralize `compat/`
 
@@ -135,11 +151,14 @@ Rejected. Requires building warning infrastructure that doesn't exist yet
 keeping `SchemaModel` working is that it's free; adding a warning makes
 it no longer free.
 
-### C. Auto-sniff Polars version from `[project.dependencies]`
+### C. Auto-sniff Polars version and feed it into analyzer dispatch
 
-Rejected. Pins are floors, not exact versions. Reading `uv.lock` /
-`poetry.lock` would be more precise but requires per-tool plumbing. Net:
-fragile for marginal UX gain.
+Rejected. Pins are floors, not exact versions; using a sniffed value to
+*pick a behavior profile* (e.g. "treat join coalesce semantics as 0.20")
+would silently mislabel many projects. The compromise actually adopted —
+sniff only for the support-floor warning, never for dispatch — keeps the
+benefit (catch users on unsupported polars) without the silent-mislabel
+risk.
 
 ### D. Versioned dispatcher with per-minor profile fields shipped today
 
@@ -197,13 +216,13 @@ not a profile concern.
 | 8 | **Catch up the dtype table to current 1.x**: add `Int128`, `UInt128`, `Float16`, `Enum`, `Decimal` to the unified dtype map; add fixtures exercising each | `compat/polars_api.py`, `tests/fixtures/` |
 | 9 | **Audit selector dispatch against 1.32 `Selector` DSL change**: confirm `analyzer.py:424-496` still produces correct types after `pl.selectors.*` returns `Selector` objects; adjust as needed | `analyzer.py` (post-refactor: `compat/polars_api.py`) |
 | 10 | Add `PolarsProfile` scaffold (name-only) + default `POLARS_1_X` | `compat/polars_api.py` |
-| 11 | `--polars-version` CLI flag + `[tool.polypolarism]` config reader | `cli.py` |
-| 12 | Document support window + new config in `README.md` | `README.md` |
+| 11 | **Done** in `src/polypolarism/version_check.py`: detection from CLI flag, `[tool.polypolarism]`, `uv.lock`, dependencies; PLW010 warning on below-floor; `--polars-version` / `--pandera-version` / `--no-version-check` CLI flags. Folds into `compat/polars_api.py` during the refactor. | `version_check.py`, `cli.py`, `diagnostics.py` |
+| 12 | Document support window + new CLI flags in `README.md` | `README.md` |
 
-Steps 1–7 are pure refactors — existing 265 tests must stay green and
-serve as the regression net. Steps 8–9 close the cumulative-drift gap
-identified in the churn survey. Steps 10–12 add the new capability and
-documentation.
+Steps 1–7 are pure refactors — existing tests must stay green and serve
+as the regression net. Steps 8–9 close the cumulative-drift gap
+identified in the churn survey. Step 11 has shipped (see version_check.py
+and the PLW010 diagnostic); step 12 documents it.
 
 ## Verification
 
@@ -215,8 +234,10 @@ documentation.
 - After step 9: a fixture using `cs.numeric()` and downstream selector
   algebra still produces the expected projected schema under the 1.32+
   `Selector` semantics.
-- After step 11: `polypolarism --polars-version 1.x
-  tests/fixtures/valid/` runs; an unknown version produces a clear error
-  from the CLI.
+- Step 11 (shipped): a project pinning `polars>=0.20.0` triggers
+  `[PLW010] detected polars 0.20.0 from pyproject.toml dependencies,
+  below supported floor 1.0.0` on stderr; `--polars-version 1.0`
+  silences it; `--no-version-check` skips detection entirely.
+  `tests/test_version_check.py` covers all 34 paths.
 - A `SchemaModel`-using fixture continues to type-check correctly with
   no new output (silent acceptance preserved).

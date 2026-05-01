@@ -16,6 +16,11 @@ from polypolarism.checker import (
     check_source,
 )
 from polypolarism.output import FileResults, format_json, format_json_files
+from polypolarism.version_check import (
+    check_versions,
+    detect_versions,
+    find_project_root,
+)
 
 __version__ = "0.1.0"
 
@@ -197,6 +202,23 @@ def create_parser() -> argparse.ArgumentParser:
         default="text",
         help="Output format (default: text)",
     )
+    parser.add_argument(
+        "--polars-version",
+        metavar="VERSION",
+        default=None,
+        help=("Override the detected polars version assumed by the analyzer (e.g. 1.0, 1.32.1)"),
+    )
+    parser.add_argument(
+        "--pandera-version",
+        metavar="VERSION",
+        default=None,
+        help="Override the detected pandera version (e.g. 0.20)",
+    )
+    parser.add_argument(
+        "--no-version-check",
+        action="store_true",
+        help="Skip the polars / pandera version detection and warning",
+    )
     return parser
 
 
@@ -239,6 +261,33 @@ def _expand_directory_groups(dir_path: Path) -> list[FileResults]:
     return groups
 
 
+def _emit_version_warnings(
+    paths: list[Path],
+    polars_override: str | None,
+    pandera_override: str | None,
+    no_color: bool,
+) -> None:
+    """Detect polars/pandera versions from the target project and warn on
+    out-of-range versions. Stderr-only — never affects the exit code."""
+    project_root = None
+    for p in paths:
+        if not p.exists():
+            continue
+        project_root = find_project_root(p)
+        if project_root is not None:
+            break
+    info = detect_versions(
+        project_root,
+        polars_override=polars_override,
+        pandera_override=pandera_override,
+    )
+    for w in check_versions(info):
+        if no_color:
+            print(f"! {w.message}", file=sys.stderr)
+        else:
+            print(f"\033[33m! {w.message}\033[0m", file=sys.stderr)
+
+
 def main(args: list[str] | None = None) -> int:
     """Entry point for the CLI. Returns 0 on success, 1 on any failure."""
     parser = create_parser()
@@ -247,6 +296,14 @@ def main(args: list[str] | None = None) -> int:
     if not parsed.paths:
         parser.print_help()
         return 0
+
+    if not parsed.no_version_check:
+        _emit_version_warnings(
+            paths=parsed.paths,
+            polars_override=parsed.polars_version,
+            pandera_override=parsed.pandera_version,
+            no_color=parsed.no_color,
+        )
 
     file_groups: list[FileResults] = []
 
