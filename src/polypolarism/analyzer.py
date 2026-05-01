@@ -535,6 +535,32 @@ class FunctionRegistry:
         return info is not None and info.signature is not None
 
 
+@dataclass
+class ClassRegistry:
+    """Registry of class methods, keyed by ``(class_name, method_name)``.
+
+    Classes share a flat name → method map at the module scope; nested
+    classes aren't supported (rare in DataFrame pipeline code, and the
+    extra plumbing would obscure what this registry exists for: looking
+    up ``self.foo()`` / ``ClassName().foo()`` to recover an annotated
+    return type).
+    """
+
+    classes: dict[str, dict[str, FunctionInfo]] = field(default_factory=dict)
+
+    def register_method(self, class_name: str, info: FunctionInfo) -> None:
+        self.classes.setdefault(class_name, {})[info.name] = info
+
+    def get_method(self, class_name: str, method_name: str) -> FunctionInfo | None:
+        methods = self.classes.get(class_name)
+        if methods is None:
+            return None
+        return methods.get(method_name)
+
+    def __contains__(self, class_name: str) -> bool:
+        return class_name in self.classes
+
+
 # =============================================================================
 # Type compatibility checking
 # =============================================================================
@@ -1357,6 +1383,8 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         registry: FunctionRegistry | None = None,
         schema_registry: SchemaRegistry | None = None,
         warnings: list[str] | None = None,
+        class_registry: ClassRegistry | None = None,
+        current_class_name: str | None = None,
     ):
         self.input_types = input_types
         self.errors = errors
@@ -1364,11 +1392,19 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         self.warnings: list[str] = warnings if warnings is not None else []
         self.registry = registry or FunctionRegistry()
         self.schema_registry = schema_registry or SchemaRegistry()
+        self.class_registry = class_registry or ClassRegistry()
+        # Name of the class enclosing the function being analysed (None for
+        # module-level functions). Used to resolve ``self.method()`` /
+        # ``cls.method()`` to a class-local method's return annotation.
+        self.current_class_name = current_class_name
         # Track variable -> FrameType mapping
         self.var_types: dict[str, FrameType] = dict(input_types)
         # Track variable -> FrameList element type (for partition_by results
         # and any other op that yields a list of frames).
         self.var_lists: dict[str, FrameType] = {}
+        # Track variable -> class name for ``var = ClassName()`` assignments,
+        # so a later ``var.method()`` call can resolve to the class's method.
+        self.var_classes: dict[str, str] = {}
         self.return_type: FrameType | None = None
         # Bare ``Schema.validate(df)`` narrowing only fires at the function's
         # top level. We toggle this off when descending into if/for/while/try.
@@ -1453,13 +1489,71 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             if list_elem is not None:
                 self.var_lists[var_name] = list_elem
                 self.var_types.pop(var_name, None)
+                self.var_classes.pop(var_name, None)
                 self.generic_visit(node)
                 return
             inferred = self._infer_expr_type(node.value)
             if inferred:
                 self.var_types[var_name] = inferred
                 self.var_lists.pop(var_name, None)
+                self.var_classes.pop(var_name, None)
+            else:
+                # ``obj = ClassName()`` — track the class for later
+                # ``obj.method()`` resolution.
+                cls_name = self._instance_class_name(node.value)
+                if cls_name is not None:
+                    self.var_classes[var_name] = cls_name
+                    self.var_types.pop(var_name, None)
+                    self.var_lists.pop(var_name, None)
         self.generic_visit(node)
+
+    def _instance_class_name(self, node: ast.expr) -> str | None:
+        """If ``node`` is ``ClassName(...)`` for a class we know about,
+        return ``ClassName``; otherwise ``None``."""
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in self.class_registry
+        ):
+            return node.func.id
+        return None
+
+    def _resolve_method_call(self, node: ast.Call) -> FrameType | None:
+        """Resolve ``self.foo() / cls.foo() / Class().foo() / obj.foo()`` to
+        the callee's annotated ``DataFrame[Schema]`` return type.
+
+        Returns ``None`` when the receiver isn't class-typed, the method
+        isn't in the class, or it has no DataFrame-shaped return
+        annotation. Argument validation is intentionally skipped here —
+        the goal is to recover the return type so chains like
+        ``self._load() -> self._transform(...)`` keep their type through
+        method boundaries.
+        """
+        if not isinstance(node.func, ast.Attribute):
+            return None
+        method_name = node.func.attr
+        receiver = node.func.value
+
+        receiver_class: str | None = None
+        if isinstance(receiver, ast.Name):
+            if receiver.id in ("self", "cls") and self.current_class_name is not None:
+                receiver_class = self.current_class_name
+            elif receiver.id in self.var_classes:
+                receiver_class = self.var_classes[receiver.id]
+            elif receiver.id in self.class_registry:
+                # ``Class.method()`` — static/classmethod called without
+                # instantiation. Same lookup table as the instance form.
+                receiver_class = receiver.id
+        elif isinstance(receiver, ast.Call):
+            receiver_class = self._instance_class_name(receiver)
+
+        if receiver_class is None:
+            return None
+
+        method_info = self.class_registry.get_method(receiver_class, method_name)
+        if method_info is None or method_info.signature is None:
+            return None
+        return method_info.signature.return_type
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
         """Handle annotated assignments like: df: DataFrame[Schema] = expr."""
@@ -1588,6 +1682,16 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 schema_ft = self._infer_validate_call(node)
                 if schema_ft is not None:
                     return schema_ft
+
+            # User-defined method calls (``self.method()`` /
+            # ``Class().method()`` / ``obj.method()``) whose callee is
+            # annotated. Tried before the polars/Pandera method dispatch
+            # so the method's return annotation wins, but only fires when
+            # the receiver actually resolves to a known class — frame
+            # methods like ``df.select(...)`` are unaffected.
+            method_ft = self._resolve_method_call(node)
+            if method_ft is not None:
+                return method_ft
 
             # df.pipe(callable) — resolve in this order:
             #   1) ``Schema.validate``                      → schema's FrameType
@@ -2586,9 +2690,12 @@ def analyze_function(
     func_node: ast.FunctionDef,
     registry: FunctionRegistry | None = None,
     schema_registry: SchemaRegistry | None = None,
+    class_registry: ClassRegistry | None = None,
+    current_class_name: str | None = None,
 ) -> FunctionAnalysis | None:
     """Analyze a single function definition."""
     schema_registry = schema_registry or SchemaRegistry()
+    class_registry = class_registry or ClassRegistry()
     input_types: dict[str, FrameType] = {}
     declared_return: FrameType | None = None
     errors: list[str] = []
@@ -2647,7 +2754,13 @@ def analyze_function(
 
     # Analyze function body with registry
     body_analyzer = FunctionBodyAnalyzer(
-        input_types, errors, registry, schema_registry, warnings=warnings
+        input_types,
+        errors,
+        registry,
+        schema_registry,
+        warnings=warnings,
+        class_registry=class_registry,
+        current_class_name=current_class_name,
     )
     for stmt in func_node.body:
         body_analyzer.visit(stmt)
@@ -2697,15 +2810,27 @@ def analyze_source(
     else:
         schema_registry = collect_schemas(tree)
 
-    # Pass 1: Collect all function nodes
-    func_nodes: list[ast.FunctionDef] = []
-    for node in ast.walk(tree):
+    # Pass 1: Collect functions, separating module-level from class methods.
+    # ``func_to_class`` maps each function node's ``id()`` to the name of
+    # its enclosing class (or ``None`` for module-level), so during pass 3
+    # we know which class context to give each method analyser.
+    module_funcs: list[ast.FunctionDef] = []
+    class_methods: list[tuple[str, ast.FunctionDef]] = []
+    func_to_class: dict[int, str | None] = {}
+    for node in tree.body:
         if isinstance(node, ast.FunctionDef):
-            func_nodes.append(node)
+            module_funcs.append(node)
+            func_to_class[id(node)] = None
+        elif isinstance(node, ast.ClassDef):
+            for stmt in node.body:
+                if isinstance(stmt, ast.FunctionDef):
+                    class_methods.append((node.name, stmt))
+                    func_to_class[id(stmt)] = node.name
 
-    # Pass 2: Build registry with all functions
+    # Pass 2: Build the function and class registries.
     registry = FunctionRegistry()
-    for func_node in func_nodes:
+    class_registry = ClassRegistry()
+    for func_node in module_funcs:
         signature = _extract_function_signature(func_node, schema_registry)
         info = FunctionInfo(
             name=func_node.name,
@@ -2714,11 +2839,27 @@ def analyze_source(
             inferred_returns={},
         )
         registry.register(info)
+    for class_name, func_node in class_methods:
+        signature = _extract_function_signature(func_node, schema_registry)
+        info = FunctionInfo(
+            name=func_node.name,
+            node=func_node,
+            signature=signature,
+            inferred_returns={},
+        )
+        class_registry.register_method(class_name, info)
 
-    # Pass 3: Analyze functions with registry
+    # Pass 3: Analyze each function/method body with the registries.
+    func_nodes = module_funcs + [m for _, m in class_methods]
     results: list[FunctionAnalysis] = []
     for func_node in func_nodes:
-        analysis = analyze_function(func_node, registry, schema_registry)
+        analysis = analyze_function(
+            func_node,
+            registry,
+            schema_registry,
+            class_registry=class_registry,
+            current_class_name=func_to_class.get(id(func_node)),
+        )
         if analysis:
             results.append(analysis)
 
