@@ -82,6 +82,7 @@ from polypolarism.types import (
     Date,
     Datetime,
     Duration,
+    Float16,
     Float32,
     Float64,
     FrameType,
@@ -89,12 +90,14 @@ from polypolarism.types import (
     Int16,
     Int32,
     Int64,
+    Int128,
     Nullable,
     Struct,
     UInt8,
     UInt16,
     UInt32,
     UInt64,
+    UInt128,
     Utf8,
 )
 from polypolarism.types import (
@@ -234,9 +237,23 @@ def _str_list_or_tuple(node: ast.expr) -> list[str] | None:
 
 
 # polars.selectors return-type predicates by selector name.
-_SELECTOR_NUMERIC = (Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64, Float32, Float64)
-_SELECTOR_INTEGER = (Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64)
-_SELECTOR_FLOAT = (Float32, Float64)
+_SELECTOR_NUMERIC = (
+    Int8,
+    Int16,
+    Int32,
+    Int64,
+    Int128,
+    UInt8,
+    UInt16,
+    UInt32,
+    UInt64,
+    UInt128,
+    Float16,
+    Float32,
+    Float64,
+)
+_SELECTOR_INTEGER = (Int8, Int16, Int32, Int64, Int128, UInt8, UInt16, UInt32, UInt64, UInt128)
+_SELECTOR_FLOAT = (Float16, Float32, Float64)
 _SELECTOR_TEMPORAL = (Date, Datetime, Duration)
 
 

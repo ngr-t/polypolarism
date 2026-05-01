@@ -129,7 +129,58 @@ polypolarism --version
 
 # Disable colored output
 polypolarism --no-color path/to/file.py
+
+# Override the assumed Polars / Pandera version (suppresses PLW010)
+polypolarism --polars-version 1.40 path/to/file.py
+polypolarism --pandera-version 0.20 path/to/file.py
+
+# Skip version detection entirely
+polypolarism --no-version-check path/to/file.py
 ```
+
+## Supported versions
+
+`polypolarism` reasons about your code through AST analysis only — it
+does not import `polars` or `pandera` at runtime. Even so, the dispatch
+tables encode assumptions about the libraries' surface, so the supported
+window is narrow and explicit:
+
+- **Polars**: latest two 1.x minor releases (currently `1.39` / `1.40`).
+  Pre-1.0 surface is **out of scope** — the analyzer doesn't recognize
+  the legacy method spellings (`groupby`, `cumsum`, `apply`, `Utf8`,
+  `outer`-join, …) and will silently misanalyse code written against
+  those.
+- **Pandera**: `0.19+`. Both `DataFrameModel` (post-0.20) and the
+  legacy `SchemaModel` are accepted indefinitely; the difference is
+  one entry in a name set and costs nothing.
+
+When the version detected from your project's `pyproject.toml` /
+`uv.lock` falls below the supported floor, polypolarism emits a
+`[PLW010]` warning to stderr — it doesn't fail the run, just tells you
+that type-check accuracy is best-effort below the window. Use
+`--polars-version <ver>` (or the `[tool.polypolarism]` config below) to
+opt back in if you've audited that your code stays within the
+analyzer's known surface.
+
+### Project-level configuration
+
+Persist the assumed versions in your project's `pyproject.toml`:
+
+```toml
+[tool.polypolarism]
+polars_version = "1.40"
+pandera_version = "0.20"
+```
+
+Detection priority (first match wins per package):
+
+1. `--polars-version` / `--pandera-version` CLI flag
+2. `[tool.polypolarism]` section in the project's `pyproject.toml`
+3. The project's `uv.lock` (exact pinned version)
+4. `[project.dependencies]` / `[dependency-groups.*]` floor
+
+For more on the policy, see
+[`docs/adr/0001-polars-pandera-version-support.md`](docs/adr/0001-polars-pandera-version-support.md).
 
 ## Example Output
 
@@ -187,9 +238,16 @@ literal expressions, `pl.col(...)` references, arithmetic, and
 | `drop_nulls(subset=[...])` | strips `Nullable[...]` from `subset` (or every column if omitted) |
 | `with_row_index(name="index")` | prepends a `UInt32` column |
 
-`pl.<dtype>` literals recognised by `cast`: `Int32`, `Int64`, `UInt32`,
-`UInt64`, `Float32`, `Float64`, `Utf8` (alias `String`), `Boolean`,
-`Date`, `Datetime` (incl. `pl.Datetime("us", "UTC")`), `Duration`.
+`pl.<dtype>` literals recognised by `cast` and Pandera schema fields:
+`Int8` / `Int16` / `Int32` / `Int64` / `Int128` (polars 1.18+),
+`UInt8` / `UInt16` / `UInt32` / `UInt64` / `UInt128` (polars 1.34+),
+`Float16` (polars 1.36+) / `Float32` / `Float64`,
+`Utf8` (alias `String`), `Boolean`, `Date`,
+`Datetime` (incl. `pl.Datetime("us", "UTC")`), `Duration`,
+`Categorical`, `Enum` (polars 1.25+ stabilized),
+`Decimal(precision, scale)` (polars 1.35+ stabilized — precision and
+scale are preserved, so `Decimal(20, 4)` and `Decimal(20, 2)` are
+distinct types).
 
 ### Expression predicates and narrowing
 
@@ -310,8 +368,8 @@ positional arguments to `select`, `with_columns`, or `drop`.
 |---|---|
 | `cs.all()` | every column in the frame |
 | `cs.numeric()` | all integer + float columns |
-| `cs.integer()` | `Int8`/`Int16`/`Int32`/`Int64`/`UInt8`/`UInt16`/`UInt32`/`UInt64` |
-| `cs.float()` | `Float32`/`Float64` |
+| `cs.integer()` | `Int8`/`Int16`/`Int32`/`Int64`/`Int128`/`UInt8`/`UInt16`/`UInt32`/`UInt64`/`UInt128` |
+| `cs.float()` | `Float16`/`Float32`/`Float64` |
 | `cs.string()` | `Utf8` |
 | `cs.boolean()` | `Boolean` |
 | `cs.temporal()` | `Date`/`Datetime`/`Duration` |
@@ -371,6 +429,7 @@ Warning codes:
 | `PLW003` | function call to a name that isn't defined in the analysed module |
 | `PLW004` | lambda / inline callable used where its return dtype is unknowable |
 | `PLW005` | `pivot()` output schema is data-dependent; bind to a `DataFrame[Schema]` variable |
+| `PLW010` | detected polars / pandera version is below the supported floor (see [Supported versions](#supported-versions)) |
 
 JSON output (`--format json`) emits warnings as `severity: "warning"`
 diagnostics so editors and CI can route them separately from errors.

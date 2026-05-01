@@ -1,12 +1,30 @@
 """Polars surface tables consumed by the analyzer.
 
-Currently centralizes the bare-attribute dtype name map. Other tables
-(agg shorthand, namespace tables, method classifications, join `how`
-literals, aggregation signatures) will move here per ADR-0001 steps 2-5.
+Single source of truth for the polars 1.x surface that polypolarism
+recognizes:
 
-Attribute references like ``pl.Int64`` resolve through ``DTYPE_NAME_MAP``;
-parametrized dtypes (``pl.Datetime("us", "UTC")``, ``pl.Decimal(20, 4)``,
-``pl.Datetime``) are handled via Call form in the dispatch sites.
+- ``DTYPE_NAME_MAP`` — bare-attribute dtype names (``pl.Int64``,
+  ``pl.String``, ``pl.Decimal`` …). Parametrized dtypes
+  (``pl.Datetime("us", "UTC")``, ``pl.Decimal(20, 4)``) are matched
+  by Call form in dispatch sites; ``DECIMAL_DEFAULT`` is the bare
+  ``pl.Decimal`` fallback.
+- ``IDENTITY_FRAME_METHODS`` / ``LAZY_ONLY_METHODS`` /
+  ``EAGER_ONLY_METHODS`` — frame method classification.
+- ``STR_NAMESPACE_RETURN`` / ``DT_NAMESPACE_RETURN`` /
+  ``DT_NAMESPACE_PRESERVING`` / ``LIST_NAMESPACE_PRESERVING`` /
+  ``LIST_NAMESPACE_ELEMENT_RETURN`` — sub-namespace return tables.
+- ``JOIN_HOW_VALUES`` / ``JOIN_HOW_INFERRED`` and the
+  ``join_left_nullable`` / ``join_right_nullable`` predicates.
+- ``agg_function_for(name)`` / ``AGG_SHORTHAND_NAMES`` — polars-side
+  aggregation name lookup. (The actual signature/inference logic lives
+  in ``ops/groupby.py``.)
+- ``METHOD_ALIASES`` + ``canonicalize_method`` — empty rename scaffold
+  for future intra-1.x renames.
+- ``PolarsProfile`` / ``POLARS_1_X`` — version-conditional behavior
+  scaffold (no fields yet).
+
+See ADR-0001 (``docs/adr/0001-polars-pandera-version-support.md``) for
+the policy that motivates the centralization.
 """
 
 from __future__ import annotations
@@ -43,6 +61,7 @@ from polypolarism.types import List as ListT
 
 if TYPE_CHECKING:
     from polypolarism.ops.groupby import AggFunction
+
 
 @dataclass(frozen=True)
 class PolarsProfile:

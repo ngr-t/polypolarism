@@ -226,12 +226,11 @@ not a profile concern.
 | 9 | **Done.** Audited selector dispatch against five 1.32-affected patterns — all currently infer correctly. Pinned in `tests/fixtures/valid/selector_dsl_1_32.py`. | `analyzer.py`, `tests/fixtures/` |
 | 10 | **Done.** `PolarsProfile` scaffold + default `POLARS_1_X` in compat. Name-only; fields get added when a real divergence appears. | `compat/polars_api.py` |
 | 11 | **Done** in `src/polypolarism/version_check.py`: detection from CLI flag, `[tool.polypolarism]`, `uv.lock`, dependencies; PLW010 warning on below-floor; `--polars-version` / `--pandera-version` / `--no-version-check` CLI flags. | `version_check.py`, `cli.py`, `diagnostics.py` |
-| 12 | Document support window + new CLI flags in `README.md` | `README.md` |
+| 12 | **Done.** New "Supported versions" section, `--polars-version` / `--pandera-version` / `--no-version-check` CLI examples, `[tool.polypolarism]` config block, dtype list refreshed for `Int128` / `UInt128` / `Float16` / `Enum` / `Decimal(p, s)`, `cs.integer()` / `cs.float()` lists updated, `PLW010` added to the warning code table. | `README.md` |
 
-Steps 1–10 land as a sequence of pure refactors and additive landmarks
-— each commit kept the existing test suite (now 596 tests) green. Step
-11 ships the version-detection feature. Step 12 (README) is the only
-remaining open item.
+All 12 steps complete. Remaining future work is documented in
+`docs/research/coupling-inventory.md` under "Known gaps" — none of those
+gaps block the supported window.
 
 ## Verification
 
