@@ -51,6 +51,24 @@ _BUILTIN_MAP: dict[str, DataType] = {
     "float": Float64(),
     "bool": Boolean(),
     "bytes": Utf8(),
+    # Python stdlib temporal types — accepted as bare names when the
+    # user wrote ``from datetime import date, datetime`` (the canonical
+    # pandera form). The ``<module>.date`` qualified form is handled in
+    # ``_parse_plain_dtype`` separately.
+    "date": Date(),
+    "datetime": Datetime(),
+    "timedelta": Duration(),
+}
+
+
+# Stdlib temporal type attribute names: ``datetime.date`` / ``dt.datetime`` /
+# etc. — accepted under any prefix that isn't ``pl`` (which has its own
+# uppercase-attribute table). Names are deliberately lowercase to avoid
+# colliding with ``pl.Date`` / ``pl.Datetime`` / ``pl.Duration``.
+_STDLIB_TEMPORAL_ATTR_MAP: dict[str, DataType] = {
+    "date": Date(),
+    "datetime": Datetime(),
+    "timedelta": Duration(),
 }
 
 
@@ -135,8 +153,15 @@ def _parse_plain_dtype(node: ast.expr) -> DataType | None:
         return _BUILTIN_MAP.get(node.id)
 
     if isinstance(node, ast.Attribute):
-        if isinstance(node.value, ast.Name) and node.value.id == "pl":
-            return _PL_DTYPE_MAP.get(node.attr)
+        if isinstance(node.value, ast.Name):
+            if node.value.id == "pl":
+                return _PL_DTYPE_MAP.get(node.attr)
+            # ``datetime.date`` / ``dt.datetime`` / ``datetime.timedelta``
+            # — any non-``pl`` prefix is treated as the Python stdlib
+            # ``datetime`` module (or an alias of it). Lowercase attr
+            # names disambiguate from polars' uppercase dtype names.
+            if node.attr in _STDLIB_TEMPORAL_ATTR_MAP:
+                return _STDLIB_TEMPORAL_ATTR_MAP[node.attr]
         return None
 
     if isinstance(node, ast.Call):

@@ -127,6 +127,60 @@ class TestAnnotatedStruct:
         assert result == ColumnSpec(Struct({"a": Utf8()}), required=False)
 
 
+class TestStdlibTemporal:
+    """Python stdlib ``date`` / ``datetime`` / ``timedelta`` types are
+    accepted as field annotations the same way ``int`` / ``str`` are.
+    Both ``from datetime import date`` (bare name) and
+    ``import datetime; datetime.date`` (attribute) forms work."""
+
+    def test_bare_date(self):
+        from polypolarism.types import Date
+
+        assert _parse("date") == ColumnSpec(Date(), required=True)
+
+    def test_bare_datetime(self):
+        from polypolarism.types import Datetime
+
+        assert _parse("datetime") == ColumnSpec(Datetime(), required=True)
+
+    def test_bare_timedelta(self):
+        from polypolarism.types import Duration
+
+        assert _parse("timedelta") == ColumnSpec(Duration(), required=True)
+
+    def test_qualified_datetime_date(self):
+        from polypolarism.types import Date
+
+        assert _parse("datetime.date") == ColumnSpec(Date(), required=True)
+
+    def test_qualified_datetime_datetime(self):
+        from polypolarism.types import Datetime
+
+        assert _parse("datetime.datetime") == ColumnSpec(Datetime(), required=True)
+
+    def test_qualified_datetime_timedelta(self):
+        from polypolarism.types import Duration
+
+        assert _parse("datetime.timedelta") == ColumnSpec(Duration(), required=True)
+
+    def test_aliased_module(self):
+        # ``import datetime as dt`` — any non-``pl`` prefix should work.
+        from polypolarism.types import Date
+
+        assert _parse("dt.date") == ColumnSpec(Date(), required=True)
+
+    def test_optional_date(self):
+        from polypolarism.types import Date
+
+        assert _parse("Optional[date]") == ColumnSpec(Date(), required=False)
+
+    def test_pl_dtype_unchanged(self):
+        # Make sure the existing ``pl.Date`` etc. path didn't regress.
+        from polypolarism.types import Date
+
+        assert _parse("pl.Date") == ColumnSpec(Date(), required=True)
+
+
 class TestSeriesWrapper:
     """``Series[T]`` is the canonical pandera class-based form and should
     parse identically to bare ``T`` (issue #4)."""
