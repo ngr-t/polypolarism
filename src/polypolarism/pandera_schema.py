@@ -9,6 +9,7 @@ topological sort, and exposes the result as a ``SchemaRegistry``.
 from __future__ import annotations
 
 import ast
+import contextlib
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -52,9 +53,7 @@ class SchemaRegistry:
         return name in self.schemas
 
 
-def collect_schemas_with_imports(
-    tree: ast.Module, file_path: Path
-) -> SchemaRegistry:
+def collect_schemas_with_imports(tree: ast.Module, file_path: Path) -> SchemaRegistry:
     """Like ``collect_schemas`` but also resolves project-local imports.
 
     For each ``from X import Y`` / ``from .X import Y`` in ``tree``,
@@ -70,10 +69,8 @@ def collect_schemas_with_imports(
     """
     registry = collect_schemas(tree)
     visited: set[Path] = set()
-    try:
+    with contextlib.suppress(OSError):
         visited.add(file_path.resolve())
-    except OSError:
-        pass
     _merge_imports(tree, file_path, registry, visited)
     return registry
 
@@ -187,9 +184,7 @@ def _try_module_at(base: Path, parts: list[str]) -> Path | None:
     return None
 
 
-def _resolve_module_path(
-    module: str | None, current_file: Path, level: int = 0
-) -> Path | None:
+def _resolve_module_path(module: str | None, current_file: Path, level: int = 0) -> Path | None:
     """Best-effort resolution of an import target to a file on disk.
 
     Restricted to the project tree (the dir containing

@@ -202,9 +202,7 @@ class TestSeriesWrapper:
         # ``pa.typing.Series[T]`` / ``pandera.typing.polars.Series[T]``
         # — qualified forms should parse the same way.
         assert _parse("pa.typing.Series[int]") == ColumnSpec(Int64(), required=True)
-        assert _parse("pandera.typing.polars.Series[str]") == ColumnSpec(
-            Utf8(), required=True
-        )
+        assert _parse("pandera.typing.polars.Series[str]") == ColumnSpec(Utf8(), required=True)
 
     def test_series_optional_inner(self):
         # ``Series[Optional[T]]`` should be ``required=False``.

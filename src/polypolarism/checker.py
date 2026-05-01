@@ -154,11 +154,7 @@ def check_function(analysis: FunctionAnalysis) -> CheckResult:
     if declared.is_lazy != inferred.is_lazy:
         expected_kind = "LazyFrame" if declared.is_lazy else "DataFrame"
         actual_kind = "LazyFrame" if inferred.is_lazy else "DataFrame"
-        fix = (
-            ".collect() before returning"
-            if inferred.is_lazy
-            else ".lazy() before returning"
-        )
+        fix = ".collect() before returning" if inferred.is_lazy else ".lazy() before returning"
         errors.append(
             f"[PLY032] Return type expected {expected_kind}[...] but inferred "
             f"{actual_kind}[...]; {fix}."
@@ -193,9 +189,7 @@ def check_function(analysis: FunctionAnalysis) -> CheckResult:
     )
 
 
-def check_source(
-    source: str, file_path: Path | None = None
-) -> list[CheckResult]:
+def check_source(source: str, file_path: Path | None = None) -> list[CheckResult]:
     """
     Check all functions with ``DataFrame[Schema]`` annotations in source code.
 

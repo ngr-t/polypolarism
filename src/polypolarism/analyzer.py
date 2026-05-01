@@ -308,9 +308,7 @@ def _is_cast_func(node: ast.expr) -> bool:
     """
     if isinstance(node, ast.Name) and node.id == "cast":
         return True
-    if isinstance(node, ast.Attribute) and node.attr == "cast":
-        return True
-    return False
+    return isinstance(node, ast.Attribute) and node.attr == "cast"
 
 
 def _unwrap_cast(node: ast.expr) -> ast.expr:
@@ -323,11 +321,7 @@ def _unwrap_cast(node: ast.expr) -> ast.expr:
     surrounding context (function return type, narrowed variable, etc.).
     Otherwise the cast would just hide ``Schema.validate(...)`` from us.
     """
-    while (
-        isinstance(node, ast.Call)
-        and _is_cast_func(node.func)
-        and len(node.args) >= 2
-    ):
+    while isinstance(node, ast.Call) and _is_cast_func(node.func) and len(node.args) >= 2:
         node = node.args[1]
     return node
 
@@ -1083,9 +1077,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
 
         return None, None
 
-    def _analyze_pl_func(
-        self, node: ast.expr
-    ) -> tuple[str | None, DataType] | None:
+    def _analyze_pl_func(self, node: ast.expr) -> tuple[str | None, DataType] | None:
         """Recognise ``pl.struct(...)`` / ``pl.concat_str(...)`` / ``pl.format(...)`` /
         ``pl.coalesce(...)`` top-level constructor calls."""
         if not isinstance(node, ast.Call):
@@ -1154,9 +1146,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             if any_non_nullable and isinstance(unified, Nullable):
                 unified = unified.inner
             # Preserve the first-arg column name as the default output name.
-            first_name = (
-                self._extract_col_name(node.args[0]) if node.args else None
-            )
+            first_name = self._extract_col_name(node.args[0]) if node.args else None
             return first_name, unified
 
         return None
@@ -1320,9 +1310,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 if kw.arg == "return_dtype":
                     declared = _resolve_pl_dtype(kw.value)
                     if declared is not None:
-                        if receiver_type is not None and isinstance(
-                            receiver_type, Nullable
-                        ):
+                        if receiver_type is not None and isinstance(receiver_type, Nullable):
                             return receiver_name, Nullable(declared)
                         return receiver_name, declared
             self.warnings.append(
@@ -1674,9 +1662,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             return self._compute_partition_element(receiver_type, node)
         return None
 
-    def _compute_partition_element(
-        self, receiver_type: FrameType, node: ast.Call
-    ) -> FrameType:
+    def _compute_partition_element(self, receiver_type: FrameType, node: ast.Call) -> FrameType:
         """``df.partition_by(*by, include_key=True)`` element schema.
 
         Each partition has the same columns as the receiver, minus the
@@ -1777,10 +1763,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             # laziness we need to preserve onto the agg result.
             if method_name == "agg":
                 source = None
-                if (
-                    isinstance(receiver, ast.Call)
-                    and isinstance(receiver.func, ast.Attribute)
-                ):
+                if isinstance(receiver, ast.Call) and isinstance(receiver.func, ast.Attribute):
                     source = self._infer_expr_type(receiver.func.value)
                 return _lazy_like(self._infer_agg_call(receiver, node), source)
 
@@ -1839,9 +1822,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
 
         return None
 
-    def _validate_eager_lazy_method(
-        self, method: str, receiver: FrameType, node: ast.Call
-    ) -> None:
+    def _validate_eager_lazy_method(self, method: str, receiver: FrameType, node: ast.Call) -> None:
         """Surface PLY030 / PLY031 when an eager-only or lazy-only method is
         called on the wrong side of the eager / lazy split."""
         if receiver.is_lazy and method in _EAGER_ONLY_METHODS:
@@ -1962,9 +1943,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             # Unknown function — likely imported from another module. We can't
             # walk its body, so the return type is uninferable. Warn the user
             # so they know the downstream type tracking will be lost here.
-            args_with_frame = any(
-                self._infer_expr_type(arg) is not None for arg in node.args
-            )
+            args_with_frame = any(self._infer_expr_type(arg) is not None for arg in node.args)
             if args_with_frame:
                 self.warnings.append(
                     tag(
@@ -2115,9 +2094,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             self.errors.append(tag(PLY010, str(e)))
             return None
 
-    def _infer_join_asof_call(
-        self, left_type: FrameType, node: ast.Call
-    ) -> FrameType | None:
+    def _infer_join_asof_call(self, left_type: FrameType, node: ast.Call) -> FrameType | None:
         """``df.join_asof(other, ...)`` — same column shape as a left join."""
         if not node.args:
             return None
@@ -2208,7 +2185,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 keys.insert(0, index_col)
 
         # Extract aggregation expressions
-        expr_analyzer = ExpressionAnalyzer(input_frame, warnings=self.warnings, registry=self.registry)
+        expr_analyzer = ExpressionAnalyzer(
+            input_frame, warnings=self.warnings, registry=self.registry
+        )
         agg_exprs: list[AggExpr] = []
         for arg in node.args:
             agg_expr = expr_analyzer.analyze_agg_expr(arg)
@@ -2266,7 +2245,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
 
     def _infer_select_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
         """Infer type of .select() call."""
-        expr_analyzer = ExpressionAnalyzer(input_frame, warnings=self.warnings, registry=self.registry)
+        expr_analyzer = ExpressionAnalyzer(
+            input_frame, warnings=self.warnings, registry=self.registry
+        )
         result_columns: dict[str, DataType] = {}
 
         for arg in node.args:
@@ -2283,8 +2264,11 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     spec = input_frame.columns.get(c)
                     if spec is None:
                         self.errors.append(
-                            tag(PLY001, f"Column '{c}' not found. Available columns: "
-                                f"{list(input_frame.columns.keys())}")
+                            tag(
+                                PLY001,
+                                f"Column '{c}' not found. Available columns: "
+                                f"{list(input_frame.columns.keys())}",
+                            )
                         )
                         continue
                     result_columns[c] = spec.dtype
@@ -2313,7 +2297,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         # Start with all existing columns
         result_columns: dict[str, ColumnSpec | DataType] = dict(input_frame.columns)
 
-        expr_analyzer = ExpressionAnalyzer(input_frame, warnings=self.warnings, registry=self.registry)
+        expr_analyzer = ExpressionAnalyzer(
+            input_frame, warnings=self.warnings, registry=self.registry
+        )
 
         for arg in node.args:
             sel = _resolve_selector(arg, input_frame)
@@ -2328,8 +2314,11 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 for c in plural:
                     if c not in input_frame.columns:
                         self.errors.append(
-                            tag(PLY001, f"Column '{c}' not found. Available columns: "
-                                f"{list(input_frame.columns.keys())}")
+                            tag(
+                                PLY001,
+                                f"Column '{c}' not found. Available columns: "
+                                f"{list(input_frame.columns.keys())}",
+                            )
                         )
                 continue
             name, dtype = expr_analyzer.analyze_select_expr(arg)
@@ -2456,9 +2445,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         for col_name, spec in input_frame.columns.items():
             if col_name in targets:
                 if col_name not in input_frame.columns and subset is not None:
-                    self.errors.append(
-                        tag(PLY005, f"drop_nulls: column '{col_name}' not found")
-                    )
+                    self.errors.append(tag(PLY005, f"drop_nulls: column '{col_name}' not found"))
                 inner = spec.dtype.inner if isinstance(spec.dtype, Nullable) else spec.dtype
                 result_columns[col_name] = ColumnSpec(dtype=inner, required=spec.required)
             else:
@@ -2702,13 +2689,13 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 if outer_nullable and not isinstance(wrapped, Nullable):
                     wrapped = Nullable(wrapped)
                 result_columns[field_name] = ColumnSpec(dtype=wrapped, required=spec.required)
-        return FrameType(
-            columns=result_columns, strict=input_frame.strict, rest=input_frame.rest
-        )
+        return FrameType(columns=result_columns, strict=input_frame.strict, rest=input_frame.rest)
 
     def _infer_filter_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
         """Identity-typed, but walk every predicate sub-expression to validate columns."""
-        expr_analyzer = ExpressionAnalyzer(input_frame, warnings=self.warnings, registry=self.registry)
+        expr_analyzer = ExpressionAnalyzer(
+            input_frame, warnings=self.warnings, registry=self.registry
+        )
         for arg in node.args:
             expr_analyzer.analyze_select_expr(arg)
         for kw in node.keywords:
@@ -2733,9 +2720,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         result_columns: dict[str, ColumnSpec] = {name: ColumnSpec(dtype=UInt32())}
         for col_name, spec in input_frame.columns.items():
             if col_name == name:
-                self.errors.append(
-                    tag(PLY006, f"with_row_index: column '{name}' already exists")
-                )
+                self.errors.append(tag(PLY006, f"with_row_index: column '{name}' already exists"))
                 continue
             result_columns[col_name] = spec
         return FrameType(columns=result_columns, strict=input_frame.strict, rest=input_frame.rest)
@@ -2865,9 +2850,7 @@ def analyze_function(
     )
 
 
-def analyze_source(
-    source: str, file_path: Path | None = None
-) -> list[FunctionAnalysis]:
+def analyze_source(source: str, file_path: Path | None = None) -> list[FunctionAnalysis]:
     """
     Analyze Python source code for DataFrame type annotations.
 

@@ -48,15 +48,11 @@ def _format_schema_diff(errors: list[CheckError]) -> list[str]:
 
     lines: list[str] = ["    schema diff:"]
     lines.append(
-        f"      {headers[0]:<{col_w}}  {headers[1]:<{decl_w}}  "
-        f"{headers[2]:<{inf_w}}  {headers[3]}"
+        f"      {headers[0]:<{col_w}}  {headers[1]:<{decl_w}}  {headers[2]:<{inf_w}}  {headers[3]}"
     )
     lines.append(f"      {sep * col_w}  {sep * decl_w}  {sep * inf_w}  {sep * 8}")
     for col, declared, inferred, status in rows:
-        lines.append(
-            f"      {col:<{col_w}}  {declared:<{decl_w}}  "
-            f"{inferred:<{inf_w}}  {status}"
-        )
+        lines.append(f"      {col:<{col_w}}  {declared:<{decl_w}}  {inferred:<{inf_w}}  {status}")
     return lines
 
 
@@ -159,9 +155,7 @@ def format_results(
             summary += f" \033[33m({warn_count} with warnings)\033[0m"
         lines.append(summary)
     else:
-        summary = (
-            f"\033[31m{failed_count} function(s) failed, {passed_count} passed.\033[0m"
-        )
+        summary = f"\033[31m{failed_count} function(s) failed, {passed_count} passed.\033[0m"
         if warn_count:
             summary += f" \033[33m({warn_count} with warnings)\033[0m"
         lines.append(summary)

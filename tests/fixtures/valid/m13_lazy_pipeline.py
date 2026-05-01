@@ -19,16 +19,16 @@ class UserTotal(pa.DataFrameModel):
 
 def per_user_totals(events: LazyFrame[Event]) -> DataFrame[UserTotal]:
     return (
-        events.cache()                                            # LF identity
-              .filter(pl.col("amount").is_not_null())             # LF identity
-              .with_columns(pl.col("amount").fill_null(0.0))      # LF identity
-              .group_by("user_id")
-              .agg(
-                  pl.col("amount").sum().alias("total"),
-                  pl.col("amount").count().alias("n_events"),
-              )
-              .sort("user_id")
-              .collect()                                          # LF → DF
+        events.cache()  # LF identity
+        .filter(pl.col("amount").is_not_null())  # LF identity
+        .with_columns(pl.col("amount").fill_null(0.0))  # LF identity
+        .group_by("user_id")
+        .agg(
+            pl.col("amount").sum().alias("total"),
+            pl.col("amount").count().alias("n_events"),
+        )
+        .sort("user_id")
+        .collect()  # LF → DF
     )
 
 

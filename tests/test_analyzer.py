@@ -2528,8 +2528,7 @@ class TestM13LazyFrame:
 
     @pytest.mark.parametrize(
         "method",
-        ["cache()", "first()", "last()", "inspect()", "top_k(5, by='id')",
-         "bottom_k(5, by='id')"],
+        ["cache()", "first()", "last()", "inspect()", "top_k(5, by='id')", "bottom_k(5, by='id')"],
     )
     def test_lazy_identity_methods(self, method: str):
         source = textwrap.dedent(
@@ -2772,6 +2771,7 @@ class TestM15LazyEagerDistinction:
         )
         # check_function adds the return-type lazy mismatch.
         from polypolarism.checker import check_source
+
         results_chk = check_source(source)
         assert any("PLY032" in str(e) for e in results_chk[0].errors)
 
@@ -2787,6 +2787,7 @@ class TestM15LazyEagerDistinction:
         """
         )
         from polypolarism.checker import check_source
+
         results_chk = check_source(source)
         assert results_chk[0].passed is True, results_chk[0].errors
 
@@ -2802,6 +2803,7 @@ class TestM15LazyEagerDistinction:
         """
         )
         from polypolarism.checker import check_source
+
         results_chk = check_source(source)
         assert results_chk[0].passed is True, results_chk[0].errors
 
@@ -2818,6 +2820,7 @@ class TestM15LazyEagerDistinction:
         """
         )
         from polypolarism.checker import check_source
+
         results_chk = check_source(source)
         assert results_chk[0].passed is True, results_chk[0].errors
 
