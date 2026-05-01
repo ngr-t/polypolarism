@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from polypolarism.version_check import (
     PANDERA_FLOOR,
     POLARS_FLOOR,
+    POLARS_LATEST_KNOWN,
     DetectedVersion,
     Version,
     VersionInfo,
@@ -344,3 +347,211 @@ dependencies = ["polars>=0.19.0"]
         main([str(py), "--no-color", "--polars-version", "1.0.0"])
         captured = capsys.readouterr()
         assert "PLW010" in captured.err
+
+
+# Specific Polars 1.x minors that mark known landmarks in the churn doc.
+# Each entry is paired with the expected warn/silent state under the
+# current supported window.
+#   - 0.20: pre-1.0, definitely warns (analyzer doesn't know the legacy
+#     spellings in the first place).
+#   - 1.0:  big-bang minor, below window.
+#   - 1.18: introduced Int128, below window.
+#   - 1.25: Enum stabilized, below window.
+#   - 1.27: hist bin-closure shift, below window.
+#   - 1.32: selector-as-DSL change, below window.
+#   - 1.38: one minor below floor, below window.
+#   - 1.39: floor (==POLARS_LATEST_KNOWN.minor - 1), silent.
+#   - 1.40: latest known, silent.
+#   - 1.41: hypothetical future minor, silent (we don't reject the
+#     unknown-future direction; only "too old" is unsupported).
+@pytest.mark.parametrize(
+    ("version_str", "should_warn"),
+    [
+        ("0.20.0", True),
+        ("1.0.0", True),
+        ("1.18.0", True),
+        ("1.25.0", True),
+        ("1.27.0", True),
+        ("1.32.0", True),
+        ("1.38.0", True),
+        ("1.39.0", False),
+        ("1.40.0", False),
+        ("1.41.0", False),
+    ],
+)
+class TestPolarsVersionLandmarks:
+    def test_via_cli_override(self, version_str: str, should_warn: bool, tmp_path: Path, capsys):
+        from polypolarism.cli import main
+
+        py = tmp_path / "x.py"
+        py.write_text("")
+        (tmp_path / "pyproject.toml").write_text("")
+        main([str(py), "--no-color", "--polars-version", version_str])
+        captured = capsys.readouterr()
+        if should_warn:
+            assert "PLW010" in captured.err, f"polars {version_str} should warn but didn't"
+            assert "polars" in captured.err.lower()
+        else:
+            assert "PLW010" not in captured.err, f"polars {version_str} should be silent but warned"
+
+    def test_via_check_versions_directly(self, version_str: str, should_warn: bool):
+        v = Version.parse(version_str)
+        assert v is not None
+        info = VersionInfo(polars=DetectedVersion("polars", v, "test", exact=True))
+        warnings = check_versions(info)
+        if should_warn:
+            assert len(warnings) == 1
+            assert warnings[0].package == "polars"
+            assert warnings[0].detected.version == v
+            assert warnings[0].floor == POLARS_FLOOR
+        else:
+            assert warnings == []
+
+
+# Specific Pandera versions paired with expected state. Pandera's floor is
+# 0.19.0 (where polars validation landed); below that we warn.
+#   - 0.17: pre-DataFrameModel, pre-polars-support, warns.
+#   - 0.18: still pre-polars-support, warns.
+#   - 0.19: floor, silent.
+#   - 0.20: DataFrameModel rename era, silent.
+#   - 0.22: hypothetical recent minor, silent.
+@pytest.mark.parametrize(
+    ("version_str", "should_warn"),
+    [
+        ("0.17.0", True),
+        ("0.18.0", True),
+        ("0.19.0", False),
+        ("0.20.0", False),
+        ("0.22.0", False),
+    ],
+)
+class TestPanderaVersionLandmarks:
+    def test_via_cli_override(self, version_str: str, should_warn: bool, tmp_path: Path, capsys):
+        from polypolarism.cli import main
+
+        py = tmp_path / "x.py"
+        py.write_text("")
+        (tmp_path / "pyproject.toml").write_text("")
+        main(
+            [
+                str(py),
+                "--no-color",
+                "--polars-version",
+                str(POLARS_LATEST_KNOWN),
+                "--pandera-version",
+                version_str,
+            ]
+        )
+        captured = capsys.readouterr()
+        if should_warn:
+            assert "PLW010" in captured.err
+            assert "pandera" in captured.err.lower()
+        else:
+            assert "PLW010" not in captured.err
+
+    def test_via_check_versions_directly(self, version_str: str, should_warn: bool):
+        v = Version.parse(version_str)
+        assert v is not None
+        info = VersionInfo(pandera=DetectedVersion("pandera", v, "test", exact=True))
+        warnings = check_versions(info)
+        if should_warn:
+            assert len(warnings) == 1
+            assert warnings[0].package == "pandera"
+            assert warnings[0].floor == PANDERA_FLOOR
+        else:
+            assert warnings == []
+
+
+class TestWarningMessageContent:
+    """The warning surfaces enough info for a user to act on it: the
+    detected version, the source it came from, and the override flag."""
+
+    def _info_polars(self, v: Version, source: str) -> VersionInfo:
+        return VersionInfo(polars=DetectedVersion("polars", v, source, exact=True))
+
+    def test_includes_diagnostic_code(self):
+        warnings = check_versions(self._info_polars(Version(1, 0, 0), "uv.lock"))
+        assert "[PLW010]" in warnings[0].message
+
+    def test_includes_detected_version(self):
+        warnings = check_versions(self._info_polars(Version(1, 18, 0), "uv.lock"))
+        assert "1.18.0" in warnings[0].message
+
+    def test_includes_source_for_uv_lock(self):
+        warnings = check_versions(self._info_polars(Version(1, 0, 0), "uv.lock"))
+        assert "uv.lock" in warnings[0].message
+
+    def test_includes_source_for_dependencies(self):
+        warnings = check_versions(
+            self._info_polars(Version(1, 0, 0), "pyproject.toml dependencies")
+        )
+        assert "pyproject.toml dependencies" in warnings[0].message
+
+    def test_includes_floor_value(self):
+        warnings = check_versions(self._info_polars(Version(1, 0, 0), "cli"))
+        assert str(POLARS_FLOOR) in warnings[0].message
+
+    def test_includes_override_hint(self):
+        warnings = check_versions(self._info_polars(Version(1, 0, 0), "cli"))
+        assert "--polars-version" in warnings[0].message
+
+    def test_pandera_message_points_at_pandera_flag(self):
+        info = VersionInfo(
+            pandera=DetectedVersion("pandera", Version(0, 17, 0), "uv.lock", exact=True)
+        )
+        warnings = check_versions(info)
+        assert "--pandera-version" in warnings[0].message
+        assert "0.17.0" in warnings[0].message
+
+
+class TestUvLockExactPriority:
+    """When uv.lock pins a specific version, that wins over the floor in
+    pyproject.toml dependencies — even when the floor would have produced
+    a different warn/silent decision."""
+
+    def test_uv_lock_modern_silences_old_pyproject_floor(self, tmp_path: Path, capsys):
+        from polypolarism.cli import main
+
+        (tmp_path / "pyproject.toml").write_text(
+            """
+[project]
+dependencies = ["polars>=1.0.0"]
+"""
+        )
+        (tmp_path / "uv.lock").write_text(
+            """
+[[package]]
+name = "polars"
+version = "1.40.0"
+"""
+        )
+        py = tmp_path / "x.py"
+        py.write_text("")
+        main([str(py), "--no-color"])
+        captured = capsys.readouterr()
+        # uv.lock at 1.40 should win — no warning even though pyproject says >=1.0.
+        assert "PLW010" not in captured.err
+
+    def test_uv_lock_old_warns_even_if_pyproject_floor_modern(self, tmp_path: Path, capsys):
+        from polypolarism.cli import main
+
+        (tmp_path / "pyproject.toml").write_text(
+            f"""
+[project]
+dependencies = ["polars>={POLARS_LATEST_KNOWN}"]
+"""
+        )
+        (tmp_path / "uv.lock").write_text(
+            """
+[[package]]
+name = "polars"
+version = "1.10.0"
+"""
+        )
+        py = tmp_path / "x.py"
+        py.write_text("")
+        main([str(py), "--no-color"])
+        captured = capsys.readouterr()
+        # uv.lock at 1.10 wins — should warn despite "modern" pyproject floor.
+        assert "PLW010" in captured.err
+        assert "1.10.0" in captured.err
