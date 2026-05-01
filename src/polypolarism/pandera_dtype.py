@@ -3,6 +3,9 @@
 Recognised annotation shapes:
 - Python builtins: ``int``, ``str``, ``float``, ``bool``
 - Polars dtype classes: ``pl.Int64``, ``pl.Utf8``, ``pl.Float64`` etc. (with or without ``()``)
+- ``Series[T]`` (the canonical pandera class-based form) -> equivalent to bare ``T``.
+  Both bare and qualified heads (``Series``, ``pa.typing.Series``,
+  ``pandera.typing.polars.Series``) are accepted.
 - ``Optional[T]`` and ``T | None`` -> ``required=False``
 - ``Annotated[pl.List, pl.Int64()]`` -> ``List(Int64())``
 - ``Annotated[pl.Array, pl.Int64(), 3]`` -> ``List(Int64())`` (width ignored)
@@ -104,6 +107,14 @@ def _parse_dtype_expr(node: ast.expr) -> tuple[DataType, bool] | None:
         dtype, _ = result
         return dtype, False
 
+    if _is_series(node):
+        # ``Series[T]`` is pandera's canonical class-based form; the
+        # wrapper carries no extra info we use, so unwrap to ``T`` and
+        # re-enter the parser. Recursing handles ``Series[Optional[T]]``
+        # and other nested shapes for free.
+        assert isinstance(node, ast.Subscript)
+        return _parse_dtype_expr(node.slice)
+
     if _is_annotated(node):
         return _parse_annotated(node)
 
@@ -111,6 +122,11 @@ def _parse_dtype_expr(node: ast.expr) -> tuple[DataType, bool] | None:
     if dtype is None:
         return None
     return dtype, True
+
+
+def _is_series(node: ast.expr) -> bool:
+    """``Series[T]`` (bare or qualified, e.g. ``pa.typing.Series[T]``)."""
+    return isinstance(node, ast.Subscript) and _name_matches(node.value, "Series")
 
 
 def _parse_plain_dtype(node: ast.expr) -> DataType | None:

@@ -127,6 +127,49 @@ class TestAnnotatedStruct:
         assert result == ColumnSpec(Struct({"a": Utf8()}), required=False)
 
 
+class TestSeriesWrapper:
+    """``Series[T]`` is the canonical pandera class-based form and should
+    parse identically to bare ``T`` (issue #4)."""
+
+    def test_series_str(self):
+        assert _parse("Series[str]") == ColumnSpec(Utf8(), required=True)
+
+    def test_series_pl_int32(self):
+        from polypolarism.types import Int32
+
+        assert _parse("Series[pl.Int32]") == ColumnSpec(Int32(), required=True)
+
+    def test_series_pl_date(self):
+        from polypolarism.types import Date
+
+        assert _parse("Series[pl.Date]") == ColumnSpec(Date(), required=True)
+
+    def test_qualified_series(self):
+        # ``pa.typing.Series[T]`` / ``pandera.typing.polars.Series[T]``
+        # — qualified forms should parse the same way.
+        assert _parse("pa.typing.Series[int]") == ColumnSpec(Int64(), required=True)
+        assert _parse("pandera.typing.polars.Series[str]") == ColumnSpec(
+            Utf8(), required=True
+        )
+
+    def test_series_optional_inner(self):
+        # ``Series[Optional[T]]`` should be ``required=False``.
+        assert _parse("Series[Optional[int]]") == ColumnSpec(Int64(), required=False)
+
+    def test_optional_series(self):
+        # ``Optional[Series[T]]`` is the equivalent shape with the wrap
+        # order reversed.
+        assert _parse("Optional[Series[int]]") == ColumnSpec(Int64(), required=False)
+
+    def test_series_with_field_nullable(self):
+        # ``Series[T] = Field(nullable=True)`` should still wrap in Nullable.
+        from polypolarism.types import Int32
+
+        assert _parse("Series[pl.Int32]", "Field(nullable=True)") == ColumnSpec(
+            Nullable(Int32()), required=True
+        )
+
+
 class TestUnknown:
     def test_unknown_name_returns_none(self):
         assert _parse("MyCustom") is None
