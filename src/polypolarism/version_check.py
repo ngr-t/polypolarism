@@ -71,9 +71,22 @@ def _leading_digits(s: str) -> int | None:
 
 
 # Supported ranges. Updated alongside ADR-0001.
-POLARS_FLOOR = Version(1, 0, 0)
-POLARS_SUPPORT_NOTE = "polypolarism supports polars >= 1.0.0"
+#
+# Polars: the supported window is the latest two 1.x minor releases. When
+# polars ships a new minor, bump ``POLARS_LATEST_KNOWN`` and
+# ``POLARS_FLOOR`` follows automatically (latest minor minus one). Anything
+# below ``POLARS_FLOOR`` triggers a PLW010 warning.
+POLARS_LATEST_KNOWN = Version(1, 40, 0)
+POLARS_FLOOR = Version(POLARS_LATEST_KNOWN.major, POLARS_LATEST_KNOWN.minor - 1, 0)
+POLARS_SUPPORT_NOTE = (
+    f"polypolarism supports polars >= {POLARS_FLOOR} (the latest two 1.x minor "
+    "releases — older minors are best-effort)"
+)
 
+# Pandera: the AST-relevant surface is just class-name matching
+# (DataFrameModel / SchemaModel), which has been stable since 0.19. We keep
+# the floor at 0.19 rather than tracking a "latest two minors" window
+# because there is no per-minor variation for polypolarism to test against.
 PANDERA_FLOOR = Version(0, 19, 0)
 PANDERA_SUPPORT_NOTE = (
     "polypolarism supports pandera >= 0.19.0 (both DataFrameModel and "
@@ -296,9 +309,9 @@ def check_versions(info: VersionInfo) -> list[VersionWarning]:
                 floor=POLARS_FLOOR,
                 message=tag(
                     PLW010,
-                    f"detected polars {info.polars.version} from {info.polars.source}, "
-                    f"below supported floor {POLARS_FLOOR}. {POLARS_SUPPORT_NOTE}. "
-                    "Type-check results may be incorrect; use --polars-version to override.",
+                    f"detected polars {info.polars.version} (from {info.polars.source}); "
+                    f"{POLARS_SUPPORT_NOTE}. Type-check accuracy is best-effort below this — "
+                    "use --polars-version to override.",
                 ),
             )
         )
@@ -310,9 +323,8 @@ def check_versions(info: VersionInfo) -> list[VersionWarning]:
                 floor=PANDERA_FLOOR,
                 message=tag(
                     PLW010,
-                    f"detected pandera {info.pandera.version} from {info.pandera.source}, "
-                    f"below supported floor {PANDERA_FLOOR}. {PANDERA_SUPPORT_NOTE}. "
-                    "Use --pandera-version to override.",
+                    f"detected pandera {info.pandera.version} (from {info.pandera.source}); "
+                    f"{PANDERA_SUPPORT_NOTE}. Use --pandera-version to override.",
                 ),
             )
         )

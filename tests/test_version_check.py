@@ -329,6 +329,18 @@ dependencies = ["polars>=0.19.0"]
 dependencies = ["polars>=0.19.0"]
 """
         )
-        main([str(py), "--no-color", "--polars-version", "1.32.0"])
+        main([str(py), "--no-color", "--polars-version", str(POLARS_FLOOR)])
         captured = capsys.readouterr()
         assert "PLW010" not in captured.err
+
+    def test_polars_1_0_now_warns(self, tmp_path: Path, capsys):
+        """Polars 1.0 is below the supported window (latest two minors) and
+        should emit PLW010, even though it's a 1.x release."""
+        from polypolarism.cli import main
+
+        py = tmp_path / "x.py"
+        py.write_text("")
+        (tmp_path / "pyproject.toml").write_text("")
+        main([str(py), "--no-color", "--polars-version", "1.0.0"])
+        captured = capsys.readouterr()
+        assert "PLW010" in captured.err

@@ -76,9 +76,14 @@ A file:line map of every coupling site in the current code lives at
      `--pandera-version` CLI flag, `[tool.polypolarism]` in the target's
      `pyproject.toml`, the target's `uv.lock` (exact version), the floor
      in `[project.dependencies]` / `[dependency-groups.*]`.
-   - When the detected version is below the supported floor (polars 1.0,
-     pandera 0.19), `polypolarism` emits a `PLW010` warning to stderr.
-     `--no-version-check` suppresses the detection entirely.
+   - **The floor reflects "fully supported only"**: for polars, the lower
+     bound of the latest-two-minors window (currently 1.39, tracked in
+     `version_check.POLARS_LATEST_KNOWN`). For pandera, 0.19 — pandera's
+     AST-relevant surface (class-name matching) is stable across minors,
+     so a "latest two minors" window would not differentiate anything we
+     actually test against. When the detected version is below the floor,
+     `polypolarism` emits a `PLW010` warning to stderr.
+     `--no-version-check` suppresses detection entirely.
    - The detected version **does not feed analyzer dispatch today** — it
      only gates the warning. When `PolarsProfile` later grows fields, the
      same detection result will choose the profile.
@@ -187,11 +192,12 @@ not a profile concern.
 
 ### Negative
 
-- Users on pre-1.0 Polars cannot use `polypolarism`. This is a hard cut —
-  the tool will likely produce confusingly wrong results rather than a
-  clean error, since the AST analyzer has no runtime version check.
-  Mitigation: document the support floor prominently in `README.md` and
-  CLI `--help`.
+- Users on **anything below the latest two 1.x minors** see a `PLW010`
+  warning. Pre-1.0 is the harder case (the analyzer doesn't recognize
+  the legacy spellings and will silently misanalyze); 1.0–1.38 are
+  best-effort (the analyzer should work but isn't actively tested for
+  per-minor quirks). Mitigation: `--polars-version` opts a project back
+  in; the warning text says results are best-effort, not wrong.
 - A future Polars 2.0 will trigger a similar ADR — this defers, not
   eliminates, the multi-major-version question.
 
@@ -201,6 +207,9 @@ not a profile concern.
   (or eventual 2.0) is a one-line addition.
 - `PolarsProfile` ships as a `name`-only dataclass. Fields get added when
   fixtures actually diverge between supported minors.
+- **`POLARS_LATEST_KNOWN` needs a bump per polars minor release.** The
+  floor follows automatically (latest minor − 1). One-line change in
+  `version_check.py`. Good candidate for a scheduled cleanup task.
 
 ## Implementation outline
 
@@ -235,9 +244,10 @@ and the PLW010 diagnostic); step 12 documents it.
   algebra still produces the expected projected schema under the 1.32+
   `Selector` semantics.
 - Step 11 (shipped): a project pinning `polars>=0.20.0` triggers
-  `[PLW010] detected polars 0.20.0 from pyproject.toml dependencies,
-  below supported floor 1.0.0` on stderr; `--polars-version 1.0`
-  silences it; `--no-version-check` skips detection entirely.
-  `tests/test_version_check.py` covers all 34 paths.
+  `[PLW010] detected polars 0.20.0 ...` on stderr; `--polars-version
+  <floor-or-above>` silences it; `--no-version-check` skips detection
+  entirely. Polars 1.0–1.38 also warn under the "fully supported only"
+  policy. `tests/test_version_check.py` covers 35 paths including the
+  boundary cases.
 - A `SchemaModel`-using fixture continues to type-check correctly with
   no new output (silent acceptance preserved).
