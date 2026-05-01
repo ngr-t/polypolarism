@@ -8,10 +8,15 @@ from pathlib import Path
 
 from polypolarism.compat.polars_api import (
     AGG_SHORTHAND_NAMES,
+    DT_NAMESPACE_PRESERVING,
+    DT_NAMESPACE_RETURN,
     DTYPE_NAME_MAP,
     EAGER_ONLY_METHODS,
     IDENTITY_FRAME_METHODS,
     LAZY_ONLY_METHODS,
+    LIST_NAMESPACE_ELEMENT_RETURN,
+    LIST_NAMESPACE_PRESERVING,
+    STR_NAMESPACE_RETURN,
     agg_function_for,
     canonicalize_method,
 )
@@ -751,122 +756,14 @@ class ExpressionAnalyzer(ast.NodeVisitor):
     )
 
     # ---- sub-namespace return type tables ----------------------------------
+    # All five tables are re-exports from compat.polars_api so the polars
+    # surface knowledge stays in one place.
 
-    # ``pl.col("x").str.<method>(...)``. Values are either a fixed DataType or
-    # a callable that takes the receiver dtype.
-    _STR_RETURN: dict[str, DataType] = {
-        # Boolean predicates
-        "contains": Boolean(),
-        "contains_any": Boolean(),
-        "starts_with": Boolean(),
-        "ends_with": Boolean(),
-        "is_empty": Boolean(),
-        # Utf8-returning transformations
-        "lower": Utf8(),
-        "upper": Utf8(),
-        "to_lowercase": Utf8(),
-        "to_uppercase": Utf8(),
-        "to_titlecase": Utf8(),
-        "strip": Utf8(),
-        "strip_chars": Utf8(),
-        "strip_chars_start": Utf8(),
-        "strip_chars_end": Utf8(),
-        "lstrip": Utf8(),
-        "rstrip": Utf8(),
-        "replace": Utf8(),
-        "replace_all": Utf8(),
-        "replace_many": Utf8(),
-        "pad_start": Utf8(),
-        "pad_end": Utf8(),
-        "zfill": Utf8(),
-        "slice": Utf8(),
-        "head": Utf8(),
-        "tail": Utf8(),
-        "reverse": Utf8(),
-        "concat": Utf8(),
-        "join": Utf8(),
-        # Length / counts
-        "len_chars": UInt32(),
-        "len_bytes": UInt32(),
-        "count_matches": UInt32(),
-        # Splitting
-        "split": ListT(Utf8()),
-        # Parsing
-        "to_date": Date(),
-        "to_datetime": Datetime(),
-    }
-
-    # ``pl.col("ts").dt.<method>()``. Datetime → various integer parts; some
-    # methods preserve the receiver dtype (truncate / round / offset_by /
-    # replace_time_zone / convert_time_zone).
-    _DT_RETURN: dict[str, DataType] = {
-        "year": Int32(),
-        "iso_year": Int32(),
-        "month": Int8(),
-        "day": Int8(),
-        "hour": Int8(),
-        "minute": Int8(),
-        "second": Int8(),
-        "millisecond": Int32(),
-        "microsecond": Int32(),
-        "nanosecond": Int32(),
-        "weekday": Int8(),
-        "quarter": Int8(),
-        "week": Int8(),
-        "ordinal_day": Int16(),
-        "date": Date(),
-        "epoch": Int64(),
-        "timestamp": Int64(),
-        "total_days": Int64(),
-        "total_hours": Int64(),
-        "total_minutes": Int64(),
-        "total_seconds": Int64(),
-        "total_milliseconds": Int64(),
-        "total_microseconds": Int64(),
-        "total_nanoseconds": Int64(),
-    }
-
-    # Methods on ``pl.col("ts").dt`` that preserve the receiver dtype.
-    _DT_PRESERVING: frozenset[str] = frozenset(
-        {
-            "truncate",
-            "round",
-            "offset_by",
-            "replace_time_zone",
-            "convert_time_zone",
-            "month_start",
-            "month_end",
-        }
-    )
-
-    # Methods on ``pl.col("xs").list`` that preserve the receiver dtype.
-    _LIST_PRESERVING: frozenset[str] = frozenset(
-        {
-            "unique",
-            "sort",
-            "reverse",
-            "head",
-            "tail",
-            "slice",
-            "drop_nulls",
-            "sample",
-            "shift",
-        }
-    )
-
-    # Methods on ``pl.col("xs").list`` that return the element dtype.
-    _LIST_ELEMENT_RETURN: frozenset[str] = frozenset(
-        {
-            "get",
-            "first",
-            "last",
-            "sum",
-            "mean",
-            "min",
-            "max",
-            "median",
-        }
-    )
+    _STR_RETURN = STR_NAMESPACE_RETURN
+    _DT_RETURN = DT_NAMESPACE_RETURN
+    _DT_PRESERVING = DT_NAMESPACE_PRESERVING
+    _LIST_PRESERVING = LIST_NAMESPACE_PRESERVING
+    _LIST_ELEMENT_RETURN = LIST_NAMESPACE_ELEMENT_RETURN
 
     def analyze_select_expr(self, node: ast.expr) -> tuple[str | None, DataType | None]:
         """Analyze a select expression, return (output_name, type)."""

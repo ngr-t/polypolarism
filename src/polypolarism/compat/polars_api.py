@@ -38,6 +38,7 @@ from polypolarism.types import (
     UInt128,
     Utf8,
 )
+from polypolarism.types import List as ListT
 
 if TYPE_CHECKING:
     from polypolarism.ops.groupby import AggFunction
@@ -159,6 +160,126 @@ AGG_SHORTHAND_NAMES: frozenset[str] = frozenset(
 # canonical_name during dispatch." See ADR-0001 § Decision item 3 for the
 # policy.
 METHOD_ALIASES: dict[str, str] = {}
+
+
+# ``pl.col("x").str.<method>(...)`` return types. Boolean predicates,
+# Utf8-returning transformations, length / count integer returns, and a
+# couple of parsing-into-temporal methods.
+STR_NAMESPACE_RETURN: dict[str, DataType] = {
+    # Boolean predicates
+    "contains": Boolean(),
+    "contains_any": Boolean(),
+    "starts_with": Boolean(),
+    "ends_with": Boolean(),
+    "is_empty": Boolean(),
+    # Utf8-returning transformations
+    "lower": Utf8(),
+    "upper": Utf8(),
+    "to_lowercase": Utf8(),
+    "to_uppercase": Utf8(),
+    "to_titlecase": Utf8(),
+    "strip": Utf8(),
+    "strip_chars": Utf8(),
+    "strip_chars_start": Utf8(),
+    "strip_chars_end": Utf8(),
+    "lstrip": Utf8(),
+    "rstrip": Utf8(),
+    "replace": Utf8(),
+    "replace_all": Utf8(),
+    "replace_many": Utf8(),
+    "pad_start": Utf8(),
+    "pad_end": Utf8(),
+    "zfill": Utf8(),
+    "slice": Utf8(),
+    "head": Utf8(),
+    "tail": Utf8(),
+    "reverse": Utf8(),
+    "concat": Utf8(),
+    "join": Utf8(),
+    # Length / counts
+    "len_chars": UInt32(),
+    "len_bytes": UInt32(),
+    "count_matches": UInt32(),
+    # Splitting
+    "split": ListT(Utf8()),
+    # Parsing into temporal types
+    "to_date": Date(),
+    "to_datetime": Datetime(),
+}
+
+
+# ``pl.col("ts").dt.<method>()`` returning a fixed dtype (calendar parts,
+# epoch / total_* integers).
+DT_NAMESPACE_RETURN: dict[str, DataType] = {
+    "year": Int32(),
+    "iso_year": Int32(),
+    "month": Int8(),
+    "day": Int8(),
+    "hour": Int8(),
+    "minute": Int8(),
+    "second": Int8(),
+    "millisecond": Int32(),
+    "microsecond": Int32(),
+    "nanosecond": Int32(),
+    "weekday": Int8(),
+    "quarter": Int8(),
+    "week": Int8(),
+    "ordinal_day": Int16(),
+    "date": Date(),
+    "epoch": Int64(),
+    "timestamp": Int64(),
+    "total_days": Int64(),
+    "total_hours": Int64(),
+    "total_minutes": Int64(),
+    "total_seconds": Int64(),
+    "total_milliseconds": Int64(),
+    "total_nanoseconds": Int64(),
+    "total_microseconds": Int64(),
+}
+
+# ``pl.col("ts").dt.<method>()`` methods that preserve the receiver dtype
+# (timezone / truncation / window-shift methods).
+DT_NAMESPACE_PRESERVING: frozenset[str] = frozenset(
+    {
+        "truncate",
+        "round",
+        "offset_by",
+        "replace_time_zone",
+        "convert_time_zone",
+        "month_start",
+        "month_end",
+    }
+)
+
+# ``pl.col("xs").list.<method>()`` methods that preserve the receiver list dtype.
+LIST_NAMESPACE_PRESERVING: frozenset[str] = frozenset(
+    {
+        "unique",
+        "sort",
+        "reverse",
+        "head",
+        "tail",
+        "slice",
+        "drop_nulls",
+        "sample",
+        "shift",
+    }
+)
+
+# ``pl.col("xs").list.<method>()`` methods that return the element dtype
+# (de-listing operations).
+LIST_NAMESPACE_ELEMENT_RETURN: frozenset[str] = frozenset(
+    {
+        "get",
+        "first",
+        "last",
+        "sum",
+        "mean",
+        "min",
+        "max",
+        "median",
+    }
+)
 
 
 def canonicalize_method(name: str) -> str:
