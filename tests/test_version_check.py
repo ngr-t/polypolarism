@@ -359,10 +359,10 @@ dependencies = ["polars>=0.19.0"]
 #   - 1.25: Enum stabilized, below window.
 #   - 1.27: hist bin-closure shift, below window.
 #   - 1.32: selector-as-DSL change, below window.
-#   - 1.38: one minor below floor, below window.
-#   - 1.39: floor (==POLARS_LATEST_KNOWN.minor - 1), silent.
-#   - 1.40: latest known, silent.
-#   - 1.41: hypothetical future minor, silent (we don't reject the
+#   - 1.39: one minor below floor, below window.
+#   - 1.40: floor (==POLARS_LATEST_KNOWN.minor - 1), silent.
+#   - 1.41: latest known, silent.
+#   - 1.42: hypothetical future minor, silent (we don't reject the
 #     unknown-future direction; only "too old" is unsupported).
 @pytest.mark.parametrize(
     ("version_str", "should_warn"),
@@ -373,10 +373,10 @@ dependencies = ["polars>=0.19.0"]
         ("1.25.0", True),
         ("1.27.0", True),
         ("1.32.0", True),
-        ("1.38.0", True),
-        ("1.39.0", False),
+        ("1.39.0", True),
         ("1.40.0", False),
         ("1.41.0", False),
+        ("1.42.0", False),
     ],
 )
 class TestPolarsVersionLandmarks:
