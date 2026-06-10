@@ -5109,6 +5109,243 @@ class TestSemiAntiJoin:
         )
 
 
+class TestJoinCoalesceKwarg:
+    """#24: the coalesce= kwarg of .join() is parsed and applied."""
+
+    def test_full_join_coalesce_true_key_non_nullable(self):
+        """coalesce=True on a full join: single key column, non-nullable."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class A(pa.DataFrameModel):
+                id: int
+                x: int
+
+            class B(pa.DataFrameModel):
+                id: int
+                y: int
+
+            def f(a: DataFrame[A], b: DataFrame[B]):
+                return a.join(b, on="id", how="full", coalesce=True)
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["id"].dtype == Int64()
+        assert ft.columns["x"].dtype == Nullable(Int64())
+        assert ft.columns["y"].dtype == Nullable(Int64())
+        assert "id_right" not in ft.columns
+
+    def test_full_join_default_keeps_both_keys(self):
+        """Without coalesce=, a full join keeps id (nullable) and id_right."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class A(pa.DataFrameModel):
+                id: int
+                x: int
+
+            class B(pa.DataFrameModel):
+                id: int
+                y: int
+
+            def f(a: DataFrame[A], b: DataFrame[B]):
+                return a.join(b, on="id", how="full")
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["id"].dtype == Nullable(Int64())
+        assert ft.columns["id_right"].dtype == Nullable(Int64())
+
+    def test_left_join_coalesce_false_keeps_right_key(self):
+        """coalesce=False on a left join keeps id_right (nullable)."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class A(pa.DataFrameModel):
+                id: int
+                x: int
+
+            class B(pa.DataFrameModel):
+                id: int
+                y: int
+
+            def f(a: DataFrame[A], b: DataFrame[B]):
+                return a.join(b, on="id", how="left", coalesce=False)
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["id"].dtype == Int64()
+        assert ft.columns["id_right"].dtype == Nullable(Int64())
+
+    def test_non_literal_coalesce_falls_back_to_default(self):
+        """A non-literal coalesce= is ignored: the how-specific default applies."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class A(pa.DataFrameModel):
+                id: int
+                x: int
+
+            class B(pa.DataFrameModel):
+                id: int
+                y: int
+
+            def f(a: DataFrame[A], b: DataFrame[B], flag: bool):
+                return a.join(b, on="id", how="full", coalesce=flag)
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        # full-join default: uncoalesced, both keys kept and nullable
+        assert ft.columns["id"].dtype == Nullable(Int64())
+        assert ft.columns["id_right"].dtype == Nullable(Int64())
+
+    def test_join_asof_left_on_right_on_keeps_both_keys(self):
+        """join_asof never coalesces differently-named keys (polars semantics)."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class L(pa.DataFrameModel):
+                t: pl.Datetime
+                x: int
+
+            class R(pa.DataFrameModel):
+                ts: pl.Datetime
+                y: int
+
+            def f(left: DataFrame[L], right: DataFrame[R]):
+                return left.join_asof(right, left_on="t", right_on="ts")
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert "t" in ft.columns
+        assert "ts" in ft.columns
+        assert ft.columns["y"].dtype == Nullable(Int64())
+
+
+class TestCrossJoinAnalyzer:
+    """#26: how='cross' is inferred (no join keys required)."""
+
+    def test_cross_join_infers_merged_schema(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class A(pa.DataFrameModel):
+                id: int
+                x: int
+
+            class B(pa.DataFrameModel):
+                rid: int
+                y: str
+
+            def f(a: DataFrame[A], b: DataFrame[B]):
+                return a.join(b, how="cross")
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft == FrameType({"id": Int64(), "x": Int64(), "rid": Int64(), "y": Utf8()})
+
+    def test_cross_join_collision_gets_suffix(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class A(pa.DataFrameModel):
+                id: int
+                v: int
+
+            class B(pa.DataFrameModel):
+                v: str
+
+            def f(a: DataFrame[A], b: DataFrame[B]):
+                return a.join(b, how="cross")
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft == FrameType({"id": Int64(), "v": Int64(), "v_right": Utf8()})
+
+    def test_cross_join_how_via_module_constant(self):
+        """how= stays constant-aware for 'cross'."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            HOW = "cross"
+
+            class A(pa.DataFrameModel):
+                id: int
+
+            class B(pa.DataFrameModel):
+                rid: int
+
+            def f(a: DataFrame[A], b: DataFrame[B]):
+                return a.join(b, how=HOW)
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        assert results[0].inferred_return_type == FrameType({"id": Int64(), "rid": Int64()})
+
+    def test_cross_join_with_keys_errors(self):
+        """Providing on= with how='cross' raises PLY010 like polars raises."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class A(pa.DataFrameModel):
+                id: int
+
+            class B(pa.DataFrameModel):
+                id: int
+
+            def f(a: DataFrame[A], b: DataFrame[B]):
+                return a.join(b, on="id", how="cross")
+        """
+        )
+        results = analyze_source(source)
+        assert any(
+            "PLY010" in e and "cross join takes no join keys" in e for e in results[0].errors
+        ), results[0].errors
+
+    def test_cross_join_lazy_receiver_stays_lazy(self):
+        source = textwrap.dedent(
+            """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import LazyFrame
+
+            class A(pa.DataFrameModel):
+                id: int
+
+            class B(pa.DataFrameModel):
+                rid: int
+
+            def f(a: LazyFrame[A], b: LazyFrame[B]):
+                return a.join(b, how="cross")
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.is_lazy is True
+
+
 class TestGatherEvery:
     """#15: gather_every(n) is schema-preserving on both frame kinds."""
 

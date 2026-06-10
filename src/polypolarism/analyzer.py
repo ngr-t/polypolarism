@@ -2213,6 +2213,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         right_on: str | list[str] | None = None
         how: str = "inner"
         suffix: str = "_right"
+        coalesce: bool | None = None
 
         for kw in node.keywords:
             if kw.arg in ("on", "left_on", "right_on"):
@@ -2235,8 +2236,13 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 cand = self._const_str(kw.value)
                 if cand is not None:
                     suffix = cand
+            elif kw.arg == "coalesce":
+                # Only a literal True/False is honored; anything dynamic
+                # falls back to the how-specific polars default (None).
+                if isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, bool):
+                    coalesce = kw.value.value
 
-        if how in ("inner", "left", "right", "full", "semi", "anti"):
+        if how in ("inner", "left", "right", "full", "cross", "semi", "anti"):
             valid_how: JoinHow = how
         else:
             return None
@@ -2250,6 +2256,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 right_on=right_on,
                 how=valid_how,
                 suffix=suffix,
+                coalesce=coalesce,
             )
         except JoinError as e:
             self.errors.append(tag(PLY010, str(e)))
@@ -2280,6 +2287,8 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             elif kw.arg == "suffix":
                 suffix = cand
         try:
+            # join_asof coalesces the key only when ``on`` names both sides:
+            # differently-named left_on/right_on keys are both kept.
             return infer_join(
                 left_type,
                 right_type,
@@ -2288,6 +2297,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 right_on=right_on,
                 how="left",
                 suffix=suffix,
+                coalesce=on is not None,
             )
         except JoinError as e:
             self.errors.append(tag(PLY010, str(e)))
