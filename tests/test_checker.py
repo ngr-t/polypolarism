@@ -1691,3 +1691,61 @@ class TestWhenSupertypeEndToEnd:
         result = self._check("float")
         assert result.passed is False
         assert any(isinstance(e, TypeDifference) for e in result.errors)
+
+
+class TestUnpivotSupertypeEndToEnd:
+    """Issue #41 repro: mixed-dtype unpivot value columns supertype instead
+    of raising PLY022.
+
+    Probed (polars 1.41.2): ``df.unpivot(index="id", on=["a", "s"])`` with
+    ``a: Int64``, ``s: String`` produces
+    ``Schema({'id': Int64, 'variable': String, 'value': String})``.
+    """
+
+    HEADER = textwrap.dedent("""
+        import polars as pl
+        import pandera.polars as pa
+        from pandera.typing.polars import DataFrame
+
+        class Wide(pa.DataFrameModel):
+            id: int
+            a: int
+            s: str
+    """)
+
+    def test_mixed_value_columns_pass_with_str_value(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            class Long(pa.DataFrameModel):
+                id: int
+                variable: str
+                value: str
+
+            @pa.check_types
+            def melt(df: DataFrame[Wide]) -> DataFrame[Long]:
+                return df.unpivot(index="id", on=["a", "s"])
+        """
+        )
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is True, results[0].errors
+
+    def test_mixed_value_columns_fail_int_value_declaration(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            class Long(pa.DataFrameModel):
+                id: int
+                variable: str
+                value: int
+
+            @pa.check_types
+            def melt(df: DataFrame[Wide]) -> DataFrame[Long]:
+                return df.unpivot(index="id", on=["a", "s"])
+        """
+        )
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is False
+        assert any(isinstance(e, TypeDifference) for e in results[0].errors)

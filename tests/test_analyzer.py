@@ -2051,21 +2051,90 @@ class TestM4Unpivot:
         assert ft.columns["metric"].dtype == Utf8()
         assert ft.columns["amount"].dtype == Float64()
 
-    def test_unpivot_value_columns_not_unifiable_errors(self):
+    def test_unpivot_mixed_int_str_value_columns_supertype(self):
+        # Issue #41 repro. Probed (polars 1.41.2):
+        # df.unpivot(index="id", on=["a", "s"]) with a: Int64, s: String
+        # -> Schema({'id': Int64, 'variable': String, 'value': String}).
         source = textwrap.dedent(
             PANDERA_HEADER
             + """
             class In(pa.DataFrameModel):
                 id: int
-                a: pl.Float64
-                b: str
+                a: int
+                s: str
 
             def f(data: DataFrame[In]):
-                return data.unpivot(index=["id"], on=["a", "b"])
+                return data.unpivot(index="id", on=["a", "s"])
         """
         )
         results = analyze_source(source)
-        assert results[0].has_errors is True
+        assert results[0].errors == [], results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["value"].dtype == Utf8()
+
+    def test_unpivot_temporal_numeric_value_columns_supertype(self):
+        # Probed: Date + Int64 -> Int64 (physical-repr promotion).
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                id: int
+                d: pl.Date
+                n: int
+
+            def f(data: DataFrame[In]):
+                return data.unpivot(index=["id"], on=["d", "n"])
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == [], results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["value"].dtype == Int64()
+
+    def test_unpivot_value_columns_without_supertype_error(self):
+        # Probed surviving PLY022 case: List + scalar has no polars
+        # supertype — unpivot raises
+        # "InvalidOperationError: 'unpivot' not supported for dtype: list[i64]".
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                id: int
+                xs: pl.List(pl.Int64) = pa.Field()
+                s: str
+
+            def f(data: DataFrame[In]):
+                return data.unpivot(index=["id"], on=["xs", "s"])
+        """
+        )
+        results = analyze_source(source)
+        assert any("PLY022" in e and "incompatible" in e for e in results[0].errors), results[
+            0
+        ].errors
+
+    def test_unpivot_unknown_value_column_stays_silent(self):
+        # An Unknown-dtyped value column must not raise PLY022 — the value
+        # dtype degrades to Unknown (gradual typing, no false positives).
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                id: int
+                a: int
+                s: str
+
+            def f(data: DataFrame[In]):
+                df2 = data.with_columns(u=pl.col("a").interpolate())
+                return df2.unpivot(index=["id"], on=["u", "s"])
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == [], results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["value"].dtype == Unknown()
 
 
 class TestM5Cumulative:
