@@ -2508,3 +2508,140 @@ class TestIssue51BinNamespaceEndToEnd:
         )
         result = check_source(source)[0]
         assert result.passed is True, result.errors
+
+
+class TestIssue52DecimalArithmeticEndToEnd:
+    """Issue #52 repro: Decimal arithmetic propagates precision growth.
+
+    Probed (polars 1.41.2): ``Decimal(10,2) + Decimal(10,2)`` materializes
+    as ``Decimal(38, 2)`` — declaring the grown precision must pass (the
+    old left-operand fallback claimed a stale ``Decimal(10, 2)`` and
+    flagged a false positive), and declaring the stale pre-growth
+    precision must now FAIL (the killed false negative).
+    """
+
+    HEADER = textwrap.dedent("""
+        import polars as pl
+        import pandera.polars as pa
+        from pandera.typing.polars import DataFrame
+
+        class DecIn(pa.DataFrameModel):
+            d: pl.Decimal(10, 2)
+            e: pl.Decimal(10, 2)
+
+            class Config:
+                coerce = True
+    """)
+
+    def test_decimal_sum_declared_with_grown_precision_passes(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            class DecSum(pa.DataFrameModel):
+                s: pl.Decimal(38, 2)
+
+                class Config:
+                    strict = True
+                    coerce = True
+
+            @pa.check_types
+            def add(df: DataFrame[DecIn]) -> DataFrame[DecSum]:
+                return df.select(s=pl.col("d") + pl.col("e"))
+            """
+        )
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is True, results[0].errors
+        assert results[0].errors == []
+
+    def test_decimal_sum_declared_with_stale_precision_fails(self):
+        """The killed false negative: claiming the input precision is wrong."""
+        source = self.HEADER + textwrap.dedent(
+            """
+            class DecSum(pa.DataFrameModel):
+                s: pl.Decimal(10, 2)
+
+                class Config:
+                    strict = True
+
+            @pa.check_types
+            def add(df: DataFrame[DecIn]) -> DataFrame[DecSum]:
+                return df.select(s=pl.col("d") + pl.col("e"))
+            """
+        )
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is False
+        assert any(isinstance(e, TypeDifference) and e.column == "s" for e in results[0].errors)
+
+    def test_decimal_int_product_declared_with_grown_precision_passes(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            class Qty(pa.DataFrameModel):
+                d: pl.Decimal(10, 2)
+                n: int
+
+                class Config:
+                    coerce = True
+
+            class Total(pa.DataFrameModel):
+                t: pl.Decimal(38, 2)
+
+                class Config:
+                    strict = True
+                    coerce = True
+
+            @pa.check_types
+            def total(df: DataFrame[Qty]) -> DataFrame[Total]:
+                return df.select(t=pl.col("d") * pl.col("n"))
+            """
+        )
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is True, results[0].errors
+
+    def test_decimal_mixed_scale_sum_takes_max_scale(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            class FineIn(pa.DataFrameModel):
+                a: pl.Decimal(10, 2)
+                b: pl.Decimal(12, 4)
+
+                class Config:
+                    coerce = True
+
+            class FineOut(pa.DataFrameModel):
+                s: pl.Decimal(38, 4)
+
+                class Config:
+                    strict = True
+                    coerce = True
+
+            @pa.check_types
+            def add(df: DataFrame[FineIn]) -> DataFrame[FineOut]:
+                return df.select(s=pl.col("a") + pl.col("b"))
+            """
+        )
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is True, results[0].errors
+
+    def test_decimal_floordiv_flags_ply009(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            class Out(pa.DataFrameModel):
+                s: pl.Decimal(38, 2)
+
+            @pa.check_types
+            def bad(df: DataFrame[DecIn]) -> DataFrame[Out]:
+                return df.select(s=pl.col("d") // pl.col("e"))
+            """
+        )
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is False
+        assert any("PLY009" in str(e) for e in results[0].errors), results[0].errors

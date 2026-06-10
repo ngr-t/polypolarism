@@ -342,11 +342,12 @@ def _wrap_nullable_if_any(result: DataType, operands: list[DataType]) -> DataTyp
 # ---- binary-arithmetic dtype rules (issue #30) ------------------------------
 #
 # Classification of ``left <op> right`` over the dtypes whose arithmetic we
-# fully understand: numeric ∪ {Utf8, Boolean, Date, Datetime, Time, Duration}.
-# Verified against polars 1.41.2 by driving the full dtype x op product
-# through ``df.select`` (table in TestArithmeticIncompatibleDtypes). Anything
-# outside this set keeps the legacy silent fallback — false positives are
-# worse than false negatives here.
+# fully understand: numeric ∪ {Utf8, Boolean, Date, Datetime, Time, Duration}
+# plus a dedicated Decimal arm (issue #52, ``_decimal_arith``). Verified
+# against polars 1.41.2 by driving the full dtype x op product through
+# ``df.select`` (table in TestArithmeticIncompatibleDtypes). Anything outside
+# this set keeps the legacy silent fallback — false positives are worse than
+# false negatives here.
 
 # Sentinel: both operand bases are understood and polars rejects the pair+op
 # at runtime (InvalidOperationError) — report PLY009.
@@ -367,7 +368,8 @@ def _arith_category(dtype: DataType) -> str | None:
     """Category of a (Nullable-unwrapped) dtype for arithmetic classification.
 
     ``None`` means the dtype is outside the fully-understood set (Unknown,
-    Decimal, Categorical, List, ...) and the caller must stay silent.
+    Categorical, List, ...) and the caller must stay silent. Decimal is
+    resolved by ``_decimal_arith`` before this classification runs.
     """
     if type(dtype) in NUMERIC_DTYPES:
         return "num"
@@ -475,6 +477,70 @@ def _temporal_arith(
     return None
 
 
+# Float widths for the Decimal arm — every width (incl. Float16) was probed
+# to behave identically against Decimal.
+_DECIMAL_FLOAT_PARTNERS = (Float16, Float32, Float64)
+
+# The four operators that keep a Decimal result against Decimal/int/Null.
+_DECIMAL_KEEPING_OPS = (ast.Add, ast.Sub, ast.Mult, ast.Div)
+
+
+def _decimal_arith(op: ast.operator, left: DataType, right: DataType) -> DataType | object | None:
+    """Arithmetic where at least one Nullable-unwrapped operand is Decimal.
+
+    Probed on polars 1.41.2 over Decimal x {Decimal, every int width incl.
+    128-bit, every float width incl. Float16, Boolean, Utf8, Null literal,
+    Date/Datetime/Time/Duration, Categorical, Enum, List} with all seven
+    operators in both operand orders (issue #52). Eager results and
+    ``LazyFrame.collect()`` agree on every cell; the lazy
+    ``collect_schema()`` reports a stale pre-growth precision for
+    Decimal x int and Decimal x Null cells — polypolarism claims the
+    materialized dtype.
+    """
+    if not isinstance(op, (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv, ast.Mod, ast.Pow)):
+        return None  # << >> @ ... — not polars expression arithmetic.
+    if isinstance(left, Decimal) and isinstance(right, Decimal):
+        if isinstance(op, _DECIMAL_KEEPING_OPS):
+            # Precision saturates to 38 whatever the input precisions; the
+            # scale is max(ls, rs). Probed: ``*`` does NOT add scales and
+            # ``/`` stays Decimal (polars rescales: 1.00 / 3.00 -> 0.33).
+            return Decimal(38, max(left.scale, right.scale))
+        return _ARITH_INVALID  # // % ** raise InvalidOperationError
+    if isinstance(left, Decimal):
+        dec, other, dec_is_left = left, right, True
+    elif isinstance(right, Decimal):
+        dec, other, dec_is_left = right, left, False
+    else:  # pragma: no cover — caller guarantees a Decimal operand
+        return None
+    if isinstance(other, _DECIMAL_FLOAT_PARTNERS):
+        # Probed: every float width, either order -> Float64 for all
+        # operators except ** (Decimal cannot be a pow base or exponent).
+        return _ARITH_INVALID if isinstance(op, ast.Pow) else Float64()
+    if type(other) in NUMERIC_DTYPES or isinstance(other, Null):
+        # Integer partner (every signed/unsigned width, either order; int
+        # literals behave like Int64 columns) and the all-null literal:
+        # + - * / widen the precision to 38 and keep the Decimal's scale;
+        # // % ** raise InvalidOperationError. A Null operand makes the
+        # caller wrap the result in Nullable.
+        if isinstance(op, _DECIMAL_KEEPING_OPS):
+            return Decimal(38, dec.scale)
+        return _ARITH_INVALID
+    if isinstance(other, Boolean):
+        # Asymmetric (probed): ``Boolean / Decimal`` -> Float64; every
+        # other cell raises (SchemaError "failed to determine supertype",
+        # or InvalidOperationError for **).
+        if isinstance(op, ast.Div) and not dec_is_left:
+            return Float64()
+        return _ARITH_INVALID
+    if isinstance(other, Utf8):
+        # ``+`` stringifies the Decimal and concatenates; all else errors.
+        return Utf8() if isinstance(op, ast.Add) else _ARITH_INVALID
+    if isinstance(other, (Date, Datetime, Time, Duration, Categorical, Enum, ListT)):
+        return _ARITH_INVALID  # probed: all seven operators, both orders
+    # Unknown, Struct, Binary, ... — unprobed: silent legacy fallback.
+    return None
+
+
 def _arith_verdict(
     op: ast.operator, left_inner: DataType, right_inner: DataType
 ) -> DataType | object | None:
@@ -484,6 +550,8 @@ def _arith_verdict(
     ``_ARITH_INVALID`` when polars provably rejects it, or ``None`` when an
     operand is outside the fully-understood set (silent legacy fallback).
     """
+    if isinstance(left_inner, Decimal) or isinstance(right_inner, Decimal):
+        return _decimal_arith(op, left_inner, right_inner)
     lcat = _arith_category(left_inner)
     rcat = _arith_category(right_inner)
     if lcat is None or rcat is None:
@@ -1798,33 +1866,35 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             output_name = alias if alias else left_name
             resolved = [t for t in (left_type, right_type) if t is not None]
 
-            if (
-                left_type is not None
-                and right_type is not None
-                # Null literals keep promote_types' Null -> Nullable[T] rules.
-                and not isinstance(left_type, Null)
-                and not isinstance(right_type, Null)
-            ):
+            if left_type is not None and right_type is not None:
                 left_inner = left_type.inner if isinstance(left_type, Nullable) else left_type
                 right_inner = right_type.inner if isinstance(right_type, Nullable) else right_type
-                verdict = _arith_verdict(inner_node.op, left_inner, right_inner)
-                if verdict is _ARITH_INVALID:
-                    op_sym = _OP_SYMBOLS.get(type(inner_node.op), "?")
-                    self.errors.append(
-                        tag(
-                            PLY009,
-                            f"arithmetic '{left_inner} {op_sym} {right_inner}' is not "
-                            f"supported — polars raises InvalidOperationError at "
-                            f"runtime; cast an operand first",
+                # Null literals keep promote_types' Null -> Nullable[T]
+                # rules — except next to a Decimal, where polars widens the
+                # precision even against an all-null literal (probed:
+                # Decimal(10,2) + None -> all-null Decimal(38,2)), so the
+                # Decimal arm owns those cells (issue #52).
+                has_null = isinstance(left_type, Null) or isinstance(right_type, Null)
+                has_decimal = isinstance(left_inner, Decimal) or isinstance(right_inner, Decimal)
+                if not has_null or has_decimal:
+                    verdict = _arith_verdict(inner_node.op, left_inner, right_inner)
+                    if verdict is _ARITH_INVALID:
+                        op_sym = _OP_SYMBOLS.get(type(inner_node.op), "?")
+                        self.errors.append(
+                            tag(
+                                PLY009,
+                                f"arithmetic '{left_inner} {op_sym} {right_inner}' is not "
+                                f"supported — polars raises InvalidOperationError at "
+                                f"runtime; cast an operand first",
+                            )
                         )
-                    )
-                    # The error is the signal; don't fabricate a dtype — the
-                    # named output registers as Unknown downstream.
-                    return output_name, None
-                if isinstance(verdict, DataType):
-                    return output_name, _wrap_nullable_if_any(verdict, resolved)
-                # verdict is None — operand outside the understood set;
-                # fall through to the legacy behaviour below.
+                        # The error is the signal; don't fabricate a dtype —
+                        # the named output registers as Unknown downstream.
+                        return output_name, None
+                    if isinstance(verdict, DataType):
+                        return output_name, _wrap_nullable_if_any(verdict, resolved)
+                    # verdict is None — operand outside the understood set;
+                    # fall through to the legacy behaviour below.
 
             if isinstance(inner_node.op, ast.Div):
                 # polars true division always yields Float64, even for

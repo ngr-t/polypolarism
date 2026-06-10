@@ -5421,9 +5421,10 @@ class TestArithmeticIncompatibleDtypes:
            (even Duration // int).
     ``**`` plain numerics only — bool, str and temporal operands all error.
 
-    Operands outside the closed set (Unknown, unresolved, Decimal, List,
-    ...) and Null literals keep the legacy silent fallback — false
-    positives are worse than false negatives here.
+    Operands outside the closed set (Unknown, unresolved, List, ...)
+    and Null literals keep the legacy silent fallback — false positives
+    are worse than false negatives here. Decimal has its own probed arm
+    (issue #52, ``TestDecimalArithmetic``).
     """
 
     def _frame(self) -> FrameType:
@@ -5442,7 +5443,6 @@ class TestArithmeticIncompatibleDtypes:
                 "nd": Nullable(Date()),
                 "ns": Nullable(Utf8()),
                 "u": Unknown(),
-                "dec": Decimal(10, 2),
             }
         )
 
@@ -5600,11 +5600,6 @@ class TestArithmeticIncompatibleDtypes:
         assert analyzer.errors == []
         assert analyzer.var_types["out"].columns["r"].dtype == Utf8()
 
-    def test_decimal_operand_is_silent(self):
-        """Decimal is outside the fully-understood set — no PLY009."""
-        analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('dec') + pl.col('i'))")
-        assert analyzer.errors == []
-
     def test_list_operand_is_silent(self):
         frame = FrameType({"xs": ListT(Int64()), "i": Int64()})
         analyzer = _run_body(frame, "out = df.select(r=pl.col('xs') + pl.col('i'))")
@@ -5619,6 +5614,248 @@ class TestArithmeticIncompatibleDtypes:
         analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('s') + None)")
         assert analyzer.errors == []
         assert analyzer.var_types["out"].columns["r"].dtype == Nullable(Utf8())
+
+
+class TestDecimalArithmetic:
+    """Issue #52: Decimal arithmetic propagates polars' precision growth.
+
+    Ground truth probed on polars 1.41.2 by driving Decimal x {Decimal,
+    every int width incl. 128-bit, every float width incl. Float16,
+    Boolean, Utf8, Null literal, Date/Datetime/Time/Duration,
+    Categorical/Enum/List} through ``df.select`` with all seven
+    operators, in both operand orders. Eager results and
+    ``LazyFrame.collect()`` agree on every cell; the *lazy*
+    ``collect_schema()`` reports a stale (pre-growth) precision for
+    Decimal x integer and Decimal x Null cells — polypolarism claims the
+    materialized dtype.
+
+    ``+ - * /``  Decimal x Decimal -> Decimal(38, max(scales)) — the
+                 precision saturates to 38 for ANY input precisions,
+                 ``*`` does NOT add scales and ``/`` stays Decimal;
+                 Decimal x int -> Decimal(38, dec.scale) for every
+                 signed/unsigned width, either order (int literals
+                 behave like Int64 columns);
+                 Decimal x Null literal -> all-null Decimal(38, scale).
+    ``// % **``  raise InvalidOperationError for Decimal x
+                 {Decimal, int, Null} -> PLY009.
+    x float      -> Float64 for every operator except ``**`` (error),
+                 both widths, either order.
+    x Boolean    asymmetric: every cell errors (SchemaError "failed to
+                 determine supertype") except ``Boolean / Decimal``
+                 -> Float64.
+    x Utf8       ``+`` stringifies the Decimal and concatenates -> Utf8;
+                 every other operator errors.
+    x temporal / Categorical / Enum / List: every operator errors in
+                 both orders -> PLY009.
+    Unprobed partners (Unknown, Struct, Binary, unresolved) keep the
+    silent fallback.
+    """
+
+    def _frame(self) -> FrameType:
+        return FrameType(
+            {
+                "d": Decimal(10, 2),
+                "d2": Decimal(10, 2),
+                "d4": Decimal(12, 4),
+                "d38": Decimal(38, 2),
+                "i": Int64(),
+                "i8": Int8(),
+                "u64": UInt64(),
+                "f": Float64(),
+                "f32": Float32(),
+                "b": Boolean(),
+                "s": Utf8(),
+                "dt": Date(),
+                "tm": Time(),
+                "du": Duration(),
+                "nd": Nullable(Decimal(10, 2)),
+                "ni": Nullable(Int64()),
+                "u": Unknown(),
+            }
+        )
+
+    # -- allowed combinations: probed result dtypes ----------------------------
+
+    @pytest.mark.parametrize(
+        ("expr", "expected"),
+        [
+            # Decimal x Decimal: precision saturates to 38, scale is the max
+            ("pl.col('d') + pl.col('d2')", Decimal(38, 2)),
+            ("pl.col('d') - pl.col('d2')", Decimal(38, 2)),
+            ("pl.col('d') * pl.col('d2')", Decimal(38, 2)),
+            ("pl.col('d') / pl.col('d2')", Decimal(38, 2)),
+            # mixed scales: max(ls, rs) in either order, every operator
+            ("pl.col('d') + pl.col('d4')", Decimal(38, 4)),
+            ("pl.col('d4') - pl.col('d')", Decimal(38, 4)),
+            ("pl.col('d') * pl.col('d4')", Decimal(38, 4)),
+            ("pl.col('d4') / pl.col('d')", Decimal(38, 4)),
+            # already-saturated precision stays put
+            ("pl.col('d38') + pl.col('d2')", Decimal(38, 2)),
+            ("pl.col('d38') * pl.col('d38')", Decimal(38, 2)),
+            # Decimal x int: precision widens to 38, the Decimal's scale kept
+            ("pl.col('d') + pl.col('i')", Decimal(38, 2)),
+            ("pl.col('i') + pl.col('d')", Decimal(38, 2)),
+            ("pl.col('d') - pl.col('i8')", Decimal(38, 2)),
+            ("pl.col('d') * pl.col('u64')", Decimal(38, 2)),
+            ("pl.col('d') / pl.col('i')", Decimal(38, 2)),
+            ("pl.col('i') / pl.col('d')", Decimal(38, 2)),
+            ("pl.col('d4') * pl.col('i')", Decimal(38, 4)),
+            # int literals behave like Int64 columns (probed)
+            ("pl.col('d') + 1", Decimal(38, 2)),
+            ("1 + pl.col('d')", Decimal(38, 2)),
+            ("pl.col('d') * 2", Decimal(38, 2)),
+            ("pl.col('d') / 2", Decimal(38, 2)),
+            # Decimal x float -> Float64 (every operator but **)
+            ("pl.col('d') + pl.col('f')", Float64()),
+            ("pl.col('f') - pl.col('d')", Float64()),
+            ("pl.col('d') * pl.col('f32')", Float64()),
+            ("pl.col('d') / pl.col('f')", Float64()),
+            ("pl.col('d') // pl.col('f')", Float64()),
+            ("pl.col('d') % pl.col('f')", Float64()),
+            ("pl.col('d') + 2.5", Float64()),
+            # the one asymmetric Boolean cell that works
+            ("pl.col('b') / pl.col('d')", Float64()),
+            # string concat stringifies the Decimal
+            ("pl.col('d') + pl.col('s')", Utf8()),
+            ("pl.col('s') + pl.col('d')", Utf8()),
+            # Null literal: all-null output, dtype still widens (probed)
+            ("pl.col('d') + None", Nullable(Decimal(38, 2))),
+            ("pl.col('d') - None", Nullable(Decimal(38, 2))),
+            ("pl.col('d') * None", Nullable(Decimal(38, 2))),
+            ("pl.col('d') / None", Nullable(Decimal(38, 2))),
+            ("pl.col('d4') + None", Nullable(Decimal(38, 4))),
+        ],
+    )
+    def test_allowed_combination_infers_dtype(self, expr: str, expected) -> None:
+        analyzer = _run_body(self._frame(), f"out = df.select(r={expr})")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["r"].dtype == expected
+
+    # -- known-invalid combinations -> PLY009 ----------------------------------
+
+    @pytest.mark.parametrize(
+        "expr",
+        [
+            # Decimal x Decimal: // % ** raise InvalidOperationError
+            "pl.col('d') // pl.col('d2')",
+            "pl.col('d') % pl.col('d2')",
+            "pl.col('d') ** pl.col('d2')",
+            "pl.col('d') // pl.col('d4')",
+            # Decimal x int: // % ** error in either order
+            "pl.col('d') // pl.col('i')",
+            "pl.col('i') // pl.col('d')",
+            "pl.col('d') % pl.col('i')",
+            "pl.col('i') % pl.col('d')",
+            "pl.col('d') ** pl.col('i')",
+            "pl.col('i') ** pl.col('d')",
+            "pl.col('d') // 2",
+            "pl.col('d') % 2",
+            "pl.col('d') ** 2",
+            # ** is the only float partner cell that errors
+            "pl.col('d') ** pl.col('f')",
+            "pl.col('f') ** pl.col('d')",
+            # Boolean: everything except bool / Decimal
+            "pl.col('d') + pl.col('b')",
+            "pl.col('b') + pl.col('d')",
+            "pl.col('d') - pl.col('b')",
+            "pl.col('b') * pl.col('d')",
+            "pl.col('d') / pl.col('b')",
+            "pl.col('b') // pl.col('d')",
+            "pl.col('b') % pl.col('d')",
+            "pl.col('b') ** pl.col('d')",
+            "pl.col('d') ** pl.col('b')",
+            # string: only + concatenates
+            "pl.col('d') - pl.col('s')",
+            "pl.col('s') * pl.col('d')",
+            "pl.col('d') / pl.col('s')",
+            "pl.col('s') // pl.col('d')",
+            "pl.col('d') % pl.col('s')",
+            "pl.col('s') ** pl.col('d')",
+            # temporals: every operator, both orders
+            "pl.col('d') + pl.col('dt')",
+            "pl.col('dt') - pl.col('d')",
+            "pl.col('d') * pl.col('du')",
+            "pl.col('du') / pl.col('d')",
+            "pl.col('d') - pl.col('tm')",
+            "pl.col('tm') + pl.col('d')",
+            # Null literal partner only supports + - * /
+            "pl.col('d') // None",
+            "pl.col('d') % None",
+            "pl.col('d') ** None",
+        ],
+    )
+    def test_invalid_combination_flags_ply009(self, expr: str) -> None:
+        analyzer = _run_body(self._frame(), f"out = df.select(r={expr})")
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY009" in analyzer.errors[0]
+        # The error is the signal — the output registers as Unknown.
+        assert analyzer.var_types["out"].columns["r"].dtype == Unknown()
+
+    @pytest.mark.parametrize(
+        "expr",
+        [
+            "pl.col('d') + pl.col('c')",
+            "pl.col('c') - pl.col('d')",
+            "pl.col('d') * pl.col('e')",
+            "pl.col('e') / pl.col('d')",
+            "pl.col('d') + pl.col('xs')",
+            "pl.col('xs') % pl.col('d')",
+        ],
+    )
+    def test_categorical_enum_list_partner_flags_ply009(self, expr: str) -> None:
+        """Probed: every Decimal x {Categorical, Enum, List} cell errors."""
+        frame = FrameType(
+            {
+                "d": Decimal(10, 2),
+                "c": Categorical(),
+                "e": Enum(),
+                "xs": ListT(Int64()),
+            }
+        )
+        analyzer = _run_body(frame, f"out = df.select(r={expr})")
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY009" in analyzer.errors[0]
+
+    def test_error_message_names_dtypes_and_op(self):
+        analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('d') // pl.col('d2'))")
+        assert "Decimal(10, 2) // Decimal(10, 2)" in analyzer.errors[0]
+
+    # -- nullability propagation ----------------------------------------------
+
+    def test_nullable_decimal_plus_int_is_nullable_decimal(self):
+        analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('nd') + pl.col('i'))")
+        assert analyzer.errors == []
+        assert analyzer.var_types["out"].columns["r"].dtype == Nullable(Decimal(38, 2))
+
+    def test_decimal_times_nullable_int_is_nullable_decimal(self):
+        analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('d') * pl.col('ni'))")
+        assert analyzer.errors == []
+        assert analyzer.var_types["out"].columns["r"].dtype == Nullable(Decimal(38, 2))
+
+    def test_nullable_decimal_div_float_is_nullable_float64(self):
+        analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('nd') / pl.col('f'))")
+        assert analyzer.errors == []
+        assert analyzer.var_types["out"].columns["r"].dtype == Nullable(Float64())
+
+    def test_invalid_pair_detected_under_nullable_wrapper(self):
+        analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('nd') ** pl.col('i'))")
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY009" in analyzer.errors[0]
+
+    # -- silent fallback for unprobed partners ---------------------------------
+
+    def test_unknown_partner_is_silent(self):
+        analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('d') + pl.col('u'))")
+        assert analyzer.errors == []
+
+    def test_struct_partner_is_silent(self):
+        frame = FrameType({"d": Decimal(10, 2), "st": Struct({"a": Int64()})})
+        analyzer = _run_body(frame, "out = df.select(r=pl.col('d') + pl.col('st'))")
+        assert analyzer.errors == []
+
+    def test_unresolved_partner_is_silent(self):
+        analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('d') + helper())")
+        assert analyzer.errors == []
 
 
 class TestNullabilityPropagationBoolean:
