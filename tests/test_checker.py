@@ -308,6 +308,50 @@ class TestCheckSource:
         assert results[0].passed is True
 
 
+JOIN_SUFFIX_SOURCE_TEMPLATE = """
+    import polars as pl
+    import pandera.polars as pa
+    from pandera.typing.polars import DataFrame
+
+    class A(pa.DataFrameModel):
+        g: int
+        v: int
+
+    class B(pa.DataFrameModel):
+        g: int
+        v: pl.Float64
+
+    class Out(pa.DataFrameModel):
+        g: int
+        v: int
+        {overlap_column}: pl.Float64
+
+    def f(a: DataFrame[A], b: DataFrame[B]) -> DataFrame[Out]:
+        return a.join(b, on="g", suffix="_new")
+"""
+
+
+class TestCheckJoinSuffix:
+    """#11: declared schema must follow the actual ``suffix=`` argument."""
+
+    def test_declared_v_new_passes_with_custom_suffix(self):
+        source = textwrap.dedent(JOIN_SUFFIX_SOURCE_TEMPLATE.format(overlap_column="v_new"))
+
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is True, results[0].errors
+
+    def test_declared_v_right_fails_with_custom_suffix(self):
+        source = textwrap.dedent(JOIN_SUFFIX_SOURCE_TEMPLATE.format(overlap_column="v_right"))
+
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is False
+        assert any(isinstance(e, MissingColumn) for e in results[0].errors)
+
+
 class TestCheckResult:
     """Test CheckResult data class."""
 

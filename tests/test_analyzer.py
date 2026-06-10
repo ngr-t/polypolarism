@@ -2967,3 +2967,440 @@ class TestSourceLocation:
         assert results[1].name == "second"
         # Second function comes after the first
         assert results[1].lineno > results[0].lineno
+
+
+class TestJoinSuffix:
+    """#11: ``join(..., suffix=...)`` must rename overlapping right columns."""
+
+    def test_join_custom_suffix_renames_overlap(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class A(pa.DataFrameModel):
+                g: int
+                v: int
+
+            class B(pa.DataFrameModel):
+                g: int
+                v: pl.Float64
+
+            def f(a: DataFrame[A], b: DataFrame[B]):
+                return a.join(b, on="g", suffix="_new")
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["v_new"].dtype == Float64()
+        assert "v_right" not in ft.columns
+
+    def test_join_default_suffix_still_right(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class A(pa.DataFrameModel):
+                g: int
+                v: int
+
+            class B(pa.DataFrameModel):
+                g: int
+                v: pl.Float64
+
+            def f(a: DataFrame[A], b: DataFrame[B]):
+                return a.join(b, on="g")
+        """
+        )
+        results = analyze_source(source)
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["v_right"].dtype == Float64()
+
+    def test_join_asof_custom_suffix(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class L(pa.DataFrameModel):
+                ts: pl.Datetime
+                v: int
+
+            class R(pa.DataFrameModel):
+                ts: pl.Datetime
+                v: pl.Float64
+
+            def f(left: DataFrame[L], right: DataFrame[R]):
+                return left.join_asof(right, on="ts", suffix="_r")
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        # join_asof is left-join shaped: right conflict gets the suffix and
+        # becomes nullable.
+        assert ft.columns["v_r"].dtype == Nullable(Float64())
+        assert "v_right" not in ft.columns
+
+
+class TestJoinMultiKey:
+    """``join(on=["x", "y"])`` resolves instead of raising a false PLY010."""
+
+    def test_join_on_list_literal(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class A(pa.DataFrameModel):
+                x: int
+                y: str
+                a: pl.Float64
+
+            class B(pa.DataFrameModel):
+                x: int
+                y: str
+                b: pl.Float64
+
+            def f(a: DataFrame[A], b: DataFrame[B]):
+                return a.join(b, on=["x", "y"], how="inner")
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["x"].dtype == Int64()
+        assert ft.columns["y"].dtype == Utf8()
+        assert ft.columns["a"].dtype == Float64()
+        assert ft.columns["b"].dtype == Float64()
+        assert "x_right" not in ft.columns
+        assert "y_right" not in ft.columns
+
+
+class TestConstantResolution:
+    """#12: column-spec args passed via simple constants must resolve."""
+
+    def test_join_on_module_constant(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            KEY = "id"
+
+            class A(pa.DataFrameModel):
+                id: int
+                a: pl.Float64
+
+            class B(pa.DataFrameModel):
+                id: int
+                b: pl.Float64
+
+            def f(a: DataFrame[A], b: DataFrame[B]):
+                return a.join(b, on=KEY, how="inner")
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["id"].dtype == Int64()
+        assert ft.columns["a"].dtype == Float64()
+        assert ft.columns["b"].dtype == Float64()
+
+    def test_join_on_module_list_constant(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            ON_COLS = ["x", "y"]
+
+            class A(pa.DataFrameModel):
+                x: int
+                y: str
+                a: pl.Float64
+
+            class B(pa.DataFrameModel):
+                x: int
+                y: str
+                b: pl.Float64
+
+            def f(a: DataFrame[A], b: DataFrame[B]):
+                return a.join(b, on=ON_COLS, how="inner")
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["a"].dtype == Float64()
+        assert ft.columns["b"].dtype == Float64()
+
+    def test_join_suffix_via_module_constant(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            SUFFIX = "_b"
+
+            class A(pa.DataFrameModel):
+                g: int
+                v: int
+
+            class B(pa.DataFrameModel):
+                g: int
+                v: pl.Float64
+
+            def f(a: DataFrame[A], b: DataFrame[B]):
+                return a.join(b, on="g", suffix=SUFFIX)
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["v_b"].dtype == Float64()
+
+    def test_local_constant_resolves(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class A(pa.DataFrameModel):
+                id: int
+                a: pl.Float64
+
+            class B(pa.DataFrameModel):
+                id: int
+                b: pl.Float64
+
+            def f(a: DataFrame[A], b: DataFrame[B]):
+                key = "id"
+                return a.join(b, on=key, how="inner")
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["b"].dtype == Float64()
+
+    def test_local_constant_shadows_module_constant(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            KEY = "nope"
+
+            class A(pa.DataFrameModel):
+                id: int
+                a: pl.Float64
+
+            class B(pa.DataFrameModel):
+                id: int
+                b: pl.Float64
+
+            def f(a: DataFrame[A], b: DataFrame[B]):
+                KEY = "id"
+                return a.join(b, on=KEY, how="inner")
+        """
+        )
+        results = analyze_source(source)
+        # The local "id" shadows the bogus module-level "nope" — no errors.
+        assert results[0].has_errors is False, results[0].errors
+
+    def test_reassignment_invalidates_local_constant(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class A(pa.DataFrameModel):
+                id: int
+                a: pl.Float64
+
+            class B(pa.DataFrameModel):
+                id: int
+                b: pl.Float64
+
+            def compute_key():
+                return "id"
+
+            def f(a: DataFrame[A], b: DataFrame[B]):
+                key = "id"
+                key = compute_key()
+                return a.join(b, on=key, how="inner")
+        """
+        )
+        results = analyze_source(source)
+        # ``key`` is no longer a known constant; the join keys are
+        # unresolvable, so the original PLY010 fires.
+        assert any("PLY010" in e for e in results[0].errors), results[0].errors
+
+    def test_unpivot_on_module_constant(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            ON_COLS = ["a", "b"]
+
+            class Wide(pa.DataFrameModel):
+                id: int
+                a: pl.Float64
+                b: pl.Float64
+
+            def f(wide: DataFrame[Wide]):
+                return wide.unpivot(index=["id"], on=ON_COLS)
+        """
+        )
+        results = analyze_source(source)
+        assert not any("PLY022" in e for e in results[0].errors), results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["variable"].dtype == Utf8()
+        assert ft.columns["value"].dtype == Float64()
+
+    def test_group_by_key_via_module_constant(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            GROUP_KEY = "g"
+
+            class S(pa.DataFrameModel):
+                g: str
+                v: pl.Float64
+
+            def f(df: DataFrame[S]):
+                return df.group_by(GROUP_KEY).agg(pl.col("v").sum().alias("total"))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["g"].dtype == Utf8()
+        assert ft.columns["total"].dtype == Float64()
+
+    def test_drop_targets_via_constant(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            DROP_COLS = ["b"]
+
+            class S(pa.DataFrameModel):
+                a: int
+                b: str
+
+            def f(df: DataFrame[S]):
+                return df.drop(DROP_COLS)
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert "b" not in ft.columns
+        assert ft.columns["a"].dtype == Int64()
+
+    def test_explode_target_via_constant(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            from typing import Annotated
+
+            LIST_COL = "tags"
+
+            class S(pa.DataFrameModel):
+                id: int
+                tags: Annotated[pl.List, pl.Utf8()]
+
+            def f(df: DataFrame[S]):
+                return df.explode(LIST_COL)
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["tags"].dtype == Utf8()
+
+    def test_drop_nulls_subset_via_constant(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            SUBSET = ["v"]
+
+            class S(pa.DataFrameModel):
+                k: str
+                v: pl.Float64 = pa.Field(nullable=True)
+
+            def f(df: DataFrame[S]):
+                return df.drop_nulls(subset=SUBSET)
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["v"].dtype == Float64()
+
+    def test_partition_by_keys_via_constant(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            PART_KEY = "k"
+
+            class S(pa.DataFrameModel):
+                k: str
+                v: pl.Float64
+
+            def f(df: DataFrame[S]):
+                parts = df.partition_by(PART_KEY, include_key=False)
+                first = parts[0]
+                return first.select(pl.col("k"))
+        """
+        )
+        results = analyze_source(source)
+        # k was excluded from each partition; selecting it raises PLY001.
+        assert any("PLY001" in e and "'k'" in e for e in results[0].errors)
+
+    def test_annotated_local_constant_resolves(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class A(pa.DataFrameModel):
+                id: int
+                a: pl.Float64
+
+            class B(pa.DataFrameModel):
+                id: int
+                b: pl.Float64
+
+            def f(a: DataFrame[A], b: DataFrame[B]):
+                key: str = "id"
+                return a.join(b, on=key, how="inner")
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["b"].dtype == Float64()
+
+    def test_constant_resolution_in_untyped_helper(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            KEY = "id"
+
+            class A(pa.DataFrameModel):
+                id: int
+                a: pl.Float64
+
+            class B(pa.DataFrameModel):
+                id: int
+                b: pl.Float64
+
+            def helper(a, b):
+                return a.join(b, on=KEY, how="inner")
+
+            def f(a: DataFrame[A], b: DataFrame[B]):
+                return helper(a, b)
+        """
+        )
+        results = analyze_source(source)
+        f_result = next(r for r in results if r.name == "f")
+        assert f_result.has_errors is False, f_result.errors
+        ft = f_result.inferred_return_type
+        assert ft is not None
+        assert ft.columns["a"].dtype == Float64()
+        assert ft.columns["b"].dtype == Float64()
