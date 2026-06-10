@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import importlib.metadata
 from pathlib import Path
 
 import pytest
 
+from polypolarism import version_check
 from polypolarism.version_check import (
     PANDERA_FLOOR,
     POLARS_FLOOR,
@@ -17,6 +19,24 @@ from polypolarism.version_check import (
     detect_versions,
     find_project_root,
 )
+
+
+@pytest.fixture
+def no_installed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pretend neither polars nor pandera is installed in the running
+    environment, so tests exercise the lockfile / dependency-floor paths
+    regardless of what the dev environment actually has installed."""
+    monkeypatch.setattr(version_check, "_installed_version", lambda package: None)
+
+
+def _patch_installed(monkeypatch: pytest.MonkeyPatch, versions: dict[str, str]) -> None:
+    """Make the installed-environment lookup report exactly ``versions``."""
+
+    def fake(package: str) -> Version | None:
+        ver = versions.get(package)
+        return Version.parse(ver) if ver is not None else None
+
+    monkeypatch.setattr(version_check, "_installed_version", fake)
 
 
 class TestVersionParse:
@@ -75,6 +95,7 @@ class TestDetectFromCli:
         assert info.polars.source == "cli"
         assert info.polars.exact is True
 
+    @pytest.mark.usefixtures("no_installed")
     def test_cli_override_invalid_string_ignored(self, tmp_path: Path):
         info = detect_versions(tmp_path, polars_override="garbage")
         assert info.polars is None
@@ -160,6 +181,7 @@ version = "1.40.1"
         assert info.polars.version == Version(1, 10, 0)
 
 
+@pytest.mark.usefixtures("no_installed")
 class TestDetectFromDependencies:
     def test_project_dependencies_floor(self, tmp_path: Path):
         (tmp_path / "pyproject.toml").write_text(
@@ -230,6 +252,7 @@ dependencies = ["polars>=1.20.0,<1.40.0"]
         assert info.polars.version == Version(1, 20, 0)
 
 
+@pytest.mark.usefixtures("no_installed")
 class TestDetectMissingFiles:
     def test_no_project_root(self):
         info = detect_versions(None)
@@ -240,6 +263,183 @@ class TestDetectMissingFiles:
         (tmp_path / "pyproject.toml").write_text("not = valid = toml")
         info = detect_versions(tmp_path)
         assert info.polars is None
+
+
+class TestDetectFromPoetryLock:
+    def test_poetry_lock_exact_version(self, tmp_path: Path):
+        (tmp_path / "pyproject.toml").write_text("")
+        (tmp_path / "poetry.lock").write_text(
+            """
+[[package]]
+name = "polars"
+version = "1.40.1"
+
+[[package]]
+name = "pandera"
+version = "0.21.0"
+"""
+        )
+        info = detect_versions(tmp_path)
+        assert info.polars is not None
+        assert info.polars.version == Version(1, 40, 1)
+        assert info.polars.source == "poetry.lock"
+        assert info.polars.exact is True
+        assert info.pandera is not None
+        assert info.pandera.version == Version(0, 21, 0)
+        assert info.pandera.source == "poetry.lock"
+
+    def test_uv_lock_beats_poetry_lock(self, tmp_path: Path):
+        (tmp_path / "pyproject.toml").write_text("")
+        (tmp_path / "uv.lock").write_text(
+            """
+[[package]]
+name = "polars"
+version = "1.40.0"
+"""
+        )
+        (tmp_path / "poetry.lock").write_text(
+            """
+[[package]]
+name = "polars"
+version = "1.10.0"
+"""
+        )
+        info = detect_versions(tmp_path)
+        assert info.polars is not None
+        assert info.polars.version == Version(1, 40, 0)
+        assert info.polars.source == "uv.lock"
+
+    @pytest.mark.usefixtures("no_installed")
+    def test_poetry_lock_beats_dependency_floor(self, tmp_path: Path):
+        (tmp_path / "pyproject.toml").write_text(
+            """
+[project]
+dependencies = ["polars>=1.0.0"]
+"""
+        )
+        (tmp_path / "poetry.lock").write_text(
+            """
+[[package]]
+name = "polars"
+version = "1.40.1"
+"""
+        )
+        info = detect_versions(tmp_path)
+        assert info.polars is not None
+        assert info.polars.version == Version(1, 40, 1)
+        assert info.polars.source == "poetry.lock"
+
+    @pytest.mark.usefixtures("no_installed")
+    def test_malformed_poetry_lock_ignored(self, tmp_path: Path):
+        (tmp_path / "pyproject.toml").write_text("")
+        (tmp_path / "poetry.lock").write_text("not = valid = toml")
+        info = detect_versions(tmp_path)
+        assert info.polars is None
+
+
+class TestDetectFromInstalledEnvironment:
+    def test_installed_env_detected(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        (tmp_path / "pyproject.toml").write_text("")
+        _patch_installed(monkeypatch, {"polars": "1.41.2", "pandera": "0.21.0"})
+        info = detect_versions(tmp_path)
+        assert info.polars == DetectedVersion(
+            "polars", Version(1, 41, 2), "installed environment", exact=True
+        )
+        assert info.pandera == DetectedVersion(
+            "pandera", Version(0, 21, 0), "installed environment", exact=True
+        )
+
+    def test_no_project_root_uses_installed_env(self, monkeypatch: pytest.MonkeyPatch):
+        _patch_installed(monkeypatch, {"polars": "1.41.2"})
+        info = detect_versions(None)
+        assert info.polars is not None
+        assert info.polars.version == Version(1, 41, 2)
+        assert info.polars.source == "installed environment"
+        assert info.pandera is None
+
+    def test_cli_override_beats_installed_env(self, monkeypatch: pytest.MonkeyPatch):
+        _patch_installed(monkeypatch, {"polars": "1.41.2"})
+        info = detect_versions(None, polars_override="1.0.0")
+        assert info.polars is not None
+        assert info.polars.version == Version(1, 0, 0)
+        assert info.polars.source == "cli"
+
+    def test_uv_lock_beats_installed_env(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        (tmp_path / "pyproject.toml").write_text("")
+        (tmp_path / "uv.lock").write_text(
+            """
+[[package]]
+name = "polars"
+version = "1.40.0"
+"""
+        )
+        _patch_installed(monkeypatch, {"polars": "1.41.2"})
+        info = detect_versions(tmp_path)
+        assert info.polars is not None
+        assert info.polars.version == Version(1, 40, 0)
+        assert info.polars.source == "uv.lock"
+
+    def test_poetry_lock_beats_installed_env(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        (tmp_path / "pyproject.toml").write_text("")
+        (tmp_path / "poetry.lock").write_text(
+            """
+[[package]]
+name = "polars"
+version = "1.40.0"
+"""
+        )
+        _patch_installed(monkeypatch, {"polars": "1.41.2"})
+        info = detect_versions(tmp_path)
+        assert info.polars is not None
+        assert info.polars.version == Version(1, 40, 0)
+        assert info.polars.source == "poetry.lock"
+
+    def test_installed_env_beats_dependency_floor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        (tmp_path / "pyproject.toml").write_text(
+            """
+[project]
+dependencies = ["polars>=1.0.0"]
+"""
+        )
+        _patch_installed(monkeypatch, {"polars": "1.41.2"})
+        info = detect_versions(tmp_path)
+        assert info.polars is not None
+        assert info.polars.version == Version(1, 41, 2)
+        assert info.polars.source == "installed environment"
+        assert info.polars.exact is True
+
+    def test_falls_back_to_floor_when_not_installed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        (tmp_path / "pyproject.toml").write_text(
+            """
+[project]
+dependencies = ["polars>=1.32.0"]
+"""
+        )
+        _patch_installed(monkeypatch, {})
+        info = detect_versions(tmp_path)
+        assert info.polars is not None
+        assert info.polars.version == Version(1, 32, 0)
+        assert info.polars.source == "pyproject.toml dependencies"
+        assert info.polars.exact is False
+
+
+class TestInstalledVersionLookup:
+    """The real importlib.metadata-backed lookup."""
+
+    def test_not_installed_returns_none(self):
+        assert version_check._installed_version("definitely-not-a-real-package-xyz") is None
+
+    def test_installed_package_parses(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr(importlib.metadata, "version", lambda name: "1.41.2")
+        assert version_check._installed_version("polars") == Version(1, 41, 2)
+
+    def test_unparseable_version_returns_none(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr(importlib.metadata, "version", lambda name: "garbage")
+        assert version_check._installed_version("polars") is None
 
 
 class TestCheckVersions:
@@ -288,6 +488,54 @@ class TestCheckVersions:
         assert {w.package for w in warnings} == {"polars", "pandera"}
 
 
+class TestNoWarningFromInexactDetection:
+    """A ``>=``-floor extracted from dependency specs is not evidence the
+    project actually runs that version, so it must never trigger PLW010.
+    Exact sources (lockfiles, installed environment, CLI, config) still do."""
+
+    def test_polars_floor_below_floor_is_silent(self):
+        info = VersionInfo(
+            polars=DetectedVersion(
+                "polars", Version(1, 0, 0), "pyproject.toml dependencies", exact=False
+            )
+        )
+        assert check_versions(info) == []
+
+    def test_pandera_floor_below_floor_is_silent(self):
+        info = VersionInfo(
+            pandera=DetectedVersion(
+                "pandera", Version(0, 17, 0), "pyproject.toml dependency-groups", exact=False
+            )
+        )
+        assert check_versions(info) == []
+
+    def test_exact_below_floor_still_warns(self):
+        info = VersionInfo(
+            polars=DetectedVersion("polars", Version(1, 0, 0), "uv.lock", exact=True)
+        )
+        assert len(check_versions(info)) == 1
+
+    def test_installed_environment_below_floor_warns(self):
+        info = VersionInfo(
+            polars=DetectedVersion("polars", Version(1, 10, 0), "installed environment", exact=True)
+        )
+        warnings = check_versions(info)
+        assert len(warnings) == 1
+        assert "installed environment" in warnings[0].message
+
+    def test_mixed_only_exact_side_warns(self):
+        info = VersionInfo(
+            polars=DetectedVersion(
+                "polars", Version(1, 0, 0), "pyproject.toml dependencies", exact=False
+            ),
+            pandera=DetectedVersion("pandera", Version(0, 17, 0), "uv.lock", exact=True),
+        )
+        warnings = check_versions(info)
+        assert len(warnings) == 1
+        assert warnings[0].package == "pandera"
+
+
+@pytest.mark.usefixtures("no_installed")
 class TestCliIntegration:
     def test_no_version_check_flag_suppresses(self, tmp_path: Path, capsys, monkeypatch):
         from polypolarism.cli import main
@@ -305,7 +553,10 @@ dependencies = ["polars>=0.19.0"]
         assert "PLW010" not in captured.err
         assert rc == 0
 
-    def test_below_floor_emits_warning(self, tmp_path: Path, capsys):
+    def test_dependency_floor_alone_does_not_warn(self, tmp_path: Path, capsys):
+        """A ">=" floor in pyproject dependencies is the only source — even
+        though it is below the supported window, no PLW010 fires: the floor
+        of a range is not the version in use (issue #13)."""
         from polypolarism.cli import main
 
         py = tmp_path / "x.py"
@@ -318,8 +569,39 @@ dependencies = ["polars>=0.19.0"]
         )
         main([str(py), "--no-color"])
         captured = capsys.readouterr()
+        assert "PLW010" not in captured.err
+
+    def test_old_poetry_lock_emits_warning(self, tmp_path: Path, capsys):
+        from polypolarism.cli import main
+
+        py = tmp_path / "x.py"
+        py.write_text("")
+        (tmp_path / "pyproject.toml").write_text("")
+        (tmp_path / "poetry.lock").write_text(
+            """
+[[package]]
+name = "polars"
+version = "1.10.0"
+"""
+        )
+        main([str(py), "--no-color"])
+        captured = capsys.readouterr()
         assert "PLW010" in captured.err
-        assert "polars" in captured.err.lower()
+        assert "poetry.lock" in captured.err
+
+    def test_old_installed_env_emits_warning(
+        self, tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
+    ):
+        from polypolarism.cli import main
+
+        py = tmp_path / "x.py"
+        py.write_text("")
+        (tmp_path / "pyproject.toml").write_text("")
+        _patch_installed(monkeypatch, {"polars": "1.10.0"})
+        main([str(py), "--no-color"])
+        captured = capsys.readouterr()
+        assert "PLW010" in captured.err
+        assert "installed environment" in captured.err
 
     def test_cli_override_silences_warning(self, tmp_path: Path, capsys):
         from polypolarism.cli import main
@@ -379,6 +661,7 @@ dependencies = ["polars>=0.19.0"]
         ("1.41.0", False),
     ],
 )
+@pytest.mark.usefixtures("no_installed")
 class TestPolarsVersionLandmarks:
     def test_via_cli_override(self, version_str: str, should_warn: bool, tmp_path: Path, capsys):
         from polypolarism.cli import main
@@ -504,6 +787,7 @@ class TestWarningMessageContent:
         assert "0.17.0" in warnings[0].message
 
 
+@pytest.mark.usefixtures("no_installed")
 class TestUvLockExactPriority:
     """When uv.lock pins a specific version, that wins over the floor in
     pyproject.toml dependencies — even when the floor would have produced

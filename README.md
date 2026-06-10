@@ -154,13 +154,18 @@ window is narrow and explicit:
   legacy `SchemaModel` are accepted indefinitely; the difference is
   one entry in a name set and costs nothing.
 
-When the version detected from your project's `pyproject.toml` /
-`uv.lock` falls below the supported floor, polypolarism emits a
-`[PLW010]` warning to stderr — it doesn't fail the run, just tells you
-that type-check accuracy is best-effort below the window. Use
-`--polars-version <ver>` (or the `[tool.polypolarism]` config below) to
-opt back in if you've audited that your code stays within the
-analyzer's known surface.
+When the version detected from your project's lockfile (`uv.lock` /
+`poetry.lock`) or the installed environment falls below the supported
+floor, polypolarism emits a `[PLW010]` warning to stderr — it doesn't
+fail the run, just tells you that type-check accuracy is best-effort
+below the window. Use `--polars-version <ver>` (or the
+`[tool.polypolarism]` config below) to opt back in if you've audited
+that your code stays within the analyzer's known surface.
+
+Only exact sources can trigger the warning. When the version is merely
+inferred from a `>=` floor in `[project.dependencies]`, no PLW010 is
+emitted — `polars>=1.0` says what the project tolerates, not what it
+runs.
 
 ### Project-level configuration
 
@@ -177,7 +182,11 @@ Detection priority (first match wins per package):
 1. `--polars-version` / `--pandera-version` CLI flag
 2. `[tool.polypolarism]` section in the project's `pyproject.toml`
 3. The project's `uv.lock` (exact pinned version)
-4. `[project.dependencies]` / `[dependency-groups.*]` floor
+4. The project's `poetry.lock` (exact pinned version)
+5. The version installed in the running environment
+   (`importlib.metadata`)
+6. `[project.dependencies]` / `[dependency-groups.*]` floor
+   (never triggers PLW010 — a `>=` floor is not the version in use)
 
 For more on the policy, see
 [`docs/adr/0001-polars-pandera-version-support.md`](docs/adr/0001-polars-pandera-version-support.md).
