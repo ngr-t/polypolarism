@@ -1,0 +1,2 @@
+add: FAIL
+  error: Column 's' has type Decimal(38, 2), but declared type is Decimal(10, 2)
