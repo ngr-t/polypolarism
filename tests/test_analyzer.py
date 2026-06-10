@@ -2259,6 +2259,227 @@ class TestExprListArgs:
         assert any("PLY001" in e and "nope" in e for e in results[0].errors)
 
 
+class TestConcatListAndHorizontal:
+    """Issue #16 (continued): pl.concat_list and the horizontal helpers
+    (sum/min/max/mean_horizontal) infer through list-literal and varargs args."""
+
+    def test_concat_list_returns_list_dtype(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                a: int
+                b: int
+
+            def f(data: DataFrame[S]):
+                return data.select(xs=pl.concat_list([pl.col("a"), pl.col("b")]))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["xs"].dtype == ListT(Int64())
+
+    def test_concat_list_unifies_numeric(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                a: int
+                b: pl.Float64
+
+            def f(data: DataFrame[S]):
+                return data.select(xs=pl.concat_list(pl.col("a"), pl.col("b")))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["xs"].dtype == ListT(Float64())
+
+    def test_concat_list_bare_string_names(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                a: int
+                b: int
+
+            def f(data: DataFrame[S]):
+                return data.select(xs=pl.concat_list(["a", "b"]))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["xs"].dtype == ListT(Int64())
+
+    def test_concat_list_unresolvable_elements_is_list_unknown(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                a: int
+
+            def f(data: DataFrame[S]):
+                return data.select(xs=pl.concat_list([pl.col("a").mystery_method()]))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["xs"].dtype == ListT(Unknown())
+
+    @pytest.mark.parametrize("func", ["sum_horizontal", "min_horizontal", "max_horizontal"])
+    def test_horizontal_promotes_int_float(self, func):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + f"""
+            class S(pa.DataFrameModel):
+                a: int
+                b: pl.Float64
+
+            def f(data: DataFrame[S]):
+                return data.select(out=pl.{func}([pl.col("a"), pl.col("b")]))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["out"].dtype == Float64()
+
+    @pytest.mark.parametrize("func", ["sum_horizontal", "min_horizontal", "max_horizontal"])
+    def test_horizontal_same_int_types(self, func):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + f"""
+            class S(pa.DataFrameModel):
+                a: int
+                b: int
+
+            def f(data: DataFrame[S]):
+                return data.select(out=pl.{func}(["a", "b"]))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["out"].dtype == Int64()
+
+    def test_horizontal_all_nullable_wraps_nullable(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                a: int = pa.Field(nullable=True)
+                b: int = pa.Field(nullable=True)
+
+            def f(data: DataFrame[S]):
+                return data.select(out=pl.sum_horizontal([pl.col("a"), pl.col("b")]))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["out"].dtype == Nullable(Int64())
+
+    def test_horizontal_any_non_nullable_strips_nullable(self):
+        # Horizontal ops skip nulls — the result is null only when *every*
+        # input is null, so one non-Nullable operand makes it non-Nullable.
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                a: int = pa.Field(nullable=True)
+                b: int
+
+            def f(data: DataFrame[S]):
+                return data.select(out=pl.sum_horizontal([pl.col("a"), pl.col("b")]))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["out"].dtype == Int64()
+
+    def test_horizontal_non_numeric_is_unknown(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                a: int
+                s: str
+
+            def f(data: DataFrame[S]):
+                return data.select(out=pl.sum_horizontal([pl.col("a"), pl.col("s")]))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["out"].dtype == Unknown()
+
+    def test_mean_horizontal_returns_float64(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                a: int
+                b: int = pa.Field(nullable=True)
+
+            def f(data: DataFrame[S]):
+                return data.select(out=pl.mean_horizontal([pl.col("a"), pl.col("b")]))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["out"].dtype == Float64()
+
+    def test_mean_horizontal_all_nullable(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                a: int = pa.Field(nullable=True)
+                b: int = pa.Field(nullable=True)
+
+            def f(data: DataFrame[S]):
+                return data.select(out=pl.mean_horizontal(["a", "b"]))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["out"].dtype == Nullable(Float64())
+
+    def test_horizontal_missing_column_ply001(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                a: int
+
+            def f(data: DataFrame[S]):
+                return data.select(out=pl.sum_horizontal(["a", "nope"]))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is True
+        assert any("PLY001" in e and "nope" in e for e in results[0].errors)
+
+
 class TestM6Selectors:
     def test_cs_numeric_in_select(self):
         source = textwrap.dedent(

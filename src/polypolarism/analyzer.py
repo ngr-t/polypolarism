@@ -45,8 +45,10 @@ from polypolarism.diagnostics import (
 )
 from polypolarism.expr_infer import (
     ColumnNotFoundError,
+    TypePromotionError,
     TypeUnificationError,
     infer_col,
+    promote_types,
     unify_types,
 )
 from polypolarism.ops.groupby import (
@@ -1005,6 +1007,51 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             if args:
                 first_name = self._extract_col_name(args[0]) or _str_constant(args[0])
             return first_name, unified
+
+        if name == "concat_list":
+            elem_types: list[DataType] = []
+            for arg in _flatten_expr_args(node.args):
+                _, t = self._resolve_expr_or_col_str(arg)
+                if t is not None:
+                    elem_types.append(t)
+            if not elem_types:
+                return None, ListT(Unknown())
+            elem: DataType = elem_types[0]
+            for t in elem_types[1:]:
+                try:
+                    elem = unify_types(elem, t)
+                except TypeUnificationError:
+                    elem = Unknown()
+                    break
+            return None, ListT(elem)
+
+        if name in ("sum_horizontal", "min_horizontal", "max_horizontal", "mean_horizontal"):
+            operands: list[DataType] = []
+            for arg in _flatten_expr_args(node.args):
+                _, t = self._resolve_expr_or_col_str(arg)
+                if t is not None:
+                    operands.append(t)
+            if not operands:
+                return None, Unknown()
+            # Horizontal ops skip nulls: the result is null only when every
+            # input is null, so the result is Nullable only if *all* resolved
+            # operands are. Strip per-operand wrappers before promotion.
+            all_nullable = all(isinstance(t, Nullable) for t in operands)
+            inners = [t.inner if isinstance(t, Nullable) else t for t in operands]
+            result: DataType
+            if name == "mean_horizontal":
+                result = Float64()
+            else:
+                result = inners[0]
+                for t in inners[1:]:
+                    try:
+                        result = promote_types(result, t)
+                    except TypePromotionError:
+                        result = Unknown()
+                        break
+            if all_nullable and not isinstance(result, Unknown):
+                result = Nullable(result)
+            return None, result
 
         return None
 
