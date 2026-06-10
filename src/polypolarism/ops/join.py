@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Literal
 
 from polypolarism.compat.polars_api import join_left_nullable, join_right_nullable
-from polypolarism.types import DataType, FrameType, Nullable
+from polypolarism.types import DataType, FrameType, Nullable, Unknown
 
 
 class JoinError(Exception):
@@ -25,8 +25,17 @@ def _get_base_type(dtype: DataType) -> DataType:
 
 
 def _types_compatible(left_type: DataType, right_type: DataType) -> bool:
-    """Check if two types are compatible for joining (ignoring nullability)."""
-    return _get_base_type(left_type) == _get_base_type(right_type)
+    """Check if two types are compatible for joining (ignoring nullability).
+
+    An ``Unknown`` base on either side is compatible with anything —
+    gradual typing: uncertainty must not error (issue #39), consistent
+    with ``checker._is_subtype``.
+    """
+    left_base = _get_base_type(left_type)
+    right_base = _get_base_type(right_type)
+    if isinstance(left_base, Unknown) or isinstance(right_base, Unknown):
+        return True
+    return left_base == right_base
 
 
 def _make_nullable(dtype: DataType) -> DataType:

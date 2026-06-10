@@ -1753,3 +1753,61 @@ class TestFrameLiteralVariableValuesEndToEnd:
 
         assert len(results) == 1
         assert results[0].passed is True, results[0].errors
+
+
+class TestUnknownJoinKeyEndToEnd:
+    """Issue #39b: a genuinely-Unknown join key (values from an
+    unresolvable variable) must not be reported as a dtype mismatch."""
+
+    HEADER = textwrap.dedent("""
+        import polars as pl
+        import pandera.polars as pa
+        from pandera.typing.polars import DataFrame
+
+        class Ev(pa.DataFrameModel):
+            name: str
+            v: int
+
+            class Config:
+                coerce = True
+
+        class Out(pa.DataFrameModel):
+            step: int
+            name: str
+            v: int = pa.Field(nullable=True)
+
+            class Config:
+                strict = True
+                coerce = True
+    """)
+
+    def test_unknown_key_join_passes(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            @pa.check_types
+            def via_dynamic_values(ev: DataFrame[Ev]) -> DataFrame[Out]:
+                names = load_names()
+                sk = pl.DataFrame({"step": [1, 2, 3], "name": names})
+                return sk.join(ev, on="name", how="left")
+        """
+        )
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is True, results[0].errors
+        assert not any("PLY010" in str(e) for e in results[0].errors)
+
+    def test_genuine_key_dtype_mismatch_still_fails(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            @pa.check_types
+            def bad_key_join(ev: DataFrame[Ev]) -> DataFrame[Out]:
+                sk = pl.DataFrame({"step": [1, 2, 3], "name": [10, 20, 30]})
+                return sk.join(ev, on="name", how="left")
+        """
+        )
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is False
+        assert any("PLY010" in str(e) for e in results[0].errors)
