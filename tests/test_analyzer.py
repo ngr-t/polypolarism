@@ -7412,3 +7412,78 @@ class TestPluralColExpansion:
         analyzer = _run_body(self._frame(), 'out = df.select(pl.col("a") * 10)')
         assert analyzer.errors == [], analyzer.errors
         assert list(analyzer.var_types["out"].columns.keys()) == ["a"]
+
+
+class TestListEvalBody:
+    """Issue #44: type-check the ``list.eval(...)`` body with ``pl.element()``
+    bound to the list's inner dtype. Probed on polars 1.41.2:
+    ``eval(pl.element() * 2)`` on List(Int64) → List(Int64);
+    ``eval(pl.element() + pl.lit("x"))`` raises InvalidOperationError.
+    """
+
+    def _frame(self) -> FrameType:
+        return FrameType({"v": ListT(Int64()), "s": ListT(Utf8())})
+
+    def test_valid_eval_arithmetic_dtype(self):
+        analyzer = _run_body(
+            self._frame(), 'out = df.select(pl.col("v").list.eval(pl.element() * 2))'
+        )
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["v"].dtype == ListT(Int64())
+
+    def test_invalid_eval_body_flags_ply009(self):
+        analyzer = _run_body(
+            self._frame(),
+            'out = df.select(pl.col("v").list.eval(pl.element() + pl.lit("x")))',
+        )
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY009" in analyzer.errors[0]
+
+    def test_invalid_eval_body_degrades_to_list_unknown(self):
+        analyzer = _run_body(
+            self._frame(),
+            'out = df.select(pl.col("v").list.eval(pl.element() + pl.lit("x")))',
+        )
+        # The error is the signal; the output column stays registered.
+        assert analyzer.var_types["out"].columns["v"].dtype == ListT(Unknown())
+
+    def test_eval_cast_changes_element_dtype(self):
+        analyzer = _run_body(
+            self._frame(),
+            'out = df.select(pl.col("v").list.eval(pl.element().cast(pl.Utf8)))',
+        )
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["v"].dtype == ListT(Utf8())
+
+    def test_eval_comparison_yields_list_boolean(self):
+        analyzer = _run_body(
+            self._frame(), 'out = df.select(pl.col("v").list.eval(pl.element() > 1))'
+        )
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["v"].dtype == ListT(Boolean())
+
+    def test_eval_string_concat_on_str_list(self):
+        analyzer = _run_body(
+            self._frame(),
+            'out = df.select(pl.col("s").list.eval(pl.element() + pl.lit("!")))',
+        )
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["s"].dtype == ListT(Utf8())
+
+    def test_element_outside_eval_stays_silent(self):
+        # ``pl.element()`` is invalid outside eval at runtime, but flagging
+        # it is out of scope — stay silent (no element binding, no errors).
+        analyzer = _run_body(self._frame(), "out = df.select(x=pl.element() + 1)")
+        assert analyzer.errors == [], analyzer.errors
+
+    def test_outer_nullable_receiver_preserved(self):
+        frame = FrameType({"v": Nullable(ListT(Int64()))})
+        analyzer = _run_body(frame, 'out = df.select(pl.col("v").list.eval(pl.element() * 2))')
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["v"].dtype == Nullable(ListT(Int64()))
+
+    def test_nullable_inner_element_propagates(self):
+        frame = FrameType({"v": ListT(Nullable(Int64()))})
+        analyzer = _run_body(frame, 'out = df.select(pl.col("v").list.eval(pl.element() * 2))')
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["v"].dtype == ListT(Nullable(Int64()))

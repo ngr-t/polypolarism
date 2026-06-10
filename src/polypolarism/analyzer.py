@@ -1242,6 +1242,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         current_frame: FrameType,
         warnings: list[str] | None = None,
         registry: FunctionRegistry | None = None,
+        element_dtype: DataType | None = None,
     ):
         self.current_frame = current_frame
         self.errors: list[str] = []
@@ -1249,6 +1250,11 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         # bubble up to FunctionAnalysis). New list when used standalone.
         self.warnings: list[str] = warnings if warnings is not None else []
         self.registry = registry or FunctionRegistry()
+        # Dtype that ``pl.element()`` resolves to. Set only by the
+        # ``list.eval(...)`` body analysis (issue #44), where polars binds
+        # the element to the list's inner dtype; ``None`` everywhere else
+        # keeps ``pl.element()`` unresolved (silent).
+        self.element_dtype = element_dtype
 
     def analyze_agg_expr(self, node: ast.expr) -> AggExpr | None:
         """Analyze an aggregation expression like pl.col("x").sum().alias("total")."""
@@ -1649,6 +1655,14 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         if name == "len" and not node.args:
             return "len", UInt32()
 
+        # ``pl.element()`` — the per-element placeholder inside
+        # ``list.eval(...)`` bodies (issue #44). Resolves to the bound
+        # element dtype when this analyzer was spun up for an eval body;
+        # outside eval it stays unresolved (polars errors at runtime, but
+        # flagging that is out of scope — silence avoids false positives).
+        if name == "element" and not node.args and self.element_dtype is not None:
+            return None, self.element_dtype
+
         if name == "concat_str" or name == "format":
             for arg in _flatten_expr_args(node.args):
                 self._validate_subexpr(arg)
@@ -1819,6 +1833,24 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         elif namespace in ("list", "arr"):
             if method == "len":
                 result = UInt32()
+            elif method == "eval" and isinstance(receiver_inner, ListT):
+                # ``list.eval(body)`` runs ``body`` element-wise with
+                # ``pl.element()`` bound to the list's inner dtype
+                # (issue #44). A child analyzer type-checks the body —
+                # its errors (e.g. PLY009 from Int+String arithmetic)
+                # bubble up — and the result is List(body dtype);
+                # an unresolvable body degrades to List(Unknown).
+                body_dtype: DataType | None = None
+                if call_node is not None and call_node.args:
+                    child = ExpressionAnalyzer(
+                        self.current_frame,
+                        warnings=self.warnings,
+                        registry=self.registry,
+                        element_dtype=receiver_inner.inner,
+                    )
+                    _, body_dtype = child.analyze_select_expr(call_node.args[0])
+                    self.errors.extend(child.errors)
+                result = ListT(body_dtype if body_dtype is not None else Unknown())
             elif method in self._LIST_PRESERVING and receiver_inner is not None:
                 result = receiver_inner
             elif method in self._LIST_ELEMENT_RETURN and isinstance(receiver_inner, ListT):

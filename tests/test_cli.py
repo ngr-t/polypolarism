@@ -136,6 +136,21 @@ class TestCheckDirectory:
         assert len(results) == 2
         assert all(r.passed for r in results), [r.errors for r in results]
 
+    def test_list_eval_bad_body_fixture_fails_with_ply009(self):
+        """Issue #44 fixture: Int+String inside list.eval on a List(Int64) column."""
+        results = check_file(FIXTURES_DIR / "invalid" / "list_eval_bad_body.py")
+
+        assert len(results) == 1
+        assert results[0].passed is False
+        assert any("PLY009" in str(e) for e in results[0].errors)
+
+    def test_list_eval_body_fixture_passes(self):
+        """Issue #44 fixture: a valid eval body keeps List(Int64) (strict schema)."""
+        results = check_file(FIXTURES_DIR / "valid" / "list_eval_body.py")
+
+        assert len(results) == 1
+        assert results[0].passed is True, results[0].errors
+
 
 class TestCheckWarningFixtures:
     """Files in fixtures/warning produce warnings but still pass type-check."""
