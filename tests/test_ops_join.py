@@ -133,6 +133,97 @@ class TestJoinColumnConflict:
         assert "id_right" not in result.columns
 
 
+class TestJoinSuffix:
+    """Test custom suffix= for conflicting right-side columns."""
+
+    def test_custom_suffix_renames_conflict(self):
+        """suffix='_new' renames the overlapping right column to value_new."""
+        left = FrameType({"id": Int64(), "value": Utf8()})
+        right = FrameType({"id": Int64(), "value": Float64()})
+
+        result = infer_join(left, right, on="id", how="inner", suffix="_new")
+
+        assert result.columns["value"].dtype == Utf8()
+        assert result.columns["value_new"].dtype == Float64()
+        assert "value_right" not in result.columns
+
+    def test_custom_suffix_applies_nullability(self):
+        """Left join still makes the suffixed right column nullable."""
+        left = FrameType({"id": Int64(), "value": Utf8()})
+        right = FrameType({"id": Int64(), "value": Float64()})
+
+        result = infer_join(left, right, on="id", how="left", suffix="_b")
+
+        assert result.columns["value_b"].dtype == Nullable(Float64())
+
+
+class TestJoinMultiKey:
+    """Test join with a list of key columns."""
+
+    def test_on_list_of_keys(self):
+        """on=['x', 'y'] skips both key columns from the right side."""
+        left = FrameType({"x": Int64(), "y": Utf8(), "a": Float64()})
+        right = FrameType({"x": Int64(), "y": Utf8(), "b": Float64()})
+
+        result = infer_join(left, right, on=["x", "y"], how="inner")
+
+        assert result.columns["x"].dtype == Int64()
+        assert result.columns["y"].dtype == Utf8()
+        assert result.columns["a"].dtype == Float64()
+        assert result.columns["b"].dtype == Float64()
+        assert "x_right" not in result.columns
+        assert "y_right" not in result.columns
+
+    def test_on_list_left_join_keys_stay_non_nullable(self):
+        """Left join with multiple keys keeps key columns at left types."""
+        left = FrameType({"x": Int64(), "y": Utf8(), "a": Float64()})
+        right = FrameType({"x": Int64(), "y": Utf8(), "b": Float64()})
+
+        result = infer_join(left, right, on=["x", "y"], how="left")
+
+        assert result.columns["x"].dtype == Int64()
+        assert result.columns["y"].dtype == Utf8()
+        assert result.columns["b"].dtype == Nullable(Float64())
+
+    def test_on_list_full_join_keys_nullable(self):
+        """Full join makes every multi-key column nullable."""
+        left = FrameType({"x": Int64(), "y": Utf8(), "a": Float64()})
+        right = FrameType({"x": Int64(), "y": Utf8(), "b": Float64()})
+
+        result = infer_join(left, right, on=["x", "y"], how="full")
+
+        assert result.columns["x"].dtype == Nullable(Int64())
+        assert result.columns["y"].dtype == Nullable(Utf8())
+
+    def test_on_list_missing_key_raises(self):
+        """Error when one of the multi-key columns is missing."""
+        left = FrameType({"x": Int64(), "z": Utf8()})
+        right = FrameType({"x": Int64(), "b": Float64()})
+
+        with pytest.raises(JoinError) as exc_info:
+            infer_join(left, right, on=["x", "z"], how="inner")
+
+        assert "z" in str(exc_info.value)
+
+    def test_left_on_right_on_lists(self):
+        """left_on/right_on lists preserve all key columns from both sides."""
+        left = FrameType({"x1": Int64(), "y1": Utf8(), "a": Float64()})
+        right = FrameType({"x2": Int64(), "y2": Utf8(), "b": Float64()})
+
+        result = infer_join(left, right, left_on=["x1", "y1"], right_on=["x2", "y2"], how="inner")
+
+        for col in ("x1", "y1", "x2", "y2", "a", "b"):
+            assert col in result.columns
+
+    def test_left_on_right_on_length_mismatch_raises(self):
+        """Error when left_on and right_on have different lengths."""
+        left = FrameType({"x1": Int64(), "y1": Utf8()})
+        right = FrameType({"x2": Int64()})
+
+        with pytest.raises(JoinError):
+            infer_join(left, right, left_on=["x1", "y1"], right_on=["x2"], how="inner")
+
+
 class TestJoinWithLeftOnRightOn:
     """Test join with separate left_on/right_on keys."""
 
