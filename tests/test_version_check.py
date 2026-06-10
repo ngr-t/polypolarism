@@ -488,6 +488,53 @@ class TestCheckVersions:
         assert {w.package for w in warnings} == {"polars", "pandera"}
 
 
+class TestNoWarningFromInexactDetection:
+    """A ``>=``-floor extracted from dependency specs is not evidence the
+    project actually runs that version, so it must never trigger PLW010.
+    Exact sources (lockfiles, installed environment, CLI, config) still do."""
+
+    def test_polars_floor_below_floor_is_silent(self):
+        info = VersionInfo(
+            polars=DetectedVersion(
+                "polars", Version(1, 0, 0), "pyproject.toml dependencies", exact=False
+            )
+        )
+        assert check_versions(info) == []
+
+    def test_pandera_floor_below_floor_is_silent(self):
+        info = VersionInfo(
+            pandera=DetectedVersion(
+                "pandera", Version(0, 17, 0), "pyproject.toml dependency-groups", exact=False
+            )
+        )
+        assert check_versions(info) == []
+
+    def test_exact_below_floor_still_warns(self):
+        info = VersionInfo(
+            polars=DetectedVersion("polars", Version(1, 0, 0), "uv.lock", exact=True)
+        )
+        assert len(check_versions(info)) == 1
+
+    def test_installed_environment_below_floor_warns(self):
+        info = VersionInfo(
+            polars=DetectedVersion("polars", Version(1, 10, 0), "installed environment", exact=True)
+        )
+        warnings = check_versions(info)
+        assert len(warnings) == 1
+        assert "installed environment" in warnings[0].message
+
+    def test_mixed_only_exact_side_warns(self):
+        info = VersionInfo(
+            polars=DetectedVersion(
+                "polars", Version(1, 0, 0), "pyproject.toml dependencies", exact=False
+            ),
+            pandera=DetectedVersion("pandera", Version(0, 17, 0), "uv.lock", exact=True),
+        )
+        warnings = check_versions(info)
+        assert len(warnings) == 1
+        assert warnings[0].package == "pandera"
+
+
 @pytest.mark.usefixtures("no_installed")
 class TestCliIntegration:
     def test_no_version_check_flag_suppresses(self, tmp_path: Path, capsys, monkeypatch):
@@ -506,7 +553,10 @@ dependencies = ["polars>=0.19.0"]
         assert "PLW010" not in captured.err
         assert rc == 0
 
-    def test_below_floor_emits_warning(self, tmp_path: Path, capsys):
+    def test_dependency_floor_alone_does_not_warn(self, tmp_path: Path, capsys):
+        """A ">=" floor in pyproject dependencies is the only source — even
+        though it is below the supported window, no PLW010 fires: the floor
+        of a range is not the version in use (issue #13)."""
         from polypolarism.cli import main
 
         py = tmp_path / "x.py"
@@ -519,8 +569,39 @@ dependencies = ["polars>=0.19.0"]
         )
         main([str(py), "--no-color"])
         captured = capsys.readouterr()
+        assert "PLW010" not in captured.err
+
+    def test_old_poetry_lock_emits_warning(self, tmp_path: Path, capsys):
+        from polypolarism.cli import main
+
+        py = tmp_path / "x.py"
+        py.write_text("")
+        (tmp_path / "pyproject.toml").write_text("")
+        (tmp_path / "poetry.lock").write_text(
+            """
+[[package]]
+name = "polars"
+version = "1.10.0"
+"""
+        )
+        main([str(py), "--no-color"])
+        captured = capsys.readouterr()
         assert "PLW010" in captured.err
-        assert "polars" in captured.err.lower()
+        assert "poetry.lock" in captured.err
+
+    def test_old_installed_env_emits_warning(
+        self, tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
+    ):
+        from polypolarism.cli import main
+
+        py = tmp_path / "x.py"
+        py.write_text("")
+        (tmp_path / "pyproject.toml").write_text("")
+        _patch_installed(monkeypatch, {"polars": "1.10.0"})
+        main([str(py), "--no-color"])
+        captured = capsys.readouterr()
+        assert "PLW010" in captured.err
+        assert "installed environment" in captured.err
 
     def test_cli_override_silences_warning(self, tmp_path: Path, capsys):
         from polypolarism.cli import main

@@ -345,13 +345,18 @@ def _floor_for(package: str, deps: list) -> Version | None:
 
 
 def check_versions(info: VersionInfo) -> list[VersionWarning]:
-    """Return one VersionWarning per detected-but-below-floor package.
+    """Return one VersionWarning per exactly-detected, below-floor package.
 
     Versions that were not detected at all yield no warning — we can't
-    warn about something we don't know.
+    warn about something we don't know. Inexact detections (``exact=False``,
+    i.e. floors extracted from ``>=`` dependency constraints) never warn
+    either: ``polars>=1.0`` only says the project *tolerates* 1.0, not that
+    it runs 1.0 — the resolver almost always installs something newer. The
+    floor is still surfaced in ``VersionInfo`` for callers that want it; it
+    just isn't evidence enough for a PLW010.
     """
     warnings: list[VersionWarning] = []
-    if info.polars is not None and info.polars.version < POLARS_FLOOR:
+    if info.polars is not None and info.polars.exact and info.polars.version < POLARS_FLOOR:
         warnings.append(
             VersionWarning(
                 package="polars",
@@ -365,7 +370,7 @@ def check_versions(info: VersionInfo) -> list[VersionWarning]:
                 ),
             )
         )
-    if info.pandera is not None and info.pandera.version < PANDERA_FLOOR:
+    if info.pandera is not None and info.pandera.exact and info.pandera.version < PANDERA_FLOOR:
         warnings.append(
             VersionWarning(
                 package="pandera",
