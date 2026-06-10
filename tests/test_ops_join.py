@@ -8,6 +8,7 @@ from polypolarism.types import (
     FrameType,
     Int64,
     Nullable,
+    RowVar,
     Utf8,
 )
 
@@ -305,6 +306,119 @@ class TestJoinErrors:
             infer_join(left, right, left_on="user_id", right_on="id", how="inner")
 
         assert "type" in str(exc_info.value).lower() or "dtype" in str(exc_info.value).lower()
+
+
+class TestSemiAntiJoin:
+    """Semi/anti joins return the left frame's schema unchanged (#15)."""
+
+    @pytest.mark.parametrize("how", ["semi", "anti"])
+    def test_returns_left_schema_unchanged(self, how):
+        """Semi/anti joins keep exactly the left columns, no nullability changes."""
+        left = FrameType({"id": Int64(), "name": Utf8()})
+        right = FrameType({"id": Int64(), "value": Float64()})
+
+        result = infer_join(left, right, on="id", how=how)
+
+        assert set(result.columns) == {"id", "name"}
+        assert result.columns["id"].dtype == Int64()
+        assert result.columns["name"].dtype == Utf8()
+
+    @pytest.mark.parametrize("how", ["semi", "anti"])
+    def test_right_columns_never_appear(self, how):
+        """Right-side columns (even conflicting names) are not added; suffix is irrelevant."""
+        left = FrameType({"id": Int64(), "value": Utf8()})
+        right = FrameType({"id": Int64(), "value": Float64()})
+
+        result = infer_join(left, right, on="id", how=how, suffix="_r")
+
+        assert set(result.columns) == {"id", "value"}
+        assert result.columns["value"].dtype == Utf8()
+        assert "value_r" not in result.columns
+        assert "value_right" not in result.columns
+
+    @pytest.mark.parametrize("how", ["semi", "anti"])
+    def test_preserves_strict_and_rest(self, how):
+        """Strictness and the row variable of the left frame survive."""
+        rest = RowVar("r")
+        left = FrameType({"id": Int64()}, strict=True, rest=rest)
+        right = FrameType({"id": Int64()})
+
+        result = infer_join(left, right, on="id", how=how)
+
+        assert result.strict is True
+        assert result.rest == rest
+
+    @pytest.mark.parametrize("how", ["semi", "anti"])
+    def test_preserves_left_nullability(self, how):
+        """Existing nullability on left columns is kept as-is."""
+        left = FrameType({"id": Int64(), "name": Nullable(Utf8())})
+        right = FrameType({"id": Int64()})
+
+        result = infer_join(left, right, on="id", how=how)
+
+        assert result.columns["name"].dtype == Nullable(Utf8())
+
+    def test_multi_key_semi(self):
+        """Semi join with a list of keys validates all pairs and keeps left schema."""
+        left = FrameType({"x": Int64(), "y": Utf8(), "a": Float64()})
+        right = FrameType({"x": Int64(), "y": Utf8(), "b": Float64()})
+
+        result = infer_join(left, right, on=["x", "y"], how="semi")
+
+        assert set(result.columns) == {"x", "y", "a"}
+
+    def test_left_on_right_on_semi(self):
+        """Semi join with left_on/right_on keeps only left columns."""
+        left = FrameType({"user_id": Int64(), "name": Utf8()})
+        right = FrameType({"id": Int64(), "value": Float64()})
+
+        result = infer_join(left, right, left_on="user_id", right_on="id", how="semi")
+
+        assert set(result.columns) == {"user_id", "name"}
+
+    @pytest.mark.parametrize("how", ["semi", "anti"])
+    def test_key_missing_from_left_raises(self, how):
+        """Key validation still applies: missing left key errors."""
+        left = FrameType({"name": Utf8()})
+        right = FrameType({"id": Int64()})
+
+        with pytest.raises(JoinError) as exc_info:
+            infer_join(left, right, on="id", how=how)
+
+        assert "id" in str(exc_info.value)
+        assert "left" in str(exc_info.value).lower()
+
+    @pytest.mark.parametrize("how", ["semi", "anti"])
+    def test_key_missing_from_right_raises(self, how):
+        """Key validation still applies: missing right key errors."""
+        left = FrameType({"id": Int64()})
+        right = FrameType({"value": Float64()})
+
+        with pytest.raises(JoinError) as exc_info:
+            infer_join(left, right, on="id", how=how)
+
+        assert "id" in str(exc_info.value)
+        assert "right" in str(exc_info.value).lower()
+
+    @pytest.mark.parametrize("how", ["semi", "anti"])
+    def test_key_dtype_mismatch_raises(self, how):
+        """Key validation still applies: dtype mismatch errors."""
+        left = FrameType({"id": Int64()})
+        right = FrameType({"id": Utf8()})
+
+        with pytest.raises(JoinError) as exc_info:
+            infer_join(left, right, on="id", how=how)
+
+        assert "dtype" in str(exc_info.value).lower()
+
+    @pytest.mark.parametrize("how", ["semi", "anti"])
+    def test_missing_keys_spec_raises(self, how):
+        """on / left_on+right_on rules still enforced."""
+        left = FrameType({"id": Int64()})
+        right = FrameType({"id": Int64()})
+
+        with pytest.raises(JoinError):
+            infer_join(left, right, how=how)
 
 
 class TestJoinNullableKeyComparison:
