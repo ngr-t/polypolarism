@@ -45,6 +45,7 @@ from polypolarism.diagnostics import (
     PLY013,
     PLY014,
     PLY015,
+    PLY016,
     PLY020,
     PLY021,
     PLY022,
@@ -98,6 +99,7 @@ from polypolarism.types import (
     DataType,
     Date,
     Datetime,
+    Decimal,
     Duration,
     Enum,
     Float16,
@@ -1493,13 +1495,11 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             "neg",
             "shrink_dtype",
             "rechunk",
-            # Cumulative / window — preserve receiver dtype. (``over`` is
-            # absent: its dtype depends on ``mapping_strategy`` and is
-            # handled by a dedicated branch — issues #32/#45.)
-            "cum_sum",
-            "cum_max",
-            "cum_min",
-            "cum_prod",
+            # Window — preserve receiver dtype. (``over`` is absent: its
+            # dtype depends on ``mapping_strategy`` and is handled by a
+            # dedicated branch — issues #32/#45. The cum_* family is
+            # absent too: it is strictly typed — see
+            # ``_CUM_INVALID_RECEIVERS`` below, issue #49.)
             "rolling_sum",
             "rolling_min",
             "rolling_max",
@@ -1507,6 +1507,42 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             "reverse",
         }
     )
+
+    # ---- cumulative reducers (issue #49) ------------------------------------
+    # Probed (polars 1.41.2) receiver-dtype matrix for the cum_* family.
+    # Receivers listed here raise InvalidOperationError at runtime
+    # ("'cum_sum' operation not supported for dtype 'str'") -> PLY016 and
+    # the output degrades to Unknown. ``cum_count`` is deliberately absent:
+    # it returns UInt32 for EVERY receiver dtype (probed incl. String /
+    # List / Struct / Null) and keeps its own branch. The rolling_* family
+    # is NOT mirrored here — polars accepts e.g. rolling_mean on String
+    # (all-null Float64, probed), so it stays in the silent path.
+    _CUM_INVALID_RECEIVERS: dict[str, tuple[type[DataType], ...]] = {
+        "cum_sum": (Utf8, Date, Datetime, Time, ListT, Struct, Categorical, Enum, Null),
+        "cum_prod": (
+            Utf8,
+            Date,
+            Datetime,
+            Time,
+            Duration,
+            Decimal,
+            ListT,
+            Struct,
+            Categorical,
+            Enum,
+            Null,
+        ),
+        "cum_min": (Utf8, ListT, Struct, Null),
+        "cum_max": (Utf8, ListT, Struct, Null),
+    }
+
+    # Probed-valid non-preserving cells. cum_sum upcasts narrow ints to
+    # Int64 as an overflow guard (matches the polars docs); Boolean sums
+    # to UInt32 and Decimal widens its precision to 38 (scale kept).
+    _CUM_SUM_INT64_RECEIVERS = (Int8, Int16, UInt8, UInt16)
+    # cum_prod computes in Int64 for every int dtype narrower than UInt64
+    # (UInt64 / Int128 / UInt128 keep their dtype); Boolean also -> Int64.
+    _CUM_PROD_INT64_RECEIVERS = (Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, Boolean)
 
     # Shift-like methods: receiver dtype, but head positions become NULL.
     _SHIFT_LIKE_METHODS = frozenset({"shift", "diff", "pct_change"})
@@ -2485,7 +2521,37 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         if method in self._DTYPE_PRESERVING_METHODS and receiver_type is not None:
             return receiver_name, receiver_type
 
-        # cum_count is the only cumulative that doesn't preserve dtype.
+        # Cumulative reducers are strictly typed (issue #49) — see the
+        # probed matrix on ``_CUM_INVALID_RECEIVERS``. An invalid receiver
+        # dtype is a guaranteed runtime InvalidOperationError -> PLY016 and
+        # the output degrades to Unknown; Unknown receivers stay silent.
+        if method in self._CUM_INVALID_RECEIVERS and receiver_type is not None:
+            inner = receiver_type.inner if isinstance(receiver_type, Nullable) else receiver_type
+            if isinstance(inner, Unknown):
+                return receiver_name, receiver_type
+            if isinstance(inner, self._CUM_INVALID_RECEIVERS[method]):
+                self.errors.append(
+                    tag(
+                        PLY016,
+                        f"{method}: operation not supported for dtype {inner} — "
+                        f"polars raises InvalidOperationError at runtime",
+                    )
+                )
+                return receiver_name, None
+            result_inner: DataType = inner
+            if method == "cum_sum":
+                if isinstance(inner, self._CUM_SUM_INT64_RECEIVERS):
+                    result_inner = Int64()
+                elif isinstance(inner, Boolean):
+                    result_inner = UInt32()
+                elif isinstance(inner, Decimal):
+                    result_inner = Decimal(38, inner.scale)
+            elif method == "cum_prod" and isinstance(inner, self._CUM_PROD_INT64_RECEIVERS):
+                result_inner = Int64()
+            return receiver_name, _wrap_like(receiver_type, result_inner)
+
+        # cum_count never raises: UInt32 for every receiver dtype (probed
+        # incl. the dtypes the other cumulatives reject).
         if method == "cum_count":
             return receiver_name, UInt32()
 
