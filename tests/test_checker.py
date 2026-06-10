@@ -945,6 +945,166 @@ class TestSemiAntiGatherEndToEnd:
         assert any("PLY010" in str(e) for e in results[0].errors)
 
 
+class TestJoinCoalesceCrossEndToEnd:
+    """Issues #24/#26 repros: full-join key coalescing and cross joins."""
+
+    ISSUE_24_SOURCE = textwrap.dedent("""
+        import polars as pl
+        import pandera.polars as pa
+        from pandera.typing.polars import DataFrame
+
+        class L(pa.DataFrameModel):
+            id: int
+            x: int
+            class Config:
+                coerce = True
+
+        class R(pa.DataFrameModel):
+            id: int
+            y: int
+            class Config:
+                coerce = True
+
+        class FullOut(pa.DataFrameModel):
+            id: int                                 # coalesced key — non-null
+            x: int = pa.Field(nullable=True)        # from left  — nullable
+            y: int = pa.Field(nullable=True)        # from right — nullable
+            class Config:
+                strict = True
+                coerce = True
+
+        def full_coalesce(l: DataFrame[L], r: DataFrame[R]) -> DataFrame[FullOut]:
+            return l.join(r, on="id", how="full", coalesce=True)
+
+        class InnerOut(pa.DataFrameModel):
+            id: int
+            x: int
+            y: int
+            class Config:
+                strict = True
+                coerce = True
+
+        def inner_join(l: DataFrame[L], r: DataFrame[R]) -> DataFrame[InnerOut]:
+            return l.join(r, on="id", how="inner")
+    """)
+
+    def test_issue_24_repro_functions_pass(self):
+        results = check_source(self.ISSUE_24_SOURCE)
+
+        assert len(results) == 2
+        by_name = {r.function_name: r for r in results}
+        for name in ("full_coalesce", "inner_join"):
+            assert by_name[name].passed is True, (name, by_name[name].errors)
+
+    def test_full_join_without_coalesce_keeps_both_keys(self):
+        """Corrected default: full join keeps id (nullable) AND id_right."""
+        source = textwrap.dedent("""
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+
+            class L(pa.DataFrameModel):
+                id: int
+                x: int
+                class Config:
+                    coerce = True
+
+            class R(pa.DataFrameModel):
+                id: int
+                y: int
+                class Config:
+                    coerce = True
+
+            class FullDefaultOut(pa.DataFrameModel):
+                id: int = pa.Field(nullable=True)
+                x: int = pa.Field(nullable=True)
+                id_right: int = pa.Field(nullable=True)
+                y: int = pa.Field(nullable=True)
+                class Config:
+                    strict = True
+                    coerce = True
+
+            def full_default(l: DataFrame[L], r: DataFrame[R]) -> DataFrame[FullDefaultOut]:
+                return l.join(r, on="id", how="full")
+        """)
+
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is True, results[0].errors
+
+    ISSUE_26_SOURCE = textwrap.dedent("""
+        import polars as pl
+        import pandera.polars as pa
+        from pandera.typing.polars import DataFrame
+
+        class L(pa.DataFrameModel):
+            id: int
+            x: int
+            class Config:
+                coerce = True
+
+        class R(pa.DataFrameModel):
+            rid: int
+            y: int
+            class Config:
+                coerce = True
+
+        class CrossOut(pa.DataFrameModel):
+            id: int
+            x: int
+            rid: int
+            y: int
+            class Config:
+                strict = True
+                coerce = True
+
+        def ok_cross_join(l: DataFrame[L], r: DataFrame[R]) -> DataFrame[CrossOut]:
+            return l.join(r, how="cross")
+    """)
+
+    def test_issue_26_repro_passes(self):
+        results = check_source(self.ISSUE_26_SOURCE)
+
+        assert len(results) == 1
+        assert results[0].passed is True, results[0].errors
+
+    def test_cross_join_with_collision_gets_suffix(self):
+        """A shared column name lands as v_right in the cross-join output."""
+        source = textwrap.dedent("""
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+
+            class L(pa.DataFrameModel):
+                id: int
+                v: int
+                class Config:
+                    coerce = True
+
+            class R(pa.DataFrameModel):
+                v: str
+                class Config:
+                    coerce = True
+
+            class CrossOut(pa.DataFrameModel):
+                id: int
+                v: int
+                v_right: str
+                class Config:
+                    strict = True
+                    coerce = True
+
+            def cross_collision(l: DataFrame[L], r: DataFrame[R]) -> DataFrame[CrossOut]:
+                return l.join(r, how="cross")
+        """)
+
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is True, results[0].errors
+
+
 class TestIssue21SeqVariantsEndToEnd:
     """Issue #21 repro: with_columns_seq / select_seq infer like the
     non-seq forms (schema semantics identical; only evaluation order
