@@ -8899,3 +8899,105 @@ class TestTzMismatchedDatetimeOps:
         analyzer = self._run_two(utc, utc2, "out = pl.concat([a, b], how='vertical')")
         assert analyzer.errors == [], analyzer.errors
         assert analyzer.var_types["out"].columns["t"].dtype == Datetime(tz="UTC")
+
+
+class TestTzAwareDtypeOutputs:
+    """Collateral of issue #50: methods that SET a time zone must not keep
+    claiming the receiver's (or a naive) Datetime now that tz mismatches
+    are flagged — that would manufacture false positives against tz-aware
+    declared schemas.
+
+    Probed (polars 1.41.2):
+    - ``dt.replace_time_zone("X")`` / ``dt.convert_time_zone("X")`` ->
+      ``Datetime[X]`` for naive AND aware receivers;
+      ``replace_time_zone(None)`` -> naive.
+    - ``str.to_datetime()`` -> naive; ``time_zone="UTC"`` -> ``Datetime[UTC]``;
+      a format literal containing ``%z`` -> ``Datetime[UTC]``.
+    - ``pl.datetime_range(..., time_zone="UTC", eager=True)`` -> ``Datetime[UTC]``.
+
+    Non-literal time zones / formats are unknowable -> Unknown (silent).
+    """
+
+    def _frame(self) -> FrameType:
+        return FrameType(
+            {
+                "n": Datetime(),
+                "utc": Datetime(tz="UTC"),
+                "nn": Nullable(Datetime()),
+                "s": Utf8(),
+                "d": Date(),
+            }
+        )
+
+    @pytest.mark.parametrize(
+        ("expr", "expected"),
+        [
+            ("pl.col('n').dt.replace_time_zone('UTC')", Datetime(tz="UTC")),
+            ("pl.col('utc').dt.replace_time_zone('Asia/Tokyo')", Datetime(tz="Asia/Tokyo")),
+            ("pl.col('utc').dt.replace_time_zone(None)", Datetime()),
+            ("pl.col('utc').dt.convert_time_zone('Asia/Tokyo')", Datetime(tz="Asia/Tokyo")),
+            ("pl.col('n').dt.convert_time_zone('UTC')", Datetime(tz="UTC")),
+            # Unknowable arguments degrade to Unknown — never guess a tz.
+            ("pl.col('n').dt.replace_time_zone(tzvar)", Unknown()),
+            ("pl.col('utc').dt.convert_time_zone(tzvar)", Unknown()),
+            # str.to_datetime tz forms
+            ("pl.col('s').str.to_datetime()", Datetime()),
+            ("pl.col('s').str.to_datetime('%Y-%m-%d %H:%M:%S')", Datetime()),
+            ("pl.col('s').str.to_datetime(time_zone='UTC')", Datetime(tz="UTC")),
+            ("pl.col('s').str.to_datetime('%Y-%m-%dT%H:%M:%S%z')", Datetime(tz="UTC")),
+            ("pl.col('s').str.to_datetime(format='%Y-%m-%dT%H:%M:%S%z')", Datetime(tz="UTC")),
+            ("pl.col('s').str.to_datetime(fmtvar)", Unknown()),
+            ("pl.col('s').str.to_datetime(time_zone=tzvar)", Unknown()),
+        ],
+    )
+    def test_tz_setting_method_output(self, expr: str, expected) -> None:
+        analyzer = _run_body(self._frame(), f"out = df.select(r={expr})")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["r"].dtype == expected
+
+    def test_nullable_receiver_keeps_wrapper(self) -> None:
+        analyzer = _run_body(
+            self._frame(), "out = df.select(r=pl.col('nn').dt.replace_time_zone('UTC'))"
+        )
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["r"].dtype == Nullable(Datetime(tz="UTC"))
+
+    def test_non_datetime_receiver_keeps_legacy_preserving(self) -> None:
+        # ``.dt.replace_time_zone`` on a Date column is outside the probed
+        # surface — the legacy dtype-preserving fallback stays (silent).
+        analyzer = _run_body(
+            self._frame(), "out = df.select(r=pl.col('d').dt.replace_time_zone('UTC'))"
+        )
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["r"].dtype == Date()
+
+    def test_replace_then_subtract_same_tz_passes(self) -> None:
+        # End-to-end shape of the realistic false-positive scenario: make
+        # both sides UTC, subtract -> Duration, no errors.
+        analyzer = _run_body(
+            self._frame(),
+            "out = df.select(r=pl.col('n').dt.replace_time_zone('UTC') - pl.col('utc'))",
+        )
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["r"].dtype == Duration()
+
+    def test_datetime_range_with_literal_tz(self) -> None:
+        analyzer = _run_body(
+            FrameType({}),
+            "out = pl.DataFrame({'ts': pl.datetime_range(a, b, time_zone='UTC', eager=True)})",
+        )
+        assert analyzer.var_types["out"].columns["ts"].dtype == Datetime(tz="UTC")
+
+    def test_datetime_range_with_non_literal_tz_is_unknown(self) -> None:
+        analyzer = _run_body(
+            FrameType({}),
+            "out = pl.DataFrame({'ts': pl.datetime_range(a, b, time_zone=tzv, eager=True)})",
+        )
+        assert analyzer.var_types["out"].columns["ts"].dtype == Unknown()
+
+    def test_datetime_range_without_tz_stays_naive(self) -> None:
+        analyzer = _run_body(
+            FrameType({}),
+            "out = pl.DataFrame({'ts': pl.datetime_range(a, b, eager=True)})",
+        )
+        assert analyzer.var_types["out"].columns["ts"].dtype == Datetime()

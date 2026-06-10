@@ -295,6 +295,18 @@ def _frame_literal_value_dtype(
     ):
         range_dtype = _RANGE_CONSTRUCTOR_DTYPES.get(node.func.attr)
         if range_dtype is not None:
+            # ``pl.datetime_range(..., time_zone="UTC", eager=True)`` is
+            # probed to yield a tz-aware Series (issue #50 collateral). A
+            # non-literal time_zone is unknowable -> Unknown.
+            if node.func.attr == "datetime_range":
+                for kw in node.keywords:
+                    if kw.arg == "time_zone":
+                        if isinstance(kw.value, ast.Constant):
+                            if isinstance(kw.value.value, str):
+                                return Datetime(tz=kw.value.value)
+                            if kw.value.value is None:
+                                return Datetime()
+                        return Unknown()
             return range_dtype
 
     if isinstance(node, ast.Constant) and (
@@ -864,6 +876,68 @@ def _str_constant(node: ast.expr) -> str | None:
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return node.value
     return None
+
+
+def _call_arg(call: ast.Call | None, *, position: int, name: str) -> ast.expr | None:
+    """One call argument: positional index or keyword (keyword wins)."""
+    if call is None:
+        return None
+    node: ast.expr | None = None
+    if position < len(call.args):
+        node = call.args[position]
+    for kw in call.keywords:
+        if kw.arg == name:
+            node = kw.value
+    return node
+
+
+def _time_zone_arg_dtype(method: str, call_node: ast.Call | None) -> DataType:
+    """Result dtype of ``dt.replace_time_zone(...)`` / ``dt.convert_time_zone(...)``
+    on a Datetime receiver (issue #50 collateral).
+
+    Probed (polars 1.41.2): both methods yield ``Datetime[arg]`` for naive
+    AND aware receivers; ``replace_time_zone(None)`` strips the tz.
+    Anything not statically readable (a variable, ``convert_time_zone(None)``
+    — unprobed) degrades to Unknown: claiming a tz would be a guess.
+    """
+    tz_node = _call_arg(call_node, position=0, name="time_zone")
+    if isinstance(tz_node, ast.Constant):
+        if isinstance(tz_node.value, str):
+            return Datetime(tz=tz_node.value)
+        if tz_node.value is None and method == "replace_time_zone":
+            return Datetime()
+    return Unknown()
+
+
+def _str_to_datetime_dtype(call_node: ast.Call | None) -> DataType:
+    """Result dtype of ``str.to_datetime(...)`` (issue #50 collateral).
+
+    Probed (polars 1.41.2): no tz-affecting arguments -> naive Datetime;
+    ``time_zone="X"`` (string literal) -> ``Datetime[X]``; a format literal
+    containing ``%z`` -> ``Datetime[UTC]``. A non-literal ``time_zone`` /
+    format (and the unprobed ``%:z`` / ``%#z`` directives) degrade to
+    Unknown rather than claiming naive.
+    """
+    if call_node is not None:
+        for kw in call_node.keywords:
+            if kw.arg == "time_zone":
+                if isinstance(kw.value, ast.Constant):
+                    if isinstance(kw.value.value, str):
+                        return Datetime(tz=kw.value.value)
+                    if kw.value.value is None:
+                        break  # explicit None — same as omitted
+                return Unknown()
+    fmt_node = _call_arg(call_node, position=0, name="format")
+    if fmt_node is None:
+        return Datetime()
+    fmt = _str_constant(fmt_node)
+    if fmt is None:
+        return Unknown()
+    if "%z" in fmt:
+        return Datetime(tz="UTC")
+    if "%:z" in fmt or "%#z" in fmt:
+        return Unknown()
+    return Datetime()
 
 
 def _str_list_or_tuple(node: ast.expr) -> list[str] | None:
@@ -1996,9 +2070,23 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         result: DataType | None = None
 
         if namespace == "str":
-            result = self._STR_RETURN.get(method)
+            if method == "to_datetime":
+                # The output tz depends on the arguments (issue #50
+                # collateral): default naive, ``time_zone=`` literal sets
+                # the tz, a format literal containing ``%z`` is probed to
+                # yield Datetime[UTC]. Unknowable arguments -> Unknown.
+                result = _str_to_datetime_dtype(call_node)
+            else:
+                result = self._STR_RETURN.get(method)
         elif namespace == "dt":
-            if method in self._DT_RETURN:
+            if method in ("replace_time_zone", "convert_time_zone") and isinstance(
+                receiver_inner, Datetime
+            ):
+                # These SET the tz — blanket receiver-preservation would
+                # claim the old tz and manufacture false positives now
+                # that tz mismatches are flagged (issue #50 collateral).
+                result = _time_zone_arg_dtype(method, call_node)
+            elif method in self._DT_RETURN:
                 result = self._DT_RETURN[method]
             elif method in self._DT_PRESERVING and receiver_inner is not None:
                 result = receiver_inner
