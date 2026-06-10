@@ -2370,16 +2370,20 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         name: str,
         input_frame: FrameType,
         result_columns: dict[str, DataType],
+        output_name: str | None = None,
     ) -> None:
         """Resolve a bare string column name in ``select`` — equivalent to
         ``pl.col(name)``. Missing names error on closed frames (PLY001);
         on an open frame the column may exist among the unknown extras,
-        so it is selected as ``Unknown``."""
+        so it is selected as ``Unknown``.
+
+        ``output_name`` overrides the result column name for the kwarg
+        form: ``select(x="a")`` selects column ``a`` under the name ``x``."""
         spec = input_frame.columns.get(name)
         if spec is not None:
-            result_columns[name] = spec.dtype
+            result_columns[output_name or name] = spec.dtype
         elif input_frame.rest is not None:
-            result_columns[name] = Unknown()
+            result_columns[output_name or name] = Unknown()
         else:
             self.errors.append(
                 tag(
@@ -2447,6 +2451,14 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         # ``expr.alias("name")``. Same for ``with_columns``.
         for kw in node.keywords:
             if kw.arg is None:
+                continue
+            # ``select(x="a")`` — a bare string in expression position is a
+            # column reference (not a Utf8 literal), renamed to the kwarg.
+            col_ref = _str_constant(kw.value)
+            if col_ref is not None:
+                self._register_string_selection(
+                    col_ref, input_frame, result_columns, output_name=kw.arg
+                )
                 continue
             _, dtype = expr_analyzer.analyze_select_expr(kw.value)
             if dtype is not None:
@@ -2520,6 +2532,24 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         # ``expr.alias("name")``.
         for kw in node.keywords:
             if kw.arg is None:
+                continue
+            # ``with_columns(x="a")`` — a bare string in expression position
+            # is a column reference (not a Utf8 literal), renamed to the kwarg.
+            col_ref = _str_constant(kw.value)
+            if col_ref is not None:
+                ref_spec = input_frame.columns.get(col_ref)
+                if ref_spec is not None:
+                    result_columns[kw.arg] = ref_spec.dtype
+                elif input_frame.rest is not None:
+                    result_columns[kw.arg] = Unknown()
+                else:
+                    self.errors.append(
+                        tag(
+                            PLY001,
+                            f"Column '{col_ref}' not found. Available columns: "
+                            f"{list(input_frame.columns.keys())}",
+                        )
+                    )
                 continue
             _, dtype = expr_analyzer.analyze_select_expr(kw.value)
             if dtype is not None:

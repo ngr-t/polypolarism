@@ -3788,6 +3788,33 @@ class TestSelectStringColumns:
         assert analyzer.errors == []
         assert analyzer.var_types["out"].columns["ghost"].dtype == Unknown()
 
+    def test_select_kwarg_string_is_column_reference(self):
+        # ``select(x="a")`` — polars parses a bare string in expression
+        # position as a column name, not a Utf8 literal: x takes a's dtype.
+        frame = FrameType({"a": Int64(), "s": Utf8()})
+        analyzer = _run_body(frame, 'out = df.select(x="a")')
+        assert analyzer.errors == []
+        assert analyzer.var_types["out"].columns["x"].dtype == Int64()
+
+    def test_with_columns_kwarg_string_is_column_reference(self):
+        frame = FrameType({"a": Int64(), "s": Utf8()})
+        analyzer = _run_body(frame, 'out = df.with_columns(y="a")')
+        assert analyzer.errors == []
+        out = analyzer.var_types["out"]
+        assert out.columns["y"].dtype == Int64()
+        assert out.columns["a"].dtype == Int64()
+
+    def test_select_kwarg_string_missing_column_errors(self):
+        frame = FrameType({"a": Int64()})
+        analyzer = _run_body(frame, 'out = df.select(x="ghost")')
+        assert any("ghost" in e for e in analyzer.errors)
+
+    def test_select_kwarg_string_missing_on_open_frame_registers_unknown(self):
+        frame = FrameType({"a": Int64()}, rest=RowVar("r"))
+        analyzer = _run_body(frame, 'out = df.select(x="ghost")')
+        assert analyzer.errors == []
+        assert analyzer.var_types["out"].columns["x"].dtype == Unknown()
+
     def test_with_columns_string_keeps_schema(self):
         results = analyze_source(self._source('with_columns("a")'))
         assert results[0].errors == []
@@ -4473,9 +4500,12 @@ class TestBareConstantLiterals:
         analyzer = _run_body(FrameType({"id": Int64()}), "out = df.select(x=None)")
         assert analyzer.var_types["out"].columns["x"].dtype == Null()
 
-    def test_select_kwarg_str_literal_is_utf8(self):
-        analyzer = _run_body(FrameType({"id": Int64()}), "out = df.select(x='hi')")
-        assert analyzer.var_types["out"].columns["x"].dtype == Utf8()
+    def test_select_kwarg_str_is_column_ref_not_literal(self):
+        """Polars parses a bare string in expression position as a column
+        name — ``select(x="id")`` selects ``id`` under the name ``x``.
+        Only operator operands treat strings as implicit literals."""
+        analyzer = _run_body(FrameType({"id": Int64()}), "out = df.select(x='id')")
+        assert analyzer.var_types["out"].columns["x"].dtype == Int64()
 
     def test_bare_string_positional_still_selects_column(self):
         """Positional bare strings remain column selections, not literals."""
