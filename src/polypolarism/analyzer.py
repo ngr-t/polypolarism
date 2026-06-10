@@ -92,12 +92,14 @@ from polypolarism.types import (
     Int64,
     Int128,
     Nullable,
+    RowVar,
     Struct,
     UInt8,
     UInt16,
     UInt32,
     UInt64,
     UInt128,
+    Unknown,
     Utf8,
 )
 from polypolarism.types import (
@@ -493,7 +495,15 @@ def _is_column_subtype(actual: DataType, expected: DataType) -> bool:
     - T is subtype of T
     - T is subtype of Nullable[T]
     - Nullable[T] is NOT subtype of T
+    - Unknown is compatible with everything in both directions (gradual
+      typing: uncertainty must not error), even ``Nullable[Unknown]`` vs a
+      non-nullable expected type.
     """
+    actual_base = actual.inner if isinstance(actual, Nullable) else actual
+    expected_base = expected.inner if isinstance(expected, Nullable) else expected
+    if isinstance(actual_base, Unknown) or isinstance(expected_base, Unknown):
+        return True
+
     if actual == expected:
         return True
 
@@ -508,7 +518,9 @@ def _is_frame_subtype(actual: FrameType, expected: FrameType) -> bool:
     """Check if actual FrameType is subtype of expected.
 
     Rules:
-    - actual must contain every required column expected has
+    - actual must contain every required column expected has — unless
+      ``actual`` is an open frame (``rest`` is not None), whose unknown
+      extra columns may satisfy the requirement
     - For columns present on both sides, the actual dtype must be a subtype
       and an actual optional column cannot satisfy a required expected column
     - actual may have extra columns unless ``expected.strict`` is True
@@ -516,7 +528,7 @@ def _is_frame_subtype(actual: FrameType, expected: FrameType) -> bool:
     for col_name, expected_spec in expected.columns.items():
         actual_spec = actual.columns.get(col_name)
         if actual_spec is None:
-            if expected_spec.required:
+            if expected_spec.required and actual.rest is None:
                 return False
             continue
         if expected_spec.required and not actual_spec.required:
@@ -856,7 +868,9 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         if lit_type:
             return alias, lit_type
 
-        return None, None
+        # Unrecognised expression — surface the alias (if any) so a trailing
+        # ``.alias("x")`` still names an Unknown-typed output column.
+        return alias, None
 
     def _analyze_pl_func(self, node: ast.expr) -> tuple[str | None, DataType] | None:
         """Recognise ``pl.struct(...)`` / ``pl.concat_str(...)`` / ``pl.format(...)`` /
@@ -1005,11 +1019,14 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         """
         self.analyze_select_expr(node)
 
-    def _analyze_method_chain(self, node: ast.expr) -> tuple[str | None, DataType] | None:
+    def _analyze_method_chain(self, node: ast.expr) -> tuple[str | None, DataType | None] | None:
         """Analyze ``pl.col("x").<method>(...)`` style chains.
 
         Returns ``(default_name, dtype)`` or ``None`` if the node isn't a
-        recognised method chain.
+        recognised method chain. ``(name, None)`` means the node *is* a
+        chain on that column but the method's result dtype is unknown —
+        the caller registers the column as ``Unknown`` so later references
+        still resolve.
         """
         if not isinstance(node, ast.Call):
             return None
@@ -1167,8 +1184,16 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             target = _resolve_pl_dtype(node.args[0])
             if target is not None and receiver_type is not None:
                 return receiver_name, _wrap_like(receiver_type, target)
+            if target is not None:
+                # Receiver dtype was uninferable (e.g. ``.interpolate()``)
+                # but the explicit cast pins the result dtype.
+                return receiver_name, target
 
-        return None
+        # Unrecognised method on a resolved receiver: it IS a chain on this
+        # column, the dtype just can't be inferred. Surface the name so the
+        # column stays registered (as Unknown) instead of vanishing from the
+        # tracked schema (issue #8).
+        return receiver_name, None
 
     def _extract_lit_type(self, node: ast.expr) -> DataType | None:
         """Extract type from pl.lit(value) expression."""
@@ -1989,6 +2014,14 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             if agg_expr:
                 agg_expr.alias = kw.arg
                 agg_exprs.append(agg_expr)
+            else:
+                # Un-inferable aggregation expression — the output column
+                # still exists at runtime, so register it as Unknown
+                # (issue #8). Expression-level column errors are collected
+                # separately via the expression analyser.
+                agg_exprs.append(
+                    AggExpr(column=kw.arg, function=None, alias=kw.arg, dtype=Unknown())
+                )
 
         self.errors.extend(expr_analyzer.errors)
 
@@ -2028,6 +2061,30 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             names.append(s)
         return names
 
+    def _register_string_selection(
+        self,
+        name: str,
+        input_frame: FrameType,
+        result_columns: dict[str, DataType],
+    ) -> None:
+        """Resolve a bare string column name in ``select`` — equivalent to
+        ``pl.col(name)``. Missing names error on closed frames (PLY001);
+        on an open frame the column may exist among the unknown extras,
+        so it is selected as ``Unknown``."""
+        spec = input_frame.columns.get(name)
+        if spec is not None:
+            result_columns[name] = spec.dtype
+        elif input_frame.rest is not None:
+            result_columns[name] = Unknown()
+        else:
+            self.errors.append(
+                tag(
+                    PLY001,
+                    f"Column '{name}' not found. Available columns: "
+                    f"{list(input_frame.columns.keys())}",
+                )
+            )
+
     def _infer_select_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
         """Infer type of .select() call."""
         expr_analyzer = ExpressionAnalyzer(
@@ -2048,6 +2105,11 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 for c in plural:
                     spec = input_frame.columns.get(c)
                     if spec is None:
+                        # On an open frame the column may exist among the
+                        # unknown extras — select it as Unknown.
+                        if input_frame.rest is not None:
+                            result_columns[c] = Unknown()
+                            continue
                         self.errors.append(
                             tag(
                                 PLY001,
@@ -2058,9 +2120,24 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                         continue
                     result_columns[c] = spec.dtype
                 continue
+            # Bare string / list-of-strings column names — the most common
+            # polars idiom: ``select("a", "b")`` / ``select(["a", "b"])``.
+            single = _str_constant(arg)
+            if single is not None:
+                self._register_string_selection(single, input_frame, result_columns)
+                continue
+            str_list = _str_list_or_tuple(arg)
+            if str_list is not None:
+                for c in str_list:
+                    self._register_string_selection(c, input_frame, result_columns)
+                continue
             name, dtype = expr_analyzer.analyze_select_expr(arg)
             if name and dtype:
                 result_columns[name] = dtype
+            elif name:
+                # Named output whose dtype is uninferable — register it as
+                # Unknown so later references resolve (issue #8).
+                result_columns[name] = Unknown()
 
         # Kwarg form ``select(name=expr)`` — polars treats it as
         # ``expr.alias("name")``. Same for ``with_columns``.
@@ -2070,6 +2147,8 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             _, dtype = expr_analyzer.analyze_select_expr(kw.value)
             if dtype is not None:
                 result_columns[kw.arg] = dtype
+            else:
+                result_columns[kw.arg] = Unknown()
 
         self.errors.extend(expr_analyzer.errors)
 
@@ -2095,9 +2174,28 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             plural = self._resolve_plural_col(arg)
             if plural is not None:
                 # ``with_columns(pl.col("a", "b"))`` is equivalent to keeping
-                # the existing columns; nothing to add.
+                # the existing columns; nothing to add. On an open frame a
+                # missing name may exist among the unknown extras — no error.
                 for c in plural:
-                    if c not in input_frame.columns:
+                    if c not in input_frame.columns and input_frame.rest is None:
+                        self.errors.append(
+                            tag(
+                                PLY001,
+                                f"Column '{c}' not found. Available columns: "
+                                f"{list(input_frame.columns.keys())}",
+                            )
+                        )
+                continue
+            # Bare string / list-of-strings — equivalent to ``pl.col(name)``,
+            # a re-selection of existing columns. Validate existence (PLY001
+            # on closed frames) but leave the schema unchanged.
+            single = _str_constant(arg)
+            str_list = _str_list_or_tuple(arg)
+            if single is not None or str_list is not None:
+                names = [single] if single is not None else str_list
+                assert names is not None
+                for c in names:
+                    if c not in input_frame.columns and input_frame.rest is None:
                         self.errors.append(
                             tag(
                                 PLY001,
@@ -2109,6 +2207,10 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             name, dtype = expr_analyzer.analyze_select_expr(arg)
             if name and dtype:
                 result_columns[name] = dtype
+            elif name:
+                # Named output whose dtype is uninferable — register it as
+                # Unknown so later references resolve (issue #8).
+                result_columns[name] = Unknown()
 
         # Kwarg form ``with_columns(name=expr)`` — polars treats it as
         # ``expr.alias("name")``.
@@ -2118,10 +2220,16 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             _, dtype = expr_analyzer.analyze_select_expr(kw.value)
             if dtype is not None:
                 result_columns[kw.arg] = dtype
+            else:
+                result_columns[kw.arg] = Unknown()
 
         self.errors.extend(expr_analyzer.errors)
 
-        return FrameType(columns=result_columns)
+        return FrameType(
+            columns=result_columns,
+            strict=input_frame.strict,
+            rest=input_frame.rest,
+        )
 
     # -- frame methods --------------------------------------------------
 
@@ -2155,7 +2263,10 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         result_columns = dict(input_frame.columns)
         for name in targets:
             if name not in result_columns:
-                self.errors.append(tag(PLY002, f"drop: column '{name}' not found"))
+                # On an open frame the column may exist among the unknown
+                # extras — dropping it is a no-op for the tracked schema.
+                if input_frame.rest is None:
+                    self.errors.append(tag(PLY002, f"drop: column '{name}' not found"))
                 continue
             del result_columns[name]
         return FrameType(columns=result_columns, strict=input_frame.strict, rest=input_frame.rest)
@@ -2322,12 +2433,25 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         for col in targets:
             spec = result_columns.get(col)
             if spec is None:
+                # On an open frame the column may exist among the unknown
+                # extras — treat it as present, exploding to Unknown.
+                if input_frame.rest is not None:
+                    result_columns[col] = ColumnSpec(dtype=Unknown())
+                    continue
                 self.errors.append(tag(PLY021, f"explode: column '{col}' not found"))
                 continue
             inner = spec.dtype
             outer_nullable = isinstance(inner, Nullable)
             if outer_nullable:
                 inner = inner.inner  # type: ignore[union-attr]
+            if isinstance(inner, Unknown):
+                # An Unknown column might hold lists — exploding it yields
+                # elements of an unknown dtype, never an error.
+                unknown_elem: DataType = Unknown()
+                if outer_nullable:
+                    unknown_elem = Nullable(unknown_elem)
+                result_columns[col] = ColumnSpec(dtype=unknown_elem, required=spec.required)
+                continue
             if not isinstance(inner, ListT):
                 self.errors.append(
                     tag(PLY021, f"explode: column '{col}' is {spec.dtype}, not List[T]")
@@ -2454,15 +2578,26 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             return input_frame
 
         result_columns: dict[str, ColumnSpec] = dict(input_frame.columns)
+        result_rest = input_frame.rest
         for col in targets:
             spec = result_columns.get(col)
             if spec is None:
-                self.errors.append(tag(PLY021, f"unnest: column '{col}' not found"))
+                # On an open frame the column may exist among the unknown
+                # extras — its fields stay unknown, the frame stays open.
+                if input_frame.rest is None:
+                    self.errors.append(tag(PLY021, f"unnest: column '{col}' not found"))
                 continue
             inner = spec.dtype
             outer_nullable = isinstance(inner, Nullable)
             if outer_nullable:
                 inner = inner.inner  # type: ignore[union-attr]
+            if isinstance(inner, Unknown):
+                # Unnesting a struct whose fields we can't see: the column
+                # disappears and an unknown set of field columns appears —
+                # the result is an open frame.
+                del result_columns[col]
+                result_rest = RowVar("unnest")
+                continue
             if not isinstance(inner, Struct):
                 self.errors.append(
                     tag(PLY021, f"unnest: column '{col}' is {spec.dtype}, not Struct{{...}}")
@@ -2474,7 +2609,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 if outer_nullable and not isinstance(wrapped, Nullable):
                     wrapped = Nullable(wrapped)
                 result_columns[field_name] = ColumnSpec(dtype=wrapped, required=spec.required)
-        return FrameType(columns=result_columns, strict=input_frame.strict, rest=input_frame.rest)
+        return FrameType(columns=result_columns, strict=input_frame.strict, rest=result_rest)
 
     def _infer_filter_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
         """Identity-typed, but walk every predicate sub-expression to validate columns."""

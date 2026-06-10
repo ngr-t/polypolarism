@@ -17,6 +17,7 @@ from polypolarism.types import (
     Nullable,
     UInt32,
     UInt64,
+    Unknown,
 )
 
 
@@ -223,6 +224,16 @@ def infer_agg_result_type(func: AggFunction, input_type: DataType) -> DataType:
     Raises:
         GroupByTypeError: If the aggregation function cannot be applied to the type
     """
+    # Unknown input never raises — the gradual-typing escape hatch must not
+    # produce false positives. Count-like aggregations still have a precise
+    # result; everything else stays Unknown.
+    inner, _ = _unwrap_nullable(input_type)
+    if isinstance(inner, Unknown):
+        if func in (AggFunction.COUNT, AggFunction.N_UNIQUE):
+            return UInt32()
+        if func is AggFunction.LIST:
+            return List(Unknown())
+        return Unknown()
     infer_fn = _AGG_INFER_MAP.get(func)
     if infer_fn is None:
         raise GroupByTypeError(f"Unknown aggregation function: {func}")
@@ -250,10 +261,16 @@ def infer_groupby_result(
                          or if aggregation functions cannot be applied
     """
     result_columns: dict[str, DataType] = {}
+    # An open input frame may contain extra unknown columns; references to
+    # columns we can't see resolve to Unknown instead of raising.
+    is_open = input_frame.rest is not None
 
     # 1. Add group key columns (preserve their types)
     for key in keys:
         if not input_frame.has_column(key):
+            if is_open:
+                result_columns[key] = Unknown()
+                continue
             raise GroupByTypeError(f"Group by key column '{key}' not found in DataFrame")
         key_type = input_frame.get_column_type(key)
         assert key_type is not None  # We just checked has_column
@@ -268,10 +285,13 @@ def infer_groupby_result(
             continue
 
         col_name = agg_expr.column
+        col_type: DataType | None
         if not input_frame.has_column(col_name):
-            raise GroupByTypeError(f"Aggregation column '{col_name}' not found in DataFrame")
-
-        col_type = input_frame.get_column_type(col_name)
+            if not is_open:
+                raise GroupByTypeError(f"Aggregation column '{col_name}' not found in DataFrame")
+            col_type = Unknown()
+        else:
+            col_type = input_frame.get_column_type(col_name)
         assert col_type is not None  # We just checked has_column
         assert agg_expr.function is not None  # Direct form must carry a function
 

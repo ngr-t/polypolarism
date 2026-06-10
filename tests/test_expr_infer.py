@@ -22,6 +22,8 @@ from polypolarism.types import (
     Int64,
     Null,
     Nullable,
+    RowVar,
+    Unknown,
     Utf8,
 )
 
@@ -61,6 +63,17 @@ class TestInferCol:
             infer_col("c", frame)
         error_msg = str(exc_info.value)
         assert "a" in error_msg or "b" in error_msg
+
+    def test_col_missing_on_open_frame_returns_unknown(self) -> None:
+        """An open frame may hold extra unknown columns — don't raise."""
+        frame = FrameType(columns={"a": Int64()}, rest=RowVar("r"))
+        result = infer_col("z", frame)
+        assert result == Unknown()
+
+    def test_col_present_on_open_frame_returns_its_dtype(self) -> None:
+        frame = FrameType(columns={"a": Int64()}, rest=RowVar("r"))
+        result = infer_col("a", frame)
+        assert result == Int64()
 
 
 class TestInferLit:
@@ -240,6 +253,21 @@ class TestUnifyTypes:
         """Unifying Boolean with Boolean should return Boolean."""
         result = unify_types(Boolean(), Boolean())
         assert result == Boolean()
+
+    def test_unify_unknown_and_int64_returns_unknown(self) -> None:
+        """Unknown absorbs any other type on the left."""
+        result = unify_types(Unknown(), Int64())
+        assert result == Unknown()
+
+    def test_unify_int64_and_unknown_returns_unknown(self) -> None:
+        """Unknown absorbs any other type on the right."""
+        result = unify_types(Int64(), Unknown())
+        assert result == Unknown()
+
+    def test_unify_nullable_unknown_and_utf8_returns_unknown(self) -> None:
+        """Nullable-wrapped Unknown still unifies to Unknown."""
+        result = unify_types(Nullable(Unknown()), Utf8())
+        assert result == Unknown()
 
 
 class TestInferWhenThenOtherwise:

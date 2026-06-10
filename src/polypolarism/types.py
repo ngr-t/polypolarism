@@ -350,6 +350,24 @@ class Null(DataType):
 
 
 @dataclass(frozen=True)
+class Unknown(DataType):
+    """Gradual-typing escape hatch for dtypes polypolarism cannot infer.
+
+    Compatible with every dtype in both directions so un-inferable code
+    never produces false positives.
+    """
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, Unknown)
+
+    def __hash__(self) -> int:
+        return hash("Unknown")
+
+    def __str__(self) -> str:
+        return "Unknown"
+
+
+@dataclass(frozen=True)
 class Nullable(DataType):
     """Nullable wrapper for any type."""
 

@@ -15,6 +15,7 @@ from polypolarism.types import (
     List,
     Nullable,
     Struct,
+    Unknown,
     Utf8,
 )
 
@@ -94,6 +95,26 @@ class TestListType:
     def test_nested_list(self):
         nested = List(List(Int64()))
         assert nested.inner == List(Int64())
+
+
+class TestUnknownType:
+    """Test Unknown type (gradual-typing escape hatch)."""
+
+    def test_unknown_is_datatype(self):
+        assert isinstance(Unknown(), DataType)
+
+    def test_unknown_equality(self):
+        assert Unknown() == Unknown()
+
+    def test_unknown_not_equal_to_other_types(self):
+        assert Unknown() != Int64()
+        assert Unknown() != Utf8()
+
+    def test_unknown_str(self):
+        assert str(Unknown()) == "Unknown"
+
+    def test_unknown_hashable(self):
+        assert hash(Unknown()) == hash(Unknown())
 
 
 class TestStructType:

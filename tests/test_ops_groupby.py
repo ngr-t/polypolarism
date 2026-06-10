@@ -15,7 +15,9 @@ from polypolarism.types import (
     Int64,
     List,
     Nullable,
+    RowVar,
     UInt32,
+    Unknown,
     Utf8,
 )
 
@@ -143,6 +145,57 @@ class TestNullableHandling:
         """first(Nullable[T]) -> Nullable[T]"""
         result = infer_agg_result_type(AggFunction.FIRST, Nullable(Int64()))
         assert result == Nullable(Int64())
+
+
+class TestUnknownAggregation:
+    """Aggregating an Unknown-typed column never raises."""
+
+    def test_count_unknown_returns_uint32(self):
+        result = infer_agg_result_type(AggFunction.COUNT, Unknown())
+        assert result == UInt32()
+
+    def test_n_unique_unknown_returns_uint32(self):
+        result = infer_agg_result_type(AggFunction.N_UNIQUE, Unknown())
+        assert result == UInt32()
+
+    def test_list_unknown_returns_list_unknown(self):
+        result = infer_agg_result_type(AggFunction.LIST, Unknown())
+        assert result == List(Unknown())
+
+    def test_sum_unknown_returns_unknown(self):
+        result = infer_agg_result_type(AggFunction.SUM, Unknown())
+        assert result == Unknown()
+
+    def test_mean_unknown_returns_unknown(self):
+        result = infer_agg_result_type(AggFunction.MEAN, Unknown())
+        assert result == Unknown()
+
+    def test_nullable_unknown_returns_unknown(self):
+        result = infer_agg_result_type(AggFunction.SUM, Nullable(Unknown()))
+        assert result == Unknown()
+
+
+class TestOpenFrameGroupBy:
+    """Missing keys / agg columns on an open frame become Unknown, not errors."""
+
+    def test_missing_key_on_open_frame_becomes_unknown(self):
+        input_frame = FrameType({"v": Int64()}, rest=RowVar("r"))
+        agg_exprs = [AggExpr(column="v", function=AggFunction.SUM, alias="total")]
+        result = infer_groupby_result(input_frame, ["ym"], agg_exprs)
+        assert result.columns["ym"].dtype == Unknown()
+        assert result.columns["total"].dtype == Int64()
+
+    def test_missing_agg_column_on_open_frame_becomes_unknown(self):
+        input_frame = FrameType({"k": Utf8()}, rest=RowVar("r"))
+        agg_exprs = [AggExpr(column="v", function=AggFunction.SUM, alias="total")]
+        result = infer_groupby_result(input_frame, ["k"], agg_exprs)
+        assert result.columns["total"].dtype == Unknown()
+
+    def test_missing_key_on_closed_frame_still_raises(self):
+        input_frame = FrameType({"v": Int64()})
+        agg_exprs = [AggExpr(column="v", function=AggFunction.SUM, alias="total")]
+        with pytest.raises(GroupByTypeError):
+            infer_groupby_result(input_frame, ["ym"], agg_exprs)
 
 
 class TestInferGroupByResult:

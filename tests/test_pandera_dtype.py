@@ -13,6 +13,7 @@ from polypolarism.types import (
     List,
     Nullable,
     Struct,
+    Unknown,
     Utf8,
 )
 
@@ -336,3 +337,65 @@ class TestUnknown:
 
     def test_other_module_returns_none(self):
         assert _parse("np.int64") is None
+
+
+class TestContainerCallForms:
+    """Issue #10: ``pl.List(...)`` / ``pl.Array(...)`` / ``pl.Struct(...)``
+    call-form annotations register as columns with element types."""
+
+    def test_pl_list_of_int64(self):
+        assert _parse("pl.List(pl.Int64)") == ColumnSpec(List(Int64()), required=True)
+
+    def test_pl_list_of_int64_call(self):
+        assert _parse("pl.List(pl.Int64())") == ColumnSpec(List(Int64()), required=True)
+
+    def test_pl_list_of_bare_struct_is_list_unknown(self):
+        assert _parse("pl.List(pl.Struct)") == ColumnSpec(List(Unknown()), required=True)
+
+    def test_pl_list_nested(self):
+        assert _parse("pl.List(pl.List(pl.Int64))") == ColumnSpec(
+            List(List(Int64())), required=True
+        )
+
+    def test_pl_array_with_width(self):
+        """Width is ignored, consistent with the Annotated handling."""
+        assert _parse("pl.Array(pl.Int64, 4)") == ColumnSpec(List(Int64()), required=True)
+
+    def test_pl_struct_dict_literal(self):
+        assert _parse('pl.Struct({"a": pl.Utf8, "b": pl.Float64()})') == ColumnSpec(
+            Struct({"a": Utf8(), "b": Float64()}), required=True
+        )
+
+    def test_pl_struct_dict_unparseable_value_becomes_unknown(self):
+        assert _parse('pl.Struct({"a": some_variable})') == ColumnSpec(
+            Struct({"a": Unknown()}), required=True
+        )
+
+    def test_pl_struct_non_dict_arg_is_unknown(self):
+        assert _parse('pl.Struct([pl.Field("a", pl.Utf8)])') == ColumnSpec(Unknown(), required=True)
+
+    def test_pl_list_with_field_value(self):
+        assert _parse("pl.List(pl.Struct)", "pa.Field()") == ColumnSpec(
+            List(Unknown()), required=True
+        )
+
+    def test_pl_list_nullable_field(self):
+        assert _parse("pl.List(pl.Int64)", "pa.Field(nullable=True)") == ColumnSpec(
+            Nullable(List(Int64())), required=True
+        )
+
+
+class TestContainerBareForms:
+    """Bare ``pl.List`` / ``pl.Array`` / ``pl.Struct`` attribute annotations."""
+
+    def test_pl_list_bare(self):
+        assert _parse("pl.List") == ColumnSpec(List(Unknown()), required=True)
+
+    def test_pl_array_bare(self):
+        assert _parse("pl.Array") == ColumnSpec(List(Unknown()), required=True)
+
+    def test_pl_struct_bare_is_unknown(self):
+        """A struct whose fields we don't know carries no usable shape —
+        Unknown keeps everything downstream lenient (not Struct({}), which
+        would unnest to zero columns)."""
+        assert _parse("pl.Struct") == ColumnSpec(Unknown(), required=True)

@@ -10,6 +10,13 @@ Recognised annotation shapes:
 - ``Annotated[pl.List, pl.Int64()]`` -> ``List(Int64())``
 - ``Annotated[pl.Array, pl.Int64(), 3]`` -> ``List(Int64())`` (width ignored)
 - ``Annotated[pl.Struct, {"a": pl.Utf8(), "b": pl.Float64()}]`` -> ``Struct({...})``
+- Call-form containers: ``pl.List(pl.Int64)`` -> ``List(Int64())``,
+  ``pl.Array(pl.Int64, 4)`` -> ``List(Int64())`` (width ignored),
+  ``pl.Struct({"a": pl.Utf8})`` -> ``Struct({...})``. Unparseable element /
+  field dtypes fall back to ``Unknown()``.
+- Bare containers: ``pl.List`` / ``pl.Array`` -> ``List(Unknown())``;
+  ``pl.Struct`` -> ``Unknown()`` (a struct without field info has no usable
+  shape — ``Struct({})`` would wrongly mean "empty struct").
 
 Field RHS:
 - ``pa.Field(nullable=True)`` wraps the parsed dtype in ``Nullable(...)``.
@@ -35,6 +42,7 @@ from polypolarism.types import (
     List,
     Nullable,
     Struct,
+    Unknown,
     Utf8,
 )
 
@@ -129,7 +137,19 @@ def _parse_plain_dtype(node: ast.expr) -> DataType | None:
     if isinstance(node, ast.Attribute):
         if isinstance(node.value, ast.Name):
             if node.value.id == "pl":
-                return _PL_DTYPE_MAP.get(node.attr)
+                resolved = _PL_DTYPE_MAP.get(node.attr)
+                if resolved is not None:
+                    return resolved
+                # Bare container forms carry no element/field information:
+                # ``pl.List`` / ``pl.Array`` hold elements of an unknown
+                # dtype; bare ``pl.Struct`` has no usable shape at all, so
+                # it parses to ``Unknown`` (NOT ``Struct({})``, which would
+                # mean "empty struct" and unnest to zero columns).
+                if node.attr in ("List", "Array"):
+                    return List(Unknown())
+                if node.attr == "Struct":
+                    return Unknown()
+                return None
             # ``datetime.date`` / ``dt.datetime`` / ``datetime.timedelta``
             # — any non-``pl`` prefix is treated as the Python stdlib
             # ``datetime`` module (or an alias of it). Lowercase attr
@@ -139,9 +159,17 @@ def _parse_plain_dtype(node: ast.expr) -> DataType | None:
         return None
 
     if isinstance(node, ast.Call):
+        # Call-form containers: ``pl.List(pl.Int64)``, ``pl.Array(pl.Int64, 4)``
+        # (width ignored, consistent with the Annotated handling), and
+        # ``pl.Struct({"a": pl.Utf8, ...})``.
+        if _is_pl_attr(node.func, "List") or _is_pl_attr(node.func, "Array"):
+            inner = _parse_plain_dtype(node.args[0]) if node.args else None
+            return List(inner if inner is not None else Unknown())
+        if _is_pl_attr(node.func, "Struct"):
+            return _parse_struct_call(node)
         # ``pl.Decimal(precision, scale)`` preserves its arguments. Other
-        # parametrized dtypes (Datetime, Duration, Array width, ...) drop
-        # arguments today — see DTYPE_NAME_MAP comment in compat.
+        # parametrized dtypes (Datetime, Duration, ...) drop arguments
+        # today — see DTYPE_NAME_MAP comment in compat.
         if _is_pl_attr(node.func, "Decimal"):
             decimal_dt = _parse_decimal_call(node)
             if decimal_dt is not None:
@@ -149,6 +177,26 @@ def _parse_plain_dtype(node: ast.expr) -> DataType | None:
         return _parse_plain_dtype(node.func)
 
     return None
+
+
+def _parse_struct_call(node: ast.Call) -> DataType:
+    """Parse ``pl.Struct({...})``.
+
+    A dict literal yields a ``Struct`` whose unparseable field values fall
+    back to ``Unknown``. Any other argument shape (``pl.Struct([pl.Field(...)])``,
+    a variable, no args) carries no statically-readable shape — ``Unknown``.
+    """
+    if not (node.args and isinstance(node.args[0], ast.Dict)):
+        return Unknown()
+    mapping = node.args[0]
+    fields: dict[str, DataType] = {}
+    for k, v in zip(mapping.keys, mapping.values, strict=True):
+        if not (isinstance(k, ast.Constant) and isinstance(k.value, str)):
+            # ``**spread`` / non-string keys — no readable shape.
+            return Unknown()
+        inner = _parse_plain_dtype(v)
+        fields[k.value] = inner if inner is not None else Unknown()
+    return Struct(fields)
 
 
 def _parse_decimal_call(node: ast.Call) -> DataType | None:

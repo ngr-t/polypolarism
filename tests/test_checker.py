@@ -15,6 +15,8 @@ from polypolarism.types import (
     FrameType,
     Int64,
     Nullable,
+    RowVar,
+    Unknown,
     Utf8,
 )
 
@@ -224,6 +226,93 @@ class TestCheckNullability:
 
         # Non-nullable is a subtype of nullable
         assert result.passed is True
+
+
+class TestUnknownCompatibility:
+    """Unknown dtype is compatible with every dtype in both directions."""
+
+    def _analysis(self, declared: FrameType, inferred: FrameType) -> FunctionAnalysis:
+        return FunctionAnalysis(
+            name="f",
+            lineno=1,
+            end_lineno=1,
+            input_types={},
+            declared_return_type=declared,
+            inferred_return_type=inferred,
+            errors=[],
+        )
+
+    def test_inferred_unknown_passes_declared_int64(self):
+        result = check_function(
+            self._analysis(
+                declared=FrameType({"a": Int64()}),
+                inferred=FrameType({"a": Unknown()}),
+            )
+        )
+        assert result.passed is True
+
+    def test_declared_unknown_passes_inferred_utf8(self):
+        result = check_function(
+            self._analysis(
+                declared=FrameType({"a": Unknown()}),
+                inferred=FrameType({"a": Utf8()}),
+            )
+        )
+        assert result.passed is True
+
+    def test_inferred_nullable_unknown_passes_non_nullable_declared(self):
+        """Uncertainty must not error, even against a non-nullable slot."""
+        result = check_function(
+            self._analysis(
+                declared=FrameType({"a": Int64()}),
+                inferred=FrameType({"a": Nullable(Unknown())}),
+            )
+        )
+        assert result.passed is True
+
+
+class TestOpenFrameChecking:
+    """A declared column missing from an open inferred frame is not an error."""
+
+    def _analysis(self, declared: FrameType, inferred: FrameType) -> FunctionAnalysis:
+        return FunctionAnalysis(
+            name="f",
+            lineno=1,
+            end_lineno=1,
+            input_types={},
+            declared_return_type=declared,
+            inferred_return_type=inferred,
+            errors=[],
+        )
+
+    def test_missing_required_column_passes_on_open_frame(self):
+        result = check_function(
+            self._analysis(
+                declared=FrameType({"id": Int64(), "qty": Int64()}),
+                inferred=FrameType({"id": Int64()}, rest=RowVar("unnest")),
+            )
+        )
+        assert result.passed is True
+
+    def test_missing_required_column_fails_on_closed_frame(self):
+        result = check_function(
+            self._analysis(
+                declared=FrameType({"id": Int64(), "qty": Int64()}),
+                inferred=FrameType({"id": Int64()}),
+            )
+        )
+        assert result.passed is False
+        assert any(isinstance(e, MissingColumn) for e in result.errors)
+
+    def test_present_column_still_type_checked_on_open_frame(self):
+        result = check_function(
+            self._analysis(
+                declared=FrameType({"id": Int64()}),
+                inferred=FrameType({"id": Utf8()}, rest=RowVar("unnest")),
+            )
+        )
+        assert result.passed is False
+        assert any(isinstance(e, TypeDifference) for e in result.errors)
 
 
 class TestCheckSource:

@@ -266,6 +266,9 @@ DT_NAMESPACE_RETURN: dict[str, DataType] = {
     "week": Int8(),
     "ordinal_day": Int16(),
     "date": Date(),
+    # Formatting into strings — ``strftime`` is an alias of ``to_string``.
+    "strftime": Utf8(),
+    "to_string": Utf8(),
     "epoch": Int64(),
     "timestamp": Int64(),
     "total_days": Int64(),

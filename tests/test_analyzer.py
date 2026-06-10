@@ -5,6 +5,9 @@ import textwrap
 import pytest
 
 from polypolarism.analyzer import (
+    FunctionBodyAnalyzer,
+    _is_column_subtype,
+    _is_frame_subtype,
     analyze_source,
 )
 from polypolarism.types import (
@@ -18,7 +21,9 @@ from polypolarism.types import (
     Int32,
     Int64,
     Nullable,
+    RowVar,
     UInt32,
+    Unknown,
     Utf8,
 )
 from polypolarism.types import (
@@ -2967,3 +2972,390 @@ class TestSourceLocation:
         assert results[1].name == "second"
         # Second function comes after the first
         assert results[1].lineno > results[0].lineno
+
+
+class TestUnknownColumnSubtype:
+    """analyzer._is_column_subtype: Unknown is compatible in both directions."""
+
+    def test_unknown_actual_passes_any_expected(self):
+        assert _is_column_subtype(Unknown(), Int64())
+        assert _is_column_subtype(Unknown(), Utf8())
+        assert _is_column_subtype(Unknown(), Nullable(Int64()))
+
+    def test_any_actual_passes_unknown_expected(self):
+        assert _is_column_subtype(Int64(), Unknown())
+        assert _is_column_subtype(Nullable(Utf8()), Unknown())
+
+    def test_nullable_unknown_actual_passes_non_nullable_expected(self):
+        assert _is_column_subtype(Nullable(Unknown()), Int64())
+
+    def test_regular_mismatch_still_fails(self):
+        assert not _is_column_subtype(Utf8(), Int64())
+        assert not _is_column_subtype(Nullable(Int64()), Int64())
+
+
+class TestOpenFrameSubtype:
+    """analyzer._is_frame_subtype: open actual frames may satisfy extra columns."""
+
+    def test_missing_required_column_allowed_on_open_actual(self):
+        actual = FrameType({"id": Int64()}, rest=RowVar("r"))
+        expected = FrameType({"id": Int64(), "qty": Int64()})
+        assert _is_frame_subtype(actual, expected)
+
+    def test_missing_required_column_rejected_on_closed_actual(self):
+        actual = FrameType({"id": Int64()})
+        expected = FrameType({"id": Int64(), "qty": Int64()})
+        assert not _is_frame_subtype(actual, expected)
+
+    def test_present_column_still_type_checked_on_open_actual(self):
+        actual = FrameType({"id": Utf8()}, rest=RowVar("r"))
+        expected = FrameType({"id": Int64()})
+        assert not _is_frame_subtype(actual, expected)
+
+
+def _run_body(frame: FrameType, body: str):
+    """Drive FunctionBodyAnalyzer directly with a pre-built input frame.
+
+    Open frames cannot yet be written down in a Pandera schema, so these
+    tests inject them as the type of ``df`` and analyze a small body.
+    """
+    import ast
+
+    errors: list[str] = []
+    analyzer = FunctionBodyAnalyzer({"df": frame}, errors)
+    tree = ast.parse(textwrap.dedent(body))
+    for stmt in tree.body:
+        analyzer.visit(stmt)
+    return analyzer
+
+
+class TestOpenFrameMethodCalls:
+    """Column references that are missing on an open frame are not errors."""
+
+    def _open_frame(self) -> FrameType:
+        return FrameType({"id": Int64()}, rest=RowVar("r"))
+
+    def test_drop_missing_column_on_open_frame_no_error(self):
+        analyzer = _run_body(self._open_frame(), "out = df.drop('ghost')")
+        assert analyzer.errors == []
+        assert "ghost" not in analyzer.var_types["out"].columns
+
+    def test_drop_missing_column_on_closed_frame_still_errors(self):
+        analyzer = _run_body(FrameType({"id": Int64()}), "out = df.drop('ghost')")
+        assert any("ghost" in e for e in analyzer.errors)
+
+    def test_explode_missing_column_on_open_frame_becomes_unknown(self):
+        analyzer = _run_body(self._open_frame(), "out = df.explode('items')")
+        assert analyzer.errors == []
+        assert analyzer.var_types["out"].columns["items"].dtype == Unknown()
+
+    def test_unnest_missing_column_on_open_frame_no_error(self):
+        analyzer = _run_body(self._open_frame(), "out = df.unnest('s')")
+        assert analyzer.errors == []
+        out = analyzer.var_types["out"]
+        assert out.rest is not None
+        assert "s" not in out.columns
+
+    def test_select_col_expr_missing_on_open_frame_registers_unknown(self):
+        analyzer = _run_body(self._open_frame(), "out = df.select(pl.col('ghost'))")
+        assert analyzer.errors == []
+        assert analyzer.var_types["out"].columns["ghost"].dtype == Unknown()
+
+    def test_select_plural_col_missing_on_open_frame_registers_unknown(self):
+        analyzer = _run_body(self._open_frame(), "out = df.select(pl.col('a', 'b'))")
+        assert analyzer.errors == []
+        out = analyzer.var_types["out"]
+        assert out.columns["a"].dtype == Unknown()
+        assert out.columns["b"].dtype == Unknown()
+
+    def test_with_columns_plural_col_missing_on_open_frame_no_error(self):
+        analyzer = _run_body(self._open_frame(), "out = df.with_columns(pl.col('a', 'b'))")
+        assert analyzer.errors == []
+
+    def test_select_result_is_closed_even_from_open_input(self):
+        """A projection enumerates its output — openness does not survive."""
+        analyzer = _run_body(self._open_frame(), "out = df.select(pl.col('id'))")
+        assert analyzer.var_types["out"].rest is None
+
+
+class TestRestPropagation:
+    """rest / strict survive shape-preserving operations."""
+
+    def test_with_columns_propagates_rest_and_strict(self):
+        frame = FrameType({"id": Int64()}, strict=True, rest=RowVar("r"))
+        analyzer = _run_body(frame, "out = df.with_columns(doubled=pl.col('id') * 2)")
+        out = analyzer.var_types["out"]
+        assert out.rest is not None
+        assert out.strict is True
+        assert out.columns["doubled"].dtype == Int64()
+
+
+class TestSelectStringColumns:
+    """Issue #7: bare string column names in select / with_columns."""
+
+    def _source(self, call: str) -> str:
+        return textwrap.dedent(
+            PANDERA_HEADER
+            + f"""
+            class In(pa.DataFrameModel):
+                a: int
+                b: str
+                c: pl.Float64
+
+            class Out(pa.DataFrameModel):
+                a: int
+                b: str
+
+            def f(df: DataFrame[In]) -> DataFrame[Out]:
+                return df.{call}
+        """
+        )
+
+    def test_select_positional_strings(self):
+        results = analyze_source(self._source('select("a", "b")'))
+        assert results[0].errors == []
+        assert results[0].inferred_return_type == FrameType({"a": Int64(), "b": Utf8()})
+
+    def test_select_list_of_strings(self):
+        results = analyze_source(self._source('select(["a", "b"])'))
+        assert results[0].errors == []
+        assert results[0].inferred_return_type == FrameType({"a": Int64(), "b": Utf8()})
+
+    def test_select_string_missing_column_errors(self):
+        results = analyze_source(self._source('select("a", "ghost")'))
+        assert any("ghost" in str(e) for e in results[0].errors)
+
+    def test_select_list_with_missing_column_errors(self):
+        results = analyze_source(self._source('select(["a", "ghost"])'))
+        assert any("ghost" in str(e) for e in results[0].errors)
+
+    def test_select_mixes_strings_and_exprs(self):
+        results = analyze_source(self._source('select("a", pl.col("c").alias("b"))'))
+        assert results[0].errors == []
+        assert results[0].inferred_return_type == FrameType({"a": Int64(), "b": Float64()})
+
+    def test_select_string_on_open_frame_registers_unknown(self):
+        frame = FrameType({"id": Int64()}, rest=RowVar("r"))
+        analyzer = _run_body(frame, 'out = df.select("ghost")')
+        assert analyzer.errors == []
+        assert analyzer.var_types["out"].columns["ghost"].dtype == Unknown()
+
+    def test_with_columns_string_keeps_schema(self):
+        results = analyze_source(self._source('with_columns("a")'))
+        assert results[0].errors == []
+        assert results[0].inferred_return_type == FrameType(
+            {"a": Int64(), "b": Utf8(), "c": Float64()}
+        )
+
+    def test_with_columns_string_list_keeps_schema(self):
+        results = analyze_source(self._source('with_columns(["a", "b"])'))
+        assert results[0].errors == []
+        assert results[0].inferred_return_type == FrameType(
+            {"a": Int64(), "b": Utf8(), "c": Float64()}
+        )
+
+    def test_with_columns_string_missing_column_errors(self):
+        results = analyze_source(self._source('with_columns("ghost")'))
+        assert any("ghost" in str(e) for e in results[0].errors)
+
+    def test_with_columns_string_missing_on_open_frame_no_error(self):
+        frame = FrameType({"id": Int64()}, rest=RowVar("r"))
+        analyzer = _run_body(frame, 'out = df.with_columns("ghost")')
+        assert analyzer.errors == []
+
+
+class TestUnknownColumnRegistration:
+    """Issue #8: columns added by un-inferable expressions stay in the schema."""
+
+    HEADER = textwrap.dedent(
+        PANDERA_HEADER
+        + """
+            class In(pa.DataFrameModel):
+                v: int
+                ts: pl.Datetime
+"""
+    )
+
+    def test_when_then_otherwise_column_registers_and_chains(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]) -> DataFrame[In]:
+                return df.with_columns(
+                    a=pl.when(pl.col("v") > 0).then(1).otherwise(0)
+                ).with_columns(b=pl.col("a") + 1)
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        inferred = results[0].inferred_return_type
+        assert inferred is not None
+        assert inferred.columns["a"].dtype == Unknown()
+        assert "b" in inferred.columns
+
+    def test_cast_after_uninferable_method_pins_dtype(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]) -> DataFrame[In]:
+                return df.with_columns(
+                    a=pl.col("v").interpolate().cast(pl.Int64)
+                ).with_columns(b=pl.col("a") + 1)
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        inferred = results[0].inferred_return_type
+        assert inferred is not None
+        assert inferred.columns["a"].dtype == Int64()
+        assert inferred.columns["b"].dtype == Int64()
+
+    def test_uninferable_chain_alias_survives_in_select(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]) -> DataFrame[In]:
+                return df.select(pl.col("v").interpolate().alias("x"))
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        inferred = results[0].inferred_return_type
+        assert inferred is not None
+        assert inferred.columns["x"].dtype == Unknown()
+
+    def test_uninferable_chain_keeps_receiver_name_in_with_columns(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]) -> DataFrame[In]:
+                return df.with_columns(pl.col("v").interpolate())
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        inferred = results[0].inferred_return_type
+        assert inferred is not None
+        assert inferred.columns["v"].dtype == Unknown()
+
+    def test_dt_strftime_returns_utf8(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]) -> DataFrame[In]:
+                return df.with_columns(ym=pl.col("ts").dt.strftime("%Y-%m"))
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        inferred = results[0].inferred_return_type
+        assert inferred is not None
+        assert inferred.columns["ym"].dtype == Utf8()
+
+    def test_dt_to_string_returns_utf8(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]) -> DataFrame[In]:
+                return df.with_columns(ym=pl.col("ts").dt.to_string("%Y-%m"))
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        inferred = results[0].inferred_return_type
+        assert inferred is not None
+        assert inferred.columns["ym"].dtype == Utf8()
+
+    def test_unknown_column_usable_as_group_by_key(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]) -> DataFrame[In]:
+                return (
+                    df.with_columns(ym=pl.when(pl.col("v") > 0).then(1).otherwise(0))
+                    .group_by("ym")
+                    .agg(total=pl.col("v").sum())
+                )
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        inferred = results[0].inferred_return_type
+        assert inferred is not None
+        assert inferred.columns["ym"].dtype == Unknown()
+        assert inferred.columns["total"].dtype == Int64()
+
+    def test_agg_kwarg_uninferable_registers_unknown(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]) -> DataFrame[In]:
+                return df.group_by("v").agg(n=pl.len())
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        inferred = results[0].inferred_return_type
+        assert inferred is not None
+        assert inferred.columns["n"].dtype == Unknown()
+
+    def test_select_kwarg_uninferable_registers_unknown(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]) -> DataFrame[In]:
+                return df.select(a=pl.when(pl.col("v") > 0).then(1).otherwise(0))
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        inferred = results[0].inferred_return_type
+        assert inferred is not None
+        assert inferred.columns["a"].dtype == Unknown()
+
+
+class TestContainerFieldAnalysis:
+    """Issue #10: container-typed schema fields work with explode/unnest/.arr."""
+
+    HEADER = textwrap.dedent(
+        PANDERA_HEADER
+        + """
+            class In(pa.DataFrameModel):
+                id: int
+                vals: pl.List(pl.Int64) = pa.Field()
+                items: pl.List(pl.Struct) = pa.Field()
+                q: pl.Array(pl.Int64, 4) = pa.Field()
+"""
+    )
+
+    def test_explode_list_field_yields_element_type(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]) -> DataFrame[In]:
+                return df.explode("vals")
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        inferred = results[0].inferred_return_type
+        assert inferred is not None
+        assert inferred.columns["vals"].dtype == Int64()
+
+    def test_explode_then_unnest_unknown_struct_opens_frame(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]) -> DataFrame[In]:
+                return df.explode("items").unnest("items")
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        inferred = results[0].inferred_return_type
+        assert inferred is not None
+        assert "items" not in inferred.columns
+        assert inferred.rest is not None
+
+    def test_arr_sum_on_array_field_infers_element_type(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]) -> DataFrame[In]:
+                return df.select("id", total=pl.col("q").arr.sum())
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        inferred = results[0].inferred_return_type
+        assert inferred is not None
+        assert inferred.columns["id"].dtype == Int64()
+        assert inferred.columns["total"].dtype == Int64()
