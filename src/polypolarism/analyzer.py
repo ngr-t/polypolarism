@@ -868,7 +868,9 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         if lit_type:
             return alias, lit_type
 
-        return None, None
+        # Unrecognised expression — surface the alias (if any) so a trailing
+        # ``.alias("x")`` still names an Unknown-typed output column.
+        return alias, None
 
     def _analyze_pl_func(self, node: ast.expr) -> tuple[str | None, DataType] | None:
         """Recognise ``pl.struct(...)`` / ``pl.concat_str(...)`` / ``pl.format(...)`` /
@@ -1017,11 +1019,14 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         """
         self.analyze_select_expr(node)
 
-    def _analyze_method_chain(self, node: ast.expr) -> tuple[str | None, DataType] | None:
+    def _analyze_method_chain(self, node: ast.expr) -> tuple[str | None, DataType | None] | None:
         """Analyze ``pl.col("x").<method>(...)`` style chains.
 
         Returns ``(default_name, dtype)`` or ``None`` if the node isn't a
-        recognised method chain.
+        recognised method chain. ``(name, None)`` means the node *is* a
+        chain on that column but the method's result dtype is unknown —
+        the caller registers the column as ``Unknown`` so later references
+        still resolve.
         """
         if not isinstance(node, ast.Call):
             return None
@@ -1179,8 +1184,16 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             target = _resolve_pl_dtype(node.args[0])
             if target is not None and receiver_type is not None:
                 return receiver_name, _wrap_like(receiver_type, target)
+            if target is not None:
+                # Receiver dtype was uninferable (e.g. ``.interpolate()``)
+                # but the explicit cast pins the result dtype.
+                return receiver_name, target
 
-        return None
+        # Unrecognised method on a resolved receiver: it IS a chain on this
+        # column, the dtype just can't be inferred. Surface the name so the
+        # column stays registered (as Unknown) instead of vanishing from the
+        # tracked schema (issue #8).
+        return receiver_name, None
 
     def _extract_lit_type(self, node: ast.expr) -> DataType | None:
         """Extract type from pl.lit(value) expression."""
@@ -2001,6 +2014,14 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             if agg_expr:
                 agg_expr.alias = kw.arg
                 agg_exprs.append(agg_expr)
+            else:
+                # Un-inferable aggregation expression — the output column
+                # still exists at runtime, so register it as Unknown
+                # (issue #8). Expression-level column errors are collected
+                # separately via the expression analyser.
+                agg_exprs.append(
+                    AggExpr(column=kw.arg, function=None, alias=kw.arg, dtype=Unknown())
+                )
 
         self.errors.extend(expr_analyzer.errors)
 
@@ -2113,6 +2134,10 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             name, dtype = expr_analyzer.analyze_select_expr(arg)
             if name and dtype:
                 result_columns[name] = dtype
+            elif name:
+                # Named output whose dtype is uninferable — register it as
+                # Unknown so later references resolve (issue #8).
+                result_columns[name] = Unknown()
 
         # Kwarg form ``select(name=expr)`` — polars treats it as
         # ``expr.alias("name")``. Same for ``with_columns``.
@@ -2122,6 +2147,8 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             _, dtype = expr_analyzer.analyze_select_expr(kw.value)
             if dtype is not None:
                 result_columns[kw.arg] = dtype
+            else:
+                result_columns[kw.arg] = Unknown()
 
         self.errors.extend(expr_analyzer.errors)
 
@@ -2180,6 +2207,10 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             name, dtype = expr_analyzer.analyze_select_expr(arg)
             if name and dtype:
                 result_columns[name] = dtype
+            elif name:
+                # Named output whose dtype is uninferable — register it as
+                # Unknown so later references resolve (issue #8).
+                result_columns[name] = Unknown()
 
         # Kwarg form ``with_columns(name=expr)`` — polars treats it as
         # ``expr.alias("name")``.
@@ -2189,6 +2220,8 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             _, dtype = expr_analyzer.analyze_select_expr(kw.value)
             if dtype is not None:
                 result_columns[kw.arg] = dtype
+            else:
+                result_columns[kw.arg] = Unknown()
 
         self.errors.extend(expr_analyzer.errors)
 

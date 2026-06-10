@@ -3162,3 +3162,144 @@ class TestSelectStringColumns:
         frame = FrameType({"id": Int64()}, rest=RowVar("r"))
         analyzer = _run_body(frame, 'out = df.with_columns("ghost")')
         assert analyzer.errors == []
+
+
+class TestUnknownColumnRegistration:
+    """Issue #8: columns added by un-inferable expressions stay in the schema."""
+
+    HEADER = textwrap.dedent(
+        PANDERA_HEADER
+        + """
+            class In(pa.DataFrameModel):
+                v: int
+                ts: pl.Datetime
+"""
+    )
+
+    def test_when_then_otherwise_column_registers_and_chains(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]) -> DataFrame[In]:
+                return df.with_columns(
+                    a=pl.when(pl.col("v") > 0).then(1).otherwise(0)
+                ).with_columns(b=pl.col("a") + 1)
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        inferred = results[0].inferred_return_type
+        assert inferred is not None
+        assert inferred.columns["a"].dtype == Unknown()
+        assert "b" in inferred.columns
+
+    def test_cast_after_uninferable_method_pins_dtype(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]) -> DataFrame[In]:
+                return df.with_columns(
+                    a=pl.col("v").interpolate().cast(pl.Int64)
+                ).with_columns(b=pl.col("a") + 1)
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        inferred = results[0].inferred_return_type
+        assert inferred is not None
+        assert inferred.columns["a"].dtype == Int64()
+        assert inferred.columns["b"].dtype == Int64()
+
+    def test_uninferable_chain_alias_survives_in_select(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]) -> DataFrame[In]:
+                return df.select(pl.col("v").interpolate().alias("x"))
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        inferred = results[0].inferred_return_type
+        assert inferred is not None
+        assert inferred.columns["x"].dtype == Unknown()
+
+    def test_uninferable_chain_keeps_receiver_name_in_with_columns(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]) -> DataFrame[In]:
+                return df.with_columns(pl.col("v").interpolate())
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        inferred = results[0].inferred_return_type
+        assert inferred is not None
+        assert inferred.columns["v"].dtype == Unknown()
+
+    def test_dt_strftime_returns_utf8(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]) -> DataFrame[In]:
+                return df.with_columns(ym=pl.col("ts").dt.strftime("%Y-%m"))
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        inferred = results[0].inferred_return_type
+        assert inferred is not None
+        assert inferred.columns["ym"].dtype == Utf8()
+
+    def test_dt_to_string_returns_utf8(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]) -> DataFrame[In]:
+                return df.with_columns(ym=pl.col("ts").dt.to_string("%Y-%m"))
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        inferred = results[0].inferred_return_type
+        assert inferred is not None
+        assert inferred.columns["ym"].dtype == Utf8()
+
+    def test_unknown_column_usable_as_group_by_key(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]) -> DataFrame[In]:
+                return (
+                    df.with_columns(ym=pl.when(pl.col("v") > 0).then(1).otherwise(0))
+                    .group_by("ym")
+                    .agg(total=pl.col("v").sum())
+                )
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        inferred = results[0].inferred_return_type
+        assert inferred is not None
+        assert inferred.columns["ym"].dtype == Unknown()
+        assert inferred.columns["total"].dtype == Int64()
+
+    def test_agg_kwarg_uninferable_registers_unknown(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]) -> DataFrame[In]:
+                return df.group_by("v").agg(n=pl.len())
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        inferred = results[0].inferred_return_type
+        assert inferred is not None
+        assert inferred.columns["n"].dtype == Unknown()
+
+    def test_select_kwarg_uninferable_registers_unknown(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]) -> DataFrame[In]:
+                return df.select(a=pl.when(pl.col("v") > 0).then(1).otherwise(0))
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        inferred = results[0].inferred_return_type
+        assert inferred is not None
+        assert inferred.columns["a"].dtype == Unknown()
