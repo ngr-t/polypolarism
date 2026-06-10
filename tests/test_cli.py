@@ -88,6 +88,22 @@ class TestCheckDirectory:
         assert results[0].passed is False
         assert any("PLY007" in str(e) for e in results[0].errors)
 
+    def test_when_nonbool_fixture_fails_with_ply008(self):
+        """Issue #37 fixture: non-boolean pl.when condition."""
+        results = check_file(FIXTURES_DIR / "invalid" / "when_nonbool_condition.py")
+
+        assert len(results) == 1
+        assert results[0].passed is False
+        assert any("PLY008" in str(e) and "when" in str(e) for e in results[0].errors)
+
+    def test_when_mixed_branches_fixture_fails(self):
+        """Issue #40 fixture: mixed when/then/otherwise branches infer String,
+        so the int declaration (coerce=False) fails."""
+        results = check_file(FIXTURES_DIR / "invalid" / "when_mixed_branches_declared_int.py")
+
+        assert len(results) == 1
+        assert results[0].passed is False
+
     def test_namespace_wrong_dtype_fixture_fails_with_ply012(self):
         """Issue #31 fixture: namespace accessors on wrong-dtype columns."""
         results = check_file(FIXTURES_DIR / "invalid" / "namespace_wrong_dtype.py")
