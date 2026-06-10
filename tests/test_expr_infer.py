@@ -11,18 +11,38 @@ from polypolarism.expr_infer import (
     infer_lit,
     infer_when_then_otherwise,
     promote_types,
+    supertype,
     unify_types,
 )
 from polypolarism.types import (
     Boolean,
+    Categorical,
+    DataType,
+    Date,
+    Datetime,
+    Decimal,
+    Duration,
+    Enum,
+    Float16,
     Float32,
     Float64,
     FrameType,
+    Int8,
+    Int16,
     Int32,
     Int64,
+    Int128,
+    List,
     Null,
     Nullable,
     RowVar,
+    Struct,
+    Time,
+    UInt8,
+    UInt16,
+    UInt32,
+    UInt64,
+    UInt128,
     Unknown,
     Utf8,
 )
@@ -368,3 +388,200 @@ class TestInferWhenThenOtherwise:
                 otherwise_type=Int64(),
             )
         assert "Boolean" in str(exc_info.value)
+
+
+class TestSupertype:
+    """Probed polars common-supertype relation (issues #37/#40/#41/#43).
+
+    Ground truth: polars 1.41.2, full dtype-pair matrix driven through
+    ``pl.when(c).then(pl.col("l")).otherwise(pl.col("r"))`` and cross-checked
+    via ``df.unpivot`` and ``Expr.shift(fill_value=pl.col(...))`` — all three
+    ops agree on every probed cell. Representative probe output::
+
+        Int64 + String  -> String          Boolean + Int64  -> Int64
+        Int32 + Float32 -> Float64         Date + Datetime  -> Datetime
+        Date  + Int64   -> Int64           Duration + Int64 -> Int64
+        Null  + Int64   -> Int64 (rows stay null)
+        List(Int64) + Int64   -> SchemaError (no supertype)
+        List(Int64) + List(String) -> List(String)
+        Boolean + Date  -> SchemaError     String + Duration -> InvalidOperationError
+    """
+
+    # ---- probed precise cells ----------------------------------------------
+
+    @pytest.mark.parametrize(
+        ("left", "right", "expected"),
+        [
+            # identical dtypes
+            (Int64(), Int64(), Int64()),
+            (Utf8(), Utf8(), Utf8()),
+            # numeric lattice (probed widths)
+            (Int32(), Int64(), Int64()),
+            (Int8(), Int16(), Int16()),
+            (UInt8(), UInt16(), UInt16()),
+            (Int8(), UInt8(), Int16()),
+            (Int8(), UInt16(), Int32()),
+            (Int8(), UInt32(), Int64()),
+            (Int8(), UInt64(), Float64()),
+            (Int32(), UInt16(), Int32()),
+            (Int64(), UInt64(), Float64()),
+            (Int128(), UInt64(), Int128()),
+            (Int64(), Int128(), Int128()),
+            (Int8(), Float32(), Float32()),
+            (Int16(), Float32(), Float32()),
+            (UInt16(), Float32(), Float32()),
+            (Int32(), Float32(), Float64()),
+            (Int128(), Float32(), Float64()),
+            (Int64(), Float64(), Float64()),
+            (Float32(), Float64(), Float64()),
+            # Boolean widens into any probed numeric
+            (Boolean(), Int64(), Int64()),
+            (Boolean(), Int8(), Int8()),
+            (Boolean(), UInt32(), UInt32()),
+            (Boolean(), Float64(), Float64()),
+            # Utf8 absorbs most scalar dtypes
+            (Int64(), Utf8(), Utf8()),
+            (Float64(), Utf8(), Utf8()),
+            (Boolean(), Utf8(), Utf8()),
+            (Date(), Utf8(), Utf8()),
+            (Time(), Utf8(), Utf8()),
+            (Datetime(), Utf8(), Utf8()),
+            (Decimal(10, 2), Utf8(), Utf8()),
+            (Categorical(), Utf8(), Utf8()),
+            (Enum(), Utf8(), Utf8()),
+            # temporal pairs
+            (Date(), Datetime(), Datetime()),
+            (Datetime("UTC"), Date(), Datetime("UTC")),
+            # temporal x numeric quirk cells (physical-repr promotion, probed)
+            (Date(), Int32(), Int32()),
+            (Date(), Int64(), Int64()),
+            (Date(), UInt32(), Int64()),
+            (Date(), UInt64(), Int64()),
+            (Date(), Float32(), Float32()),
+            (Date(), Float64(), Float64()),
+            (Datetime(), Int32(), Int64()),
+            (Datetime(), Int64(), Int64()),
+            (Datetime("UTC"), Float32(), Float64()),
+            (Duration(), Int32(), Int64()),
+            (Duration(), Int64(), Int64()),
+            (Duration(), Float64(), Float64()),
+            (Time(), Int32(), Int64()),
+            (Time(), Int64(), Int64()),
+            (Time(), Float32(), Float64()),
+            # Decimal x float
+            (Decimal(10, 2), Float32(), Float64()),
+            (Decimal(10, 2), Float64(), Float64()),
+            # List recursion
+            (List(Int64()), List(Utf8()), List(Utf8())),
+            (List(Int32()), List(Float64()), List(Float64())),
+            (List(List(Int64())), List(List(Utf8())), List(List(Utf8()))),
+        ],
+    )
+    def test_probed_supertype_cells(
+        self, left: DataType, right: DataType, expected: DataType
+    ) -> None:
+        assert supertype(left, right) == expected
+        assert supertype(right, left) == expected  # the relation is symmetric
+
+    # ---- probed no-supertype cells (polars raises at runtime) ---------------
+
+    @pytest.mark.parametrize(
+        ("left", "right"),
+        [
+            (List(Int64()), Int64()),
+            (List(Int64()), Utf8()),
+            (List(Int64()), Date()),
+            (Utf8(), Duration()),
+            (Boolean(), Date()),
+            (Boolean(), Time()),
+            (Boolean(), Datetime()),
+            (Boolean(), Duration()),
+            (Boolean(), Decimal(10, 2)),
+            (Boolean(), Categorical()),
+            (Boolean(), Enum()),
+            (Date(), Time()),
+            (Time(), Datetime()),
+            (Duration(), Date()),
+            (Duration(), Datetime()),
+            (Duration(), Time()),
+            (Datetime(), Datetime("UTC")),  # tz mismatch
+            (Datetime("UTC"), Datetime("Asia/Tokyo")),
+            (Date(), Int8()),  # probed: only the >=32-bit widths promote
+            (Date(), Int16()),
+            (Date(), UInt8()),
+            (Date(), Int128()),
+            (Time(), UInt32()),  # probed polars quirk: Datetime+UInt32 works, Time+UInt32 errors
+            (Time(), UInt64()),
+            (Datetime(), Int8()),
+            (Duration(), UInt16()),
+            (Decimal(10, 2), Date()),
+            (Decimal(10, 2), Boolean()),
+            (Decimal(10, 2), Categorical()),
+            (Categorical(), Int64()),
+            (Categorical(), Enum()),
+            (Enum(), Float64()),
+            (List(Date()), List(Time())),  # recursion propagates no-supertype
+        ],
+    )
+    def test_probed_no_supertype_cells_return_none(self, left: DataType, right: DataType) -> None:
+        assert supertype(left, right) is None
+        assert supertype(right, left) is None
+
+    # ---- Unknown / unprobed combinations stay silent -------------------------
+
+    @pytest.mark.parametrize(
+        ("left", "right"),
+        [
+            (Unknown(), Int64()),
+            (Int64(), Unknown()),
+            (Nullable(Unknown()), Utf8()),
+            (Unknown(), Unknown()),
+            # quirky-but-succeeding combos polypolarism deliberately does not
+            # model precisely (when/then broadcasts scalars into Structs;
+            # Decimal precision arithmetic is data-dependent):
+            (Struct({"f": Int64()}), Int64()),
+            (Struct({"f": Int64()}), Utf8()),
+            (Struct({"f": Int64()}), Boolean()),
+            (Decimal(10, 2), Int64()),
+            (Decimal(10, 2), Decimal(20, 4)),
+            # dtypes outside the probed numeric widths
+            (Float16(), Int64()),
+            (UInt128(), Int64()),
+        ],
+    )
+    def test_unprobed_combinations_return_unknown(self, left: DataType, right: DataType) -> None:
+        assert supertype(left, right) == Unknown()
+        assert supertype(right, left) == Unknown()
+
+    # ---- Null / Nullable handling -------------------------------------------
+
+    def test_null_plus_type_is_nullable(self) -> None:
+        """Probed: Null + Int64 -> Int64 with the null rows preserved, which
+        polypolarism models as Nullable[Int64] (consistent with unify_types)."""
+        assert supertype(Null(), Int64()) == Nullable(Int64())
+        assert supertype(Utf8(), Null()) == Nullable(Utf8())
+
+    def test_null_plus_null_is_null(self) -> None:
+        assert supertype(Null(), Null()) == Null()
+
+    def test_null_plus_nullable_stays_nullable(self) -> None:
+        assert supertype(Null(), Nullable(Int64())) == Nullable(Int64())
+
+    def test_nullable_operand_makes_result_nullable(self) -> None:
+        assert supertype(Nullable(Int64()), Utf8()) == Nullable(Utf8())
+        assert supertype(Int32(), Nullable(Int64())) == Nullable(Int64())
+        assert supertype(Nullable(Int64()), Nullable(Float64())) == Nullable(Float64())
+
+    def test_nullable_no_supertype_still_none(self) -> None:
+        assert supertype(Nullable(Boolean()), Date()) is None
+
+    def test_nullable_unknown_absorbs(self) -> None:
+        assert supertype(Nullable(Int64()), Unknown()) == Unknown()
+
+    def test_identical_nullable_types(self) -> None:
+        assert supertype(Nullable(Int64()), Nullable(Int64())) == Nullable(Int64())
+
+    def test_equal_parametrized_dtypes(self) -> None:
+        assert supertype(Datetime("UTC"), Datetime("UTC")) == Datetime("UTC")
+        assert supertype(Decimal(10, 2), Decimal(10, 2)) == Decimal(10, 2)
+        assert supertype(Struct({"f": Int64()}), Struct({"f": Int64()})) == Struct({"f": Int64()})
