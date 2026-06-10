@@ -93,17 +93,22 @@ class TestRightJoin:
 
 
 class TestFullJoin:
-    """Test full/outer join type inference."""
+    """Test full/outer join type inference.
+
+    polars does NOT coalesce full-join keys by default: both key columns
+    are kept (the right one suffixed) and both are nullable.
+    """
 
     def test_full_join_both_sides_nullable(self):
-        """Full join makes both sides nullable."""
+        """Full join makes both sides nullable and keeps both key columns."""
         left = FrameType({"id": Int64(), "name": Utf8()})
         right = FrameType({"id": Int64(), "value": Float64()})
 
         result = infer_join(left, right, on="id", how="full")
 
-        # Key column becomes nullable in full join
+        # Both key columns are kept and become nullable in a full join
         assert result.columns["id"].dtype == Nullable(Int64())
+        assert result.columns["id_right"].dtype == Nullable(Int64())
         # Both sides become nullable
         assert result.columns["name"].dtype == Nullable(Utf8())
         assert result.columns["value"].dtype == Nullable(Float64())
@@ -187,7 +192,7 @@ class TestJoinMultiKey:
         assert result.columns["b"].dtype == Nullable(Float64())
 
     def test_on_list_full_join_keys_nullable(self):
-        """Full join makes every multi-key column nullable."""
+        """Full join (uncoalesced default) keeps and null-wraps every key pair."""
         left = FrameType({"x": Int64(), "y": Utf8(), "a": Float64()})
         right = FrameType({"x": Int64(), "y": Utf8(), "b": Float64()})
 
@@ -195,6 +200,8 @@ class TestJoinMultiKey:
 
         assert result.columns["x"].dtype == Nullable(Int64())
         assert result.columns["y"].dtype == Nullable(Utf8())
+        assert result.columns["x_right"].dtype == Nullable(Int64())
+        assert result.columns["y_right"].dtype == Nullable(Utf8())
 
     def test_on_list_missing_key_raises(self):
         """Error when one of the multi-key columns is missing."""
@@ -207,14 +214,14 @@ class TestJoinMultiKey:
         assert "z" in str(exc_info.value)
 
     def test_left_on_right_on_lists(self):
-        """left_on/right_on lists preserve all key columns from both sides."""
+        """left_on/right_on lists drop the right key columns by default
+        (polars coalesces inner-join keys unless coalesce=False)."""
         left = FrameType({"x1": Int64(), "y1": Utf8(), "a": Float64()})
         right = FrameType({"x2": Int64(), "y2": Utf8(), "b": Float64()})
 
         result = infer_join(left, right, left_on=["x1", "y1"], right_on=["x2", "y2"], how="inner")
 
-        for col in ("x1", "y1", "x2", "y2", "a", "b"):
-            assert col in result.columns
+        assert set(result.columns) == {"x1", "y1", "a", "b"}
 
     def test_left_on_right_on_length_mismatch_raises(self):
         """Error when left_on and right_on have different lengths."""
@@ -229,15 +236,27 @@ class TestJoinWithLeftOnRightOn:
     """Test join with separate left_on/right_on keys."""
 
     def test_different_key_names(self):
-        """Join with different key column names."""
+        """Inner join coalesces by default: the right key column is dropped."""
         left = FrameType({"user_id": Int64(), "name": Utf8()})
         right = FrameType({"id": Int64(), "value": Float64()})
 
         result = infer_join(left, right, left_on="user_id", right_on="id", how="inner")
 
-        # Both key columns preserved
         assert result.columns["user_id"].dtype == Int64()
         assert result.columns["name"].dtype == Utf8()
+        assert result.columns["value"].dtype == Float64()
+        assert "id" not in result.columns
+
+    def test_different_key_names_coalesce_false_keeps_both(self):
+        """coalesce=False preserves both key columns under their own names."""
+        left = FrameType({"user_id": Int64(), "name": Utf8()})
+        right = FrameType({"id": Int64(), "value": Float64()})
+
+        result = infer_join(
+            left, right, left_on="user_id", right_on="id", how="inner", coalesce=False
+        )
+
+        assert result.columns["user_id"].dtype == Int64()
         assert result.columns["id"].dtype == Int64()
         assert result.columns["value"].dtype == Float64()
 
@@ -432,3 +451,255 @@ class TestJoinNullableKeyComparison:
         # Should not raise - nullable Int64 can join with Int64
         result = infer_join(left, right, on="id", how="inner")
         assert "id" in result.columns
+
+
+class TestJoinCoalesce:
+    """#24: key coalescing semantics per how x coalesce combination.
+
+    polars coalesces equi-join keys by default for inner/left/right joins
+    but NOT for full joins; an explicit ``coalesce=`` overrides the default.
+    """
+
+    def test_full_coalesce_true_key_non_nullable(self):
+        """Full join with coalesce=True: the coalesced key is never null (#24)."""
+        left = FrameType({"id": Int64(), "x": Int64()})
+        right = FrameType({"id": Int64(), "y": Int64()})
+
+        result = infer_join(left, right, on="id", how="full", coalesce=True)
+
+        assert set(result.columns) == {"id", "x", "y"}
+        assert result.columns["id"].dtype == Int64()
+        assert result.columns["x"].dtype == Nullable(Int64())
+        assert result.columns["y"].dtype == Nullable(Int64())
+
+    def test_full_coalesce_true_nullable_left_key_stays_nullable(self):
+        """A nullable input key stays nullable after full-join coalescing."""
+        left = FrameType({"id": Nullable(Int64()), "x": Int64()})
+        right = FrameType({"id": Int64(), "y": Int64()})
+
+        result = infer_join(left, right, on="id", how="full", coalesce=True)
+
+        assert result.columns["id"].dtype == Nullable(Int64())
+
+    def test_full_coalesce_true_nullable_right_key_stays_nullable(self):
+        """Nullability from the right key also survives full-join coalescing."""
+        left = FrameType({"id": Int64(), "x": Int64()})
+        right = FrameType({"id": Nullable(Int64()), "y": Int64()})
+
+        result = infer_join(left, right, on="id", how="full", coalesce=True)
+
+        assert result.columns["id"].dtype == Nullable(Int64())
+
+    def test_full_coalesce_false_same_as_default(self):
+        """Explicit coalesce=False matches the full-join default shape."""
+        left = FrameType({"id": Int64(), "x": Int64()})
+        right = FrameType({"id": Int64(), "y": Int64()})
+
+        result = infer_join(left, right, on="id", how="full", coalesce=False)
+
+        assert set(result.columns) == {"id", "x", "id_right", "y"}
+        assert result.columns["id"].dtype == Nullable(Int64())
+        assert result.columns["id_right"].dtype == Nullable(Int64())
+
+    def test_left_coalesce_false_keeps_right_key_nullable(self):
+        """Left join with coalesce=False keeps id_right (nullable)."""
+        left = FrameType({"id": Int64(), "x": Int64()})
+        right = FrameType({"id": Int64(), "y": Int64()})
+
+        result = infer_join(left, right, on="id", how="left", coalesce=False)
+
+        assert set(result.columns) == {"id", "x", "id_right", "y"}
+        assert result.columns["id"].dtype == Int64()
+        assert result.columns["id_right"].dtype == Nullable(Int64())
+        assert result.columns["y"].dtype == Nullable(Int64())
+
+    def test_right_coalesce_false_keeps_left_key_nullable(self):
+        """Right join with coalesce=False keeps the left key (nullable)."""
+        left = FrameType({"id": Int64(), "x": Int64()})
+        right = FrameType({"id": Int64(), "y": Int64()})
+
+        result = infer_join(left, right, on="id", how="right", coalesce=False)
+
+        assert set(result.columns) == {"id", "x", "id_right", "y"}
+        assert result.columns["id"].dtype == Nullable(Int64())
+        assert result.columns["x"].dtype == Nullable(Int64())
+        assert result.columns["id_right"].dtype == Int64()
+        assert result.columns["y"].dtype == Int64()
+
+    def test_inner_coalesce_false_keeps_both_keys_non_nullable(self):
+        """Inner join with coalesce=False keeps both keys, nothing nullable."""
+        left = FrameType({"id": Int64(), "x": Int64()})
+        right = FrameType({"id": Int64(), "y": Int64()})
+
+        result = infer_join(left, right, on="id", how="inner", coalesce=False)
+
+        assert set(result.columns) == {"id", "x", "id_right", "y"}
+        assert result.columns["id"].dtype == Int64()
+        assert result.columns["id_right"].dtype == Int64()
+
+    def test_left_coalesce_true_matches_default(self):
+        """Explicit coalesce=True on a left join matches the default shape."""
+        left = FrameType({"id": Int64(), "x": Int64()})
+        right = FrameType({"id": Int64(), "y": Int64()})
+
+        result = infer_join(left, right, on="id", how="left", coalesce=True)
+
+        assert set(result.columns) == {"id", "x", "y"}
+        assert result.columns["id"].dtype == Int64()
+
+    def test_right_coalesce_true_key_uses_right_type(self):
+        """Right join coalescing keeps the right side's key dtype (non-null)."""
+        left = FrameType({"id": Nullable(Int64()), "x": Int64()})
+        right = FrameType({"id": Int64(), "y": Int64()})
+
+        result = infer_join(left, right, on="id", how="right", coalesce=True)
+
+        assert set(result.columns) == {"id", "x", "y"}
+        assert result.columns["id"].dtype == Int64()
+        assert result.columns["x"].dtype == Nullable(Int64())
+
+    def test_multi_key_full_coalesce_true(self):
+        """Multi-key full join with coalesce=True: every key is non-null."""
+        left = FrameType({"x": Int64(), "y": Utf8(), "a": Float64()})
+        right = FrameType({"x": Int64(), "y": Utf8(), "b": Float64()})
+
+        result = infer_join(left, right, on=["x", "y"], how="full", coalesce=True)
+
+        assert set(result.columns) == {"x", "y", "a", "b"}
+        assert result.columns["x"].dtype == Int64()
+        assert result.columns["y"].dtype == Utf8()
+        assert result.columns["a"].dtype == Nullable(Float64())
+        assert result.columns["b"].dtype == Nullable(Float64())
+
+    def test_multi_key_left_coalesce_false(self):
+        """Multi-key left join with coalesce=False keeps every right key."""
+        left = FrameType({"x": Int64(), "y": Utf8(), "a": Float64()})
+        right = FrameType({"x": Int64(), "y": Utf8(), "b": Float64()})
+
+        result = infer_join(left, right, on=["x", "y"], how="left", coalesce=False)
+
+        assert set(result.columns) == {"x", "y", "a", "x_right", "y_right", "b"}
+        assert result.columns["x_right"].dtype == Nullable(Int64())
+        assert result.columns["y_right"].dtype == Nullable(Utf8())
+
+    def test_left_on_right_on_full_default_keeps_both_keys(self):
+        """Full join with left_on/right_on keeps both keys (nullable) by default."""
+        left = FrameType({"uid": Int64(), "x": Int64()})
+        right = FrameType({"id": Int64(), "y": Int64()})
+
+        result = infer_join(left, right, left_on="uid", right_on="id", how="full")
+
+        assert set(result.columns) == {"uid", "x", "id", "y"}
+        assert result.columns["uid"].dtype == Nullable(Int64())
+        assert result.columns["id"].dtype == Nullable(Int64())
+
+    def test_left_on_right_on_full_coalesce_true_keeps_left_name(self):
+        """Full join coalescing with left_on/right_on keeps the left key name."""
+        left = FrameType({"uid": Int64(), "x": Int64()})
+        right = FrameType({"id": Int64(), "y": Int64()})
+
+        result = infer_join(left, right, left_on="uid", right_on="id", how="full", coalesce=True)
+
+        assert set(result.columns) == {"uid", "x", "y"}
+        assert result.columns["uid"].dtype == Int64()
+
+    def test_left_on_right_on_right_coalesce_drops_left_key(self):
+        """Right join coalescing with left_on/right_on keeps the RIGHT key name."""
+        left = FrameType({"uid": Int64(), "x": Int64()})
+        right = FrameType({"id": Int64(), "y": Int64()})
+
+        result = infer_join(left, right, left_on="uid", right_on="id", how="right", coalesce=True)
+
+        assert set(result.columns) == {"x", "id", "y"}
+        assert result.columns["id"].dtype == Int64()
+        assert result.columns["x"].dtype == Nullable(Int64())
+
+    def test_left_on_right_on_left_default_drops_right_key(self):
+        """Left join with left_on/right_on coalesces (drops right key) by default."""
+        left = FrameType({"uid": Int64(), "x": Int64()})
+        right = FrameType({"id": Int64(), "y": Int64()})
+
+        result = infer_join(left, right, left_on="uid", right_on="id", how="left")
+
+        assert set(result.columns) == {"uid", "x", "y"}
+        assert result.columns["uid"].dtype == Int64()
+        assert result.columns["y"].dtype == Nullable(Int64())
+
+    @pytest.mark.parametrize("how", ["semi", "anti"])
+    @pytest.mark.parametrize("coalesce", [True, False, None])
+    def test_semi_anti_ignore_coalesce(self, how, coalesce):
+        """Semi/anti joins return the left schema regardless of coalesce."""
+        left = FrameType({"id": Int64(), "x": Int64()})
+        right = FrameType({"id": Int64(), "y": Int64()})
+
+        result = infer_join(left, right, on="id", how=how, coalesce=coalesce)
+
+        assert set(result.columns) == {"id", "x"}
+
+
+class TestCrossJoin:
+    """#26: cross join is left columns + right columns, no nullability."""
+
+    def test_cross_join_disjoint_columns(self):
+        """Cross join concatenates both schemas with dtypes unchanged."""
+        left = FrameType({"id": Int64(), "x": Int64()})
+        right = FrameType({"rid": Int64(), "y": Utf8()})
+
+        result = infer_join(left, right, how="cross")
+
+        assert set(result.columns) == {"id", "x", "rid", "y"}
+        assert result.columns["id"].dtype == Int64()
+        assert result.columns["x"].dtype == Int64()
+        assert result.columns["rid"].dtype == Int64()
+        assert result.columns["y"].dtype == Utf8()
+
+    def test_cross_join_collision_gets_suffix(self):
+        """Colliding right column names get the suffix, like other joins."""
+        left = FrameType({"id": Int64(), "v": Utf8()})
+        right = FrameType({"id": Int64(), "v": Float64()})
+
+        result = infer_join(left, right, how="cross")
+
+        assert set(result.columns) == {"id", "v", "id_right", "v_right"}
+        assert result.columns["v"].dtype == Utf8()
+        assert result.columns["v_right"].dtype == Float64()
+
+    def test_cross_join_custom_suffix(self):
+        """suffix= is honored for cross-join collisions."""
+        left = FrameType({"v": Utf8()})
+        right = FrameType({"v": Float64()})
+
+        result = infer_join(left, right, how="cross", suffix="_b")
+
+        assert set(result.columns) == {"v", "v_b"}
+        assert result.columns["v_b"].dtype == Float64()
+
+    def test_cross_join_preserves_nullability(self):
+        """Existing nullability passes through unchanged; none is added."""
+        left = FrameType({"a": Nullable(Int64())})
+        right = FrameType({"b": Float64()})
+
+        result = infer_join(left, right, how="cross")
+
+        assert result.columns["a"].dtype == Nullable(Int64())
+        assert result.columns["b"].dtype == Float64()
+
+    def test_cross_join_with_on_raises(self):
+        """Providing 'on' with a cross join is an error (polars raises too)."""
+        left = FrameType({"id": Int64()})
+        right = FrameType({"id": Int64()})
+
+        with pytest.raises(JoinError) as exc_info:
+            infer_join(left, right, on="id", how="cross")
+
+        assert "cross join takes no join keys" in str(exc_info.value)
+
+    def test_cross_join_with_left_on_right_on_raises(self):
+        """Providing left_on/right_on with a cross join is an error."""
+        left = FrameType({"id": Int64()})
+        right = FrameType({"rid": Int64()})
+
+        with pytest.raises(JoinError) as exc_info:
+            infer_join(left, right, left_on="id", right_on="rid", how="cross")
+
+        assert "cross join takes no join keys" in str(exc_info.value)
