@@ -343,6 +343,7 @@ IDENTITY_FRAME_METHODS: frozenset[str] = frozenset(
         "tail",
         "limit",
         "slice",
+        "gather_every",
         "reverse",
         "sample",
         "unique",

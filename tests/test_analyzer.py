@@ -4117,3 +4117,46 @@ class TestSemiAntiJoin:
         assert results[0].inferred_return_type == FrameType(
             {"x": Int64(), "y": Utf8(), "a": Float64()}
         )
+
+
+class TestGatherEvery:
+    """#15: gather_every(n) is schema-preserving on both frame kinds."""
+
+    def test_gather_every_eager(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                id: int
+                value: pl.Float64
+
+            def f(data: DataFrame[S]) -> DataFrame[S]:
+                return data.gather_every(2)
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft == FrameType({"id": Int64(), "value": Float64()})
+        assert ft is not None and ft.is_lazy is False
+
+    def test_gather_every_lazy(self):
+        source = textwrap.dedent(
+            """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import LazyFrame
+
+            class S(pa.DataFrameModel):
+                id: int
+                value: pl.Float64
+
+            def f(data: LazyFrame[S]) -> LazyFrame[S]:
+                return data.gather_every(2, offset=1)
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft == FrameType({"id": Int64(), "value": Float64()})
+        assert ft is not None and ft.is_lazy is True
