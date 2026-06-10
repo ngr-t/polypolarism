@@ -2,9 +2,10 @@
 
 Walks upward from a target path to find ``pyproject.toml`` and consults
 (in priority order): an explicit CLI override, ``[tool.polypolarism]`` in
-the target's ``pyproject.toml``, the project's ``uv.lock`` (exact version),
-or the floor specified in ``[project.dependencies]`` /
-``[dependency-groups.*]``.
+the target's ``pyproject.toml``, the project's ``uv.lock`` or
+``poetry.lock`` (exact pinned version), the distribution installed in the
+running environment (``importlib.metadata``), or — as a last resort — the
+floor specified in ``[project.dependencies]`` / ``[dependency-groups.*]``.
 
 Detection is best-effort and never fails the run — when a version cannot
 be inferred, no warning is emitted and the analyzer proceeds with its
@@ -13,6 +14,7 @@ default assumptions.
 
 from __future__ import annotations
 
+import importlib.metadata
 import re
 import tomllib
 from dataclasses import dataclass
@@ -100,9 +102,11 @@ class DetectedVersion:
 
     ``source`` is a human-readable origin: ``"cli"``,
     ``"pyproject.toml [tool.polypolarism]"``, ``"uv.lock"``,
+    ``"poetry.lock"``, ``"installed environment"``,
     ``"pyproject.toml dependencies"``, or ``"pyproject.toml dependency-groups"``.
     ``exact`` is True when the source pins an exact version (CLI / lockfile /
-    explicit config); False when it was extracted from a ``>=`` floor.
+    explicit config / installed distribution); False when it was extracted
+    from a ``>=`` floor.
     """
 
     package: str
@@ -152,8 +156,14 @@ def detect_versions(
       2. ``[tool.polypolarism] polars_version | pandera_version`` in the
          target's ``pyproject.toml``.
       3. ``uv.lock`` package entry (exact version).
-      4. ``pyproject.toml`` ``[project.dependencies]`` floor.
-      5. ``pyproject.toml`` ``[dependency-groups.*]`` floor.
+      4. ``poetry.lock`` package entry (exact version).
+      5. The distribution installed in the running environment
+         (``importlib.metadata``).
+      6. ``pyproject.toml`` ``[project.dependencies]`` floor.
+      7. ``pyproject.toml`` ``[dependency-groups.*]`` floor.
+
+    The installed-environment fallback (5) applies even when
+    ``project_root`` is ``None``.
     """
     polars: DetectedVersion | None = None
     pandera: DetectedVersion | None = None
@@ -167,54 +177,54 @@ def detect_versions(
         if v is not None:
             pandera = DetectedVersion("pandera", v, "cli", exact=True)
 
-    if project_root is None:
-        return VersionInfo(polars=polars, pandera=pandera)
-
-    pyproject_path = project_root / "pyproject.toml"
     pyproject_data: dict | None = None
-    if pyproject_path.is_file():
-        try:
-            pyproject_data = tomllib.loads(pyproject_path.read_text())
-        except (OSError, tomllib.TOMLDecodeError):
-            pyproject_data = None
+    if project_root is not None:
+        pyproject_path = project_root / "pyproject.toml"
+        if pyproject_path.is_file():
+            try:
+                pyproject_data = tomllib.loads(pyproject_path.read_text())
+            except (OSError, tomllib.TOMLDecodeError):
+                pyproject_data = None
 
-    if pyproject_data is not None:
-        tool_section = pyproject_data.get("tool", {}).get("polypolarism", {})
-        if polars is None:
-            cfg = tool_section.get("polars_version")
-            if isinstance(cfg, str):
-                v = Version.parse(cfg)
-                if v is not None:
-                    polars = DetectedVersion(
-                        "polars", v, "pyproject.toml [tool.polypolarism]", exact=True
-                    )
-        if pandera is None:
-            cfg = tool_section.get("pandera_version")
-            if isinstance(cfg, str):
-                v = Version.parse(cfg)
-                if v is not None:
-                    pandera = DetectedVersion(
-                        "pandera", v, "pyproject.toml [tool.polypolarism]", exact=True
-                    )
+        if pyproject_data is not None:
+            tool_section = pyproject_data.get("tool", {}).get("polypolarism", {})
+            if polars is None:
+                cfg = tool_section.get("polars_version")
+                if isinstance(cfg, str):
+                    v = Version.parse(cfg)
+                    if v is not None:
+                        polars = DetectedVersion(
+                            "polars", v, "pyproject.toml [tool.polypolarism]", exact=True
+                        )
+            if pandera is None:
+                cfg = tool_section.get("pandera_version")
+                if isinstance(cfg, str):
+                    v = Version.parse(cfg)
+                    if v is not None:
+                        pandera = DetectedVersion(
+                            "pandera", v, "pyproject.toml [tool.polypolarism]", exact=True
+                        )
 
-    lockfile = project_root / "uv.lock"
-    if lockfile.is_file() and (polars is None or pandera is None):
-        try:
-            lock_data = tomllib.loads(lockfile.read_text())
-        except (OSError, tomllib.TOMLDecodeError):
-            lock_data = {}
-        for pkg in lock_data.get("package", []):
-            name = pkg.get("name")
-            ver_str = pkg.get("version")
-            if not isinstance(name, str) or not isinstance(ver_str, str):
+        for lock_name in ("uv.lock", "poetry.lock"):
+            if polars is not None and pandera is not None:
+                break
+            lock_path = project_root / lock_name
+            if not lock_path.is_file():
                 continue
-            v = Version.parse(ver_str)
-            if v is None:
-                continue
-            if name == "polars" and polars is None:
-                polars = DetectedVersion("polars", v, "uv.lock", exact=True)
-            elif name == "pandera" and pandera is None:
-                pandera = DetectedVersion("pandera", v, "uv.lock", exact=True)
+            locked = _lockfile_versions(lock_path)
+            if polars is None and "polars" in locked:
+                polars = DetectedVersion("polars", locked["polars"], lock_name, exact=True)
+            if pandera is None and "pandera" in locked:
+                pandera = DetectedVersion("pandera", locked["pandera"], lock_name, exact=True)
+
+    if polars is None:
+        v = _installed_version("polars")
+        if v is not None:
+            polars = DetectedVersion("polars", v, "installed environment", exact=True)
+    if pandera is None:
+        v = _installed_version("pandera")
+        if v is not None:
+            pandera = DetectedVersion("pandera", v, "installed environment", exact=True)
 
     if pyproject_data is not None and (polars is None or pandera is None):
         deps = pyproject_data.get("project", {}).get("dependencies", [])
@@ -254,6 +264,46 @@ def detect_versions(
                     break
 
     return VersionInfo(polars=polars, pandera=pandera)
+
+
+def _lockfile_versions(lock_path: Path) -> dict[str, Version]:
+    """Extract polars / pandera versions from a TOML lockfile whose
+    ``[[package]]`` entries carry ``name`` and ``version`` — the shape shared
+    by ``uv.lock`` and ``poetry.lock``. Returns ``{}`` on any parse failure.
+    """
+    try:
+        lock_data = tomllib.loads(lock_path.read_text())
+    except (OSError, tomllib.TOMLDecodeError):
+        return {}
+    versions: dict[str, Version] = {}
+    packages = lock_data.get("package", [])
+    if not isinstance(packages, list):
+        return {}
+    for pkg in packages:
+        if not isinstance(pkg, dict):
+            continue
+        name = pkg.get("name")
+        ver_str = pkg.get("version")
+        if not isinstance(name, str) or not isinstance(ver_str, str):
+            continue
+        if name not in ("polars", "pandera") or name in versions:
+            continue
+        v = Version.parse(ver_str)
+        if v is not None:
+            versions[name] = v
+    return versions
+
+
+def _installed_version(package: str) -> Version | None:
+    """Version of ``package`` installed in the environment polypolarism runs
+    in, or ``None`` when it is not installed (or its version string is
+    unparseable). Module-level so tests can monkeypatch it.
+    """
+    try:
+        ver_str = importlib.metadata.version(package)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+    return Version.parse(ver_str)
 
 
 _DEP_PATTERN = re.compile(
