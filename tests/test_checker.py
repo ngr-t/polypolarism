@@ -1859,6 +1859,74 @@ class TestShiftFillValueEndToEnd:
         assert results[0].passed is True, results[0].errors
 
 
+class TestDiffTemporalEndToEnd:
+    """Issue #46 repro: ``diff()`` on a Date column yields Duration.
+
+    Probed (polars 1.41.2): ``pl.col(date).diff()`` -> Duration with a null
+    head slot, so the declared column must be ``pl.Duration`` +
+    ``pa.Field(nullable=True)``. polypolarism's parameterless ``Duration()``
+    matches polars' time-unit-parametrised Duration.
+    """
+
+    HEADER = textwrap.dedent("""
+        import polars as pl
+        import pandera.polars as pa
+        from pandera.typing.polars import DataFrame
+
+        class Dates(pa.DataFrameModel):
+            d: pl.Date
+
+            class Config:
+                coerce = True
+    """)
+
+    def test_date_diff_passes_nullable_duration_declaration(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            class DurOut(pa.DataFrameModel):
+                df: pl.Duration = pa.Field(nullable=True)
+
+                class Config:
+                    strict = True
+                    coerce = True
+
+            @pa.check_types
+            def ok_date_diff(df: DataFrame[Dates]) -> DataFrame[DurOut]:
+                return df.select(df=pl.col("d").diff())
+        """
+        )
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is True, results[0].errors
+
+    def test_date_diff_mismatch_now_names_duration(self):
+        # A non-nullable declaration still fails — but on nullability only:
+        # the inferred side must read Duration?, not Date?.
+        source = self.HEADER + textwrap.dedent(
+            """
+            class DurOut(pa.DataFrameModel):
+                df: pl.Duration
+
+                class Config:
+                    strict = True
+                    coerce = True
+
+            @pa.check_types
+            def date_diff(df: DataFrame[Dates]) -> DataFrame[DurOut]:
+                return df.select(df=pl.col("d").diff())
+        """
+        )
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is False
+        diffs = [e for e in results[0].errors if isinstance(e, TypeDifference)]
+        assert len(diffs) == 1
+        assert "Duration?" in str(diffs[0])
+        assert "Date" not in str(diffs[0])
+
+
 class TestUniqueSubsetEndToEnd:
     """Issue #35 repro: ``unique(subset=[...])`` with a ghost column must fail."""
 

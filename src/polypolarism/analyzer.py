@@ -707,6 +707,18 @@ def _cast_invalid(source_inner: DataType, target_inner: DataType) -> bool:
     return (scat, tcat) in _CAST_INVALID_PAIRS
 
 
+# ``Expr.diff`` on an unsigned-int receiver widens to the signed dtype of
+# the next width so negative differences are representable (probed polars
+# 1.41.2; issue #46). UInt128 is absent: it has no wider signed dtype and
+# polars keeps UInt128.
+_DIFF_UNSIGNED_WIDENING: dict[type[DataType], DataType] = {
+    UInt8: Int16(),
+    UInt16: Int32(),
+    UInt32: Int64(),
+    UInt64: Int64(),
+}
+
+
 def _wrap_like(receiver: DataType, new_inner: DataType) -> DataType:
     """Preserve the receiver's outer ``Nullable`` wrapper around a new inner dtype."""
     if isinstance(receiver, Nullable):
@@ -2334,6 +2346,20 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                     # A null fill (fill_value=None / pl.lit(None)) behaves
                     # like no fill (probed) — fall through to the wrap.
             inner = receiver_type.inner if isinstance(receiver_type, Nullable) else receiver_type
+            if method == "diff":
+                # ``diff`` is a subtraction, not a dtype-preserving window
+                # (issue #46). Probed (polars 1.41.2): a temporal receiver
+                # (Date / Datetime — any tz — / Time / Duration) yields
+                # Duration; an unsigned-int receiver widens to the signed
+                # dtype of the next width (UInt8 -> Int16, UInt16 -> Int32,
+                # UInt32 -> Int64, UInt64 -> Int64; UInt128 has no wider
+                # signed dtype and stays UInt128). Signed ints and floats
+                # keep their dtype — the generic wrap below.
+                if isinstance(inner, (Date, Datetime, Time, Duration)):
+                    return receiver_name, Nullable(Duration())
+                widened = _DIFF_UNSIGNED_WIDENING.get(type(inner))
+                if widened is not None:
+                    return receiver_name, Nullable(widened)
             return receiver_name, Nullable(inner)
 
         # Rolling reductions returning Float64.

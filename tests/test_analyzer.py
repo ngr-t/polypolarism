@@ -18,6 +18,7 @@ from polypolarism.types import (
     Decimal,
     Duration,
     Enum,
+    Float32,
     Float64,
     FrameType,
     Int8,
@@ -28,7 +29,11 @@ from polypolarism.types import (
     Nullable,
     RowVar,
     Time,
+    UInt8,
+    UInt16,
     UInt32,
+    UInt64,
+    UInt128,
     Unknown,
     Utf8,
 )
@@ -2196,6 +2201,85 @@ class TestM5ShiftDiff:
         ft = results[0].inferred_return_type
         assert ft is not None
         assert ft.columns["v"].dtype == Nullable(Float64())
+
+
+class TestDiffTemporalAndUnsigned:
+    """Issue #46: ``diff()`` on temporal columns yields Duration; unsigned
+    int receivers widen to a signed dtype.
+
+    Probed (polars 1.41.2):
+    - Date.diff / Datetime.diff (any tz) / Time.diff / Duration.diff
+      -> Duration (nullable: head slot is null)
+    - UInt8.diff -> Int16, UInt16.diff -> Int32, UInt32.diff -> Int64,
+      UInt64.diff -> Int64; UInt128.diff stays UInt128
+    - signed ints / floats keep their dtype (Int8 -> Int8, Float32 -> Float32)
+    """
+
+    @pytest.mark.parametrize(
+        "receiver",
+        [Date(), Datetime(), Datetime(tz="UTC"), Time(), Duration()],
+        ids=["date", "datetime", "datetime_tz", "time", "duration"],
+    )
+    def test_temporal_diff_is_nullable_duration(self, receiver):
+        frame = FrameType({"t": receiver})
+        analyzer = _run_body(frame, 'out = df.select(d=pl.col("t").diff())')
+        assert analyzer.errors == []
+        assert analyzer.var_types["out"].columns["d"].dtype == Nullable(Duration())
+
+    def test_nullable_temporal_diff_is_nullable_duration(self):
+        frame = FrameType({"t": Nullable(Date())})
+        analyzer = _run_body(frame, 'out = df.select(d=pl.col("t").diff())')
+        assert analyzer.errors == []
+        assert analyzer.var_types["out"].columns["d"].dtype == Nullable(Duration())
+
+    @pytest.mark.parametrize(
+        ("receiver", "expected_inner"),
+        [
+            (UInt8(), Int16()),
+            (UInt16(), Int32()),
+            (UInt32(), Int64()),
+            (UInt64(), Int64()),
+        ],
+        ids=["u8", "u16", "u32", "u64"],
+    )
+    def test_unsigned_diff_widens_to_signed(self, receiver, expected_inner):
+        frame = FrameType({"v": receiver})
+        analyzer = _run_body(frame, 'out = df.select(d=pl.col("v").diff())')
+        assert analyzer.errors == []
+        assert analyzer.var_types["out"].columns["d"].dtype == Nullable(expected_inner)
+
+    @pytest.mark.parametrize(
+        "receiver",
+        [UInt128(), Int8(), Int64(), Float32(), Float64()],
+        ids=["u128", "i8", "i64", "f32", "f64"],
+    )
+    def test_other_numeric_diff_keeps_dtype(self, receiver):
+        # UInt128 has no wider signed dtype — polars keeps it (probed).
+        frame = FrameType({"v": receiver})
+        analyzer = _run_body(frame, 'out = df.select(d=pl.col("v").diff())')
+        assert analyzer.errors == []
+        assert analyzer.var_types["out"].columns["d"].dtype == Nullable(receiver)
+
+    def test_unknown_receiver_diff_stays_unknown(self):
+        frame = FrameType({"v": Unknown()})
+        analyzer = _run_body(frame, 'out = df.select(d=pl.col("v").diff())')
+        assert analyzer.errors == []
+        assert analyzer.var_types["out"].columns["d"].dtype == Nullable(Unknown())
+
+    def test_shift_on_temporal_is_untouched(self):
+        # Regression guard: only ``diff`` maps to Duration — ``shift``
+        # keeps the receiver dtype.
+        frame = FrameType({"t": Date()})
+        analyzer = _run_body(frame, 'out = df.select(d=pl.col("t").shift(1))')
+        assert analyzer.errors == []
+        assert analyzer.var_types["out"].columns["d"].dtype == Nullable(Date())
+
+    def test_pct_change_on_unsigned_is_untouched(self):
+        # ``pct_change`` keeps the generic shift-like behaviour.
+        frame = FrameType({"v": UInt32()})
+        analyzer = _run_body(frame, 'out = df.select(d=pl.col("v").pct_change())')
+        assert analyzer.errors == []
+        assert analyzer.var_types["out"].columns["d"].dtype == Nullable(UInt32())
 
 
 class TestM5Over:
