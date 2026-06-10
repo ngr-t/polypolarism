@@ -6119,3 +6119,109 @@ class TestExprFilterPredicateDtype:
         results = self._analyze('df.select(pl.col("v").filter("ghost").alias("x"))')
         assert any("PLY001" in e and "ghost" in e for e in results[0].errors)
         assert not any("PLY008" in e for e in results[0].errors)
+
+
+class TestSortKeyValidation:
+    """Issue #29: ``sort`` validates key columns like drop/rename do (PLY007)."""
+
+    HEADER = textwrap.dedent(
+        PANDERA_HEADER
+        + """
+            class In(pa.DataFrameModel):
+                a: int
+                b: str
+        """
+    )
+
+    def _analyze(self, body: str, extra_imports: str = ""):
+        source = (
+            extra_imports
+            + self.HEADER
+            + textwrap.dedent(
+                f"""
+            def f(df: DataFrame[In]):
+                return {body}
+            """
+            )
+        )
+        return analyze_source(source)
+
+    def test_missing_string_key_flags_ply007(self):
+        results = self._analyze('df.sort("ghost")')
+        assert any("PLY007" in e and "ghost" in e for e in results[0].errors)
+
+    def test_existing_string_key_passes(self):
+        results = self._analyze('df.sort("a")')
+        assert results[0].errors == []
+
+    def test_varargs_keys_each_checked(self):
+        results = self._analyze('df.sort("a", "ghost")')
+        assert any("PLY007" in e and "ghost" in e for e in results[0].errors)
+
+    def test_list_keys_each_checked(self):
+        results = self._analyze('df.sort(["a", "ghost"])')
+        assert any("PLY007" in e and "ghost" in e for e in results[0].errors)
+
+    def test_by_kwarg_missing_key_flags_ply007(self):
+        results = self._analyze('df.sort(by="ghost")')
+        assert any("PLY007" in e and "ghost" in e for e in results[0].errors)
+
+    def test_by_kwarg_list_passes(self):
+        results = self._analyze('df.sort(by=["a", "b"])')
+        assert results[0].errors == []
+
+    def test_const_name_key_resolves(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]):
+                key = "ghost"
+                return df.sort(key)
+            """
+        )
+        results = analyze_source(source)
+        assert any("PLY007" in e and "ghost" in e for e in results[0].errors)
+
+    def test_pl_col_missing_key_flags_ply001(self):
+        results = self._analyze('df.sort(pl.col("ghost"))')
+        assert any("PLY001" in e and "ghost" in e for e in results[0].errors)
+
+    def test_pl_col_existing_key_passes(self):
+        results = self._analyze('df.sort(pl.col("a"))')
+        assert results[0].errors == []
+
+    def test_selector_keys_pass(self):
+        results = self._analyze(
+            "df.sort(cs.numeric())", extra_imports="import polars.selectors as cs\n"
+        )
+        assert results[0].errors == []
+
+    def test_modifier_kwargs_are_ignored(self):
+        results = self._analyze('df.sort("a", descending=True, nulls_last=True)')
+        assert results[0].errors == []
+
+    def test_open_frame_missing_key_not_flagged(self):
+        frame = FrameType({"id": Int64()}, rest=RowVar("r"))
+        analyzer = _run_body(frame, 'out = df.sort("ghost")')
+        assert analyzer.errors == []
+
+    def test_sort_stays_identity_typed(self):
+        results = self._analyze('df.sort("a")')
+        assert results[0].inferred_return_type == FrameType({"a": Int64(), "b": Utf8()})
+
+    def test_lazy_sort_preserves_laziness(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            from pandera.typing.polars import LazyFrame
+
+            class In(pa.DataFrameModel):
+                a: int
+                b: str
+
+            def f(lf: LazyFrame[In]) -> DataFrame[In]:
+                return lf.sort("a").collect()
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        assert results[0].inferred_return_type == FrameType({"a": Int64(), "b": Utf8()})

@@ -1432,3 +1432,46 @@ class TestFilterPredicateEndToEnd:
 
         assert len(results) == 1
         assert results[0].passed is True, results[0].errors
+
+
+class TestSortKeyEndToEnd:
+    """Issue #29 repro: sorting by a non-existent column must fail the check."""
+
+    HEADER = textwrap.dedent("""
+        import polars as pl
+        import pandera.polars as pa
+        from pandera.typing.polars import DataFrame
+
+        class AInt(pa.DataFrameModel):
+            a: int
+
+            class Config:
+                coerce = True
+    """)
+
+    def test_missing_sort_key_fails_with_ply007(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            @pa.check_types
+            def bug_sort_nonexistent(df: DataFrame[AInt]) -> DataFrame[AInt]:
+                return df.sort("ghost")
+        """
+        )
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is False
+        assert any("PLY007" in str(e) for e in results[0].errors)
+
+    def test_existing_sort_key_passes(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            @pa.check_types
+            def sort_existing(df: DataFrame[AInt]) -> DataFrame[AInt]:
+                return df.sort("a")
+        """
+        )
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is True, results[0].errors

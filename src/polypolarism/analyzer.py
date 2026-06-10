@@ -33,6 +33,7 @@ from polypolarism.diagnostics import (
     PLY004,
     PLY005,
     PLY006,
+    PLY007,
     PLY008,
     PLY010,
     PLY011,
@@ -2085,6 +2086,12 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     )
                 elif method_name == "filter":
                     return _lazy_like(self._infer_filter_call(receiver_type, node), receiver_type)
+                elif method_name == "sort":
+                    # Identity-shaped like the _IDENTITY_FRAME_METHODS
+                    # fallback below, but the sort keys are validated
+                    # (issue #29). Must be dispatched before that fallback —
+                    # ``sort`` stays in the compat identity set.
+                    return _lazy_like(self._infer_sort_call(receiver_type, node), receiver_type)
                 elif method_name == "explode":
                     return _lazy_like(self._infer_explode_call(receiver_type, node), receiver_type)
                 elif method_name == "vstack":
@@ -3259,6 +3266,42 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 expr_analyzer.errors.append(pred_error)
         for kw in node.keywords:
             expr_analyzer.analyze_select_expr(kw.value)
+        self.errors.extend(expr_analyzer.errors)
+        return input_frame
+
+    def _infer_sort_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
+        """Identity-typed, but validate that every sort key exists (issue #29).
+
+        Keys come from positional args and the ``by=`` kwarg: string
+        constants, list/tuple-of-string literals, constant-bound names,
+        selectors (which resolve against the frame, so they can't name a
+        missing column) and ``pl.col(...)`` expressions (walked through the
+        expression analyzer so PLY001 fires). A string key missing from a
+        closed frame is PLY007; open frames stay error-free. The modifier
+        kwargs (``descending=`` / ``nulls_last=`` / ``maintain_order=`` /
+        ``multithreaded=``) are ignored.
+        """
+        key_nodes: list[ast.expr] = list(node.args)
+        for kw in node.keywords:
+            if kw.arg == "by":
+                key_nodes.append(kw.value)
+
+        expr_analyzer = ExpressionAnalyzer(
+            input_frame, warnings=self.warnings, registry=self.registry
+        )
+        for key_node in key_nodes:
+            if _resolve_selector(key_node, input_frame) is not None:
+                continue
+            single = self._const_str(key_node)
+            names = [single] if single is not None else self._const_str_list(key_node)
+            if names is None:
+                # Expression key (``pl.col(...)`` chains etc.) — walk it for
+                # its PLY001 side effects; anything unrecognised stays silent.
+                expr_analyzer.analyze_select_expr(key_node)
+                continue
+            for name in names:
+                if name not in input_frame.columns and input_frame.rest is None:
+                    self.errors.append(tag(PLY007, f"sort: column '{name}' not found"))
         self.errors.extend(expr_analyzer.errors)
         return input_frame
 
