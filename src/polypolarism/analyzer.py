@@ -1584,6 +1584,30 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         """
         self.analyze_select_expr(node)
 
+    def _check_over_key(self, node: ast.expr) -> None:
+        """Validate one ``over`` partition / order key (issue #32).
+
+        A string constant is a column name — checked through ``infer_col``
+        so a missing column is PLY001 on a closed frame and silently
+        ``Unknown`` on an open one. List/tuple literals are checked
+        elementwise. Anything else (``pl.col(...)`` chains etc.) is walked
+        through the expression analyzer for its error side effects; the
+        ExpressionAnalyzer has no constant environment, so a non-literal
+        name stays silent (no false positives).
+        """
+        s = _str_constant(node)
+        if s is not None:
+            try:
+                infer_col(s, self.current_frame)
+            except ColumnNotFoundError as e:
+                self.errors.append(tag(PLY001, str(e)))
+            return
+        if isinstance(node, (ast.List, ast.Tuple)):
+            for elt in node.elts:
+                self._check_over_key(elt)
+            return
+        self._validate_subexpr(node)
+
     def _analyze_method_chain(self, node: ast.expr) -> tuple[str | None, DataType | None] | None:
         """Analyze ``pl.col("x").<method>(...)`` style chains.
 
@@ -1687,6 +1711,21 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             if isinstance(receiver_type, Nullable):
                 result = Nullable(Float64())
             return receiver_name, result
+
+        # ``Expr.over(...)`` — windowed expression: dtype-preserving, but
+        # every partition / order key must exist on the frame (issue #32;
+        # same gap class as sort #29). Keys come from the positional args
+        # plus the ``partition_by=`` / ``order_by=`` kwargs — polars
+        # resolves string kwargs as column names too (verified 1.41.2).
+        # ``mapping_strategy=`` and the other modifier kwargs are not keys.
+        if method == "over":
+            key_nodes: list[ast.expr] = list(node.args)
+            for kw in node.keywords:
+                if kw.arg in ("partition_by", "order_by"):
+                    key_nodes.append(kw.value)
+            for key_node in key_nodes:
+                self._check_over_key(key_node)
+            return receiver_name, receiver_type
 
         # Dtype-preserving methods.
         if method in self._DTYPE_PRESERVING_METHODS and receiver_type is not None:
