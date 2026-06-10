@@ -9,7 +9,6 @@ from polypolarism.expr_infer import (
     infer_cast,
     infer_col,
     infer_lit,
-    infer_when_then_otherwise,
     promote_types,
     supertype,
     unify_types,
@@ -310,84 +309,13 @@ class TestUnifyTypes:
         assert result == Unknown()
 
 
-class TestInferWhenThenOtherwise:
-    """Tests for when/then/otherwise type inference."""
-
-    def test_when_then_otherwise_same_types(self) -> None:
-        """when/then/otherwise with same types should return that type."""
-        result = infer_when_then_otherwise(
-            condition=Boolean(),
-            then_type=Int64(),
-            otherwise_type=Int64(),
-        )
-        assert result == Int64()
-
-    def test_when_then_otherwise_promotes_numeric_types(self) -> None:
-        """when/then/otherwise should promote Int64 and Float64 to Float64."""
-        result = infer_when_then_otherwise(
-            condition=Boolean(),
-            then_type=Int64(),
-            otherwise_type=Float64(),
-        )
-        assert result == Float64()
-
-    def test_when_then_otherwise_nullable_increases(self) -> None:
-        """when/then/otherwise should be nullable if either branch is nullable."""
-        result = infer_when_then_otherwise(
-            condition=Boolean(),
-            then_type=Nullable(Int64()),
-            otherwise_type=Int64(),
-        )
-        assert result == Nullable(Int64())
-
-    def test_when_then_otherwise_nullable_condition_makes_result_nullable(self) -> None:
-        """when/then/otherwise with nullable condition makes result nullable.
-
-        This is because when condition is null, the result could be null.
-        """
-        result = infer_when_then_otherwise(
-            condition=Nullable(Boolean()),
-            then_type=Int64(),
-            otherwise_type=Int64(),
-        )
-        assert result == Nullable(Int64())
-
-    def test_when_then_otherwise_with_null_then(self) -> None:
-        """when/then/otherwise with Null in then branch."""
-        result = infer_when_then_otherwise(
-            condition=Boolean(),
-            then_type=Null(),
-            otherwise_type=Int64(),
-        )
-        assert result == Nullable(Int64())
-
-    def test_when_then_otherwise_with_null_otherwise(self) -> None:
-        """when/then/otherwise with Null in otherwise branch."""
-        result = infer_when_then_otherwise(
-            condition=Boolean(),
-            then_type=Int64(),
-            otherwise_type=Null(),
-        )
-        assert result == Nullable(Int64())
-
-    def test_when_then_otherwise_incompatible_types_raises_error(self) -> None:
-        """when/then/otherwise with incompatible types should raise error."""
-        with pytest.raises(TypeUnificationError):
-            infer_when_then_otherwise(
-                condition=Boolean(),
-                then_type=Int64(),
-                otherwise_type=Utf8(),
-            )
-
-    def test_when_then_otherwise_condition_must_be_boolean(self) -> None:
-        """when/then/otherwise condition must be Boolean or Nullable[Boolean]."""
-        with pytest.raises(TypeError) as exc_info:
-            infer_when_then_otherwise(
-                condition=Int64(),
-                then_type=Int64(),
-                otherwise_type=Int64(),
-            )
-        assert "Boolean" in str(exc_info.value)
+# ``TestInferWhenThenOtherwise`` was deliberately removed together with
+# ``infer_when_then_otherwise`` (issues #37/#40): the function was never
+# wired into the analyzer, and its nullable-condition rule contradicts
+# probed polars 1.41.2 behaviour — a null condition row takes the
+# *otherwise* branch (``pl.when(pl.Series([True, None, False]))
+# .then(10).otherwise(20)`` -> ``[10, 20, 20]``, null_count 0). The probed
+# semantics live in ``analyzer._analyze_when_chain`` + ``supertype`` below.
 
 
 class TestSupertype:

@@ -55,6 +55,7 @@ from polypolarism.expr_infer import (
     infer_col,
     infer_lit,
     promote_types,
+    supertype,
     unify_types,
 )
 from polypolarism.ops.groupby import (
@@ -725,13 +726,16 @@ def _unwrap_cast(node: ast.expr) -> ast.expr:
     return node
 
 
-def _nonboolean_predicate_error(dtype: DataType | None) -> str | None:
-    """Return a PLY008 message when a filter predicate's dtype is known and
-    not Boolean (issue #28).
+def _nonboolean_predicate_error(
+    dtype: DataType | None, op: str = "filter", noun: str = "predicate"
+) -> str | None:
+    """Return a PLY008 message when a filter predicate's / when-condition's
+    dtype is known and not Boolean (issues #28 / #37).
 
     ``None`` (unresolved) and ``Unknown`` dtypes are never flagged — we don't
     guess. A ``Nullable`` wrapper is unwrapped first: ``Nullable[Boolean]``
-    is a valid predicate (null rows are simply dropped).
+    is a valid predicate (null rows are simply dropped by ``filter``; a null
+    ``when`` condition takes the otherwise branch — both probed).
     """
     if dtype is None:
         return None
@@ -740,8 +744,8 @@ def _nonboolean_predicate_error(dtype: DataType | None) -> str | None:
         return None
     return tag(
         PLY008,
-        f"filter: predicate has dtype {dtype}, expected Boolean — "
-        f"polars only accepts boolean predicates "
+        f"{op}: {noun} has dtype {dtype}, expected Boolean — "
+        f"polars only accepts boolean {noun}s "
         f"(use a comparison or `.is_*()` method)",
     )
 
@@ -1898,6 +1902,130 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             return inner.inner
         return inner
 
+    @staticmethod
+    def _parse_when_chain(
+        node: ast.expr,
+    ) -> tuple[list[ast.Call], list[ast.expr], ast.expr | None] | None:
+        """Parse a ``pl.when(c1).then(v1)[.when(c2).then(v2)...][.otherwise(v)]``
+        chain into ``(when_calls, then_values, otherwise_value)``.
+
+        Returns ``None`` when ``node`` is not such a chain (the walk must
+        terminate at a ``pl.when(...)`` root). ``when_calls`` / ``then_values``
+        are in source order; ``otherwise_value`` is ``None`` for the
+        no-otherwise form.
+        """
+        otherwise_node: ast.expr | None = None
+        cur: ast.expr = node
+        if (
+            isinstance(cur, ast.Call)
+            and isinstance(cur.func, ast.Attribute)
+            and cur.func.attr == "otherwise"
+        ):
+            if len(cur.args) != 1 or cur.keywords:
+                return None
+            otherwise_node = cur.args[0]
+            cur = cur.func.value
+
+        when_calls: list[ast.Call] = []
+        then_nodes: list[ast.expr] = []
+        while True:
+            if not (
+                isinstance(cur, ast.Call)
+                and isinstance(cur.func, ast.Attribute)
+                and cur.func.attr == "then"
+            ):
+                return None
+            if len(cur.args) != 1 or cur.keywords:
+                return None
+            then_nodes.append(cur.args[0])
+            cur = cur.func.value
+            if not (
+                isinstance(cur, ast.Call)
+                and isinstance(cur.func, ast.Attribute)
+                and cur.func.attr == "when"
+            ):
+                return None
+            when_calls.append(cur)
+            base = cur.func.value
+            if isinstance(base, ast.Name) and base.id == "pl":
+                break
+            cur = base
+
+        # The walk above went outside-in; restore source order.
+        when_calls.reverse()
+        then_nodes.reverse()
+        return when_calls, then_nodes, otherwise_node
+
+    def _analyze_when_chain(self, node: ast.expr) -> tuple[str | None, DataType | None] | None:
+        """Type a ``pl.when(...).then(...)[...].otherwise(...)`` chain
+        (issues #37/#40).
+
+        Probed (polars 1.41.2):
+          - a non-Boolean condition raises ``SchemaError: expected Boolean``
+            -> PLY008, same gap class as ``filter`` (#28). Bare strings in
+            ``when(...)`` are column references; kwargs are equality
+            constraints (boolean by construction).
+          - the result dtype is the common supertype of every then-value
+            plus the otherwise value (``then(pl.lit(1)).otherwise(pl.lit("x"))``
+            -> String); strings in then/otherwise are *column references*.
+          - a null condition row takes the otherwise branch
+            (``[True, None, False]`` -> ``[10, 20, 20]``, null_count 0), so a
+            Nullable condition does NOT make the result nullable.
+          - without ``.otherwise(...)`` the unmatched rows are null
+            (``[10, None, None]``) -> the result is Nullable.
+
+        Returns ``None`` when ``node`` is not a when-chain, ``(None, None)``
+        when it is one but a branch (or the supertype fold) is unresolved —
+        the caller keeps today's Unknown registration. The default output
+        name (polars' ``literal`` / first-branch column name) is deliberately
+        not modelled; kwarg/alias naming works as before.
+        """
+        parsed = self._parse_when_chain(node)
+        if parsed is None:
+            return None
+        when_calls, then_nodes, otherwise_node = parsed
+
+        # Conditions: every positional predicate must be Boolean (issue #37).
+        for when_call in when_calls:
+            for arg in when_call.args:
+                _, cond_dtype = self._resolve_expr_or_col_str(arg)
+                cond_error = _nonboolean_predicate_error(cond_dtype, op="when", noun="condition")
+                if cond_error is not None:
+                    self.errors.append(cond_error)
+            for kw in when_call.keywords:
+                self._validate_subexpr(kw.value)
+
+        # Branches: fold the supertype over all then-values + otherwise
+        # (issue #40). Every branch is walked even after one fails to
+        # resolve, so missing-column references keep surfacing PLY001.
+        branch_nodes = list(then_nodes)
+        if otherwise_node is not None:
+            branch_nodes.append(otherwise_node)
+        branch_types: list[DataType] = []
+        unresolved = False
+        for branch in branch_nodes:
+            _, branch_dtype = self._resolve_expr_or_col_str(branch)
+            if branch_dtype is None:
+                unresolved = True
+            else:
+                branch_types.append(branch_dtype)
+        if unresolved or not branch_types:
+            return None, None
+
+        folded: DataType = branch_types[0]
+        for branch_dtype in branch_types[1:]:
+            merged = supertype(folded, branch_dtype)
+            if merged is None:
+                # No polars supertype — the runtime error is out of scope
+                # here; keep the silent Unknown registration.
+                return None, None
+            folded = merged
+        if _base_is_unknown(folded):
+            return None, Unknown()
+        if otherwise_node is None and not isinstance(folded, (Nullable, Null)):
+            folded = Nullable(folded)
+        return None, folded
+
     def _analyze_method_chain(self, node: ast.expr) -> tuple[str | None, DataType | None] | None:
         """Analyze ``pl.col("x").<method>(...)`` style chains.
 
@@ -1913,6 +2041,15 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             return None
         method = node.func.attr
         receiver = node.func.value
+
+        # when/then/otherwise chains (issues #37/#40), recognised by walking
+        # the chain back to the ``pl.when(...)`` root. Handled before the
+        # generic receiver analysis below — the partial chain links
+        # (``pl.when(...)`` / ``.then(...)``) don't resolve on their own.
+        if method in ("then", "otherwise"):
+            when_result = self._analyze_when_chain(node)
+            if when_result is not None:
+                return when_result
 
         # Sub-namespace: ``pl.col("x").str.contains(...)``,
         # ``pl.col("ts").dt.year()``, ``pl.col("xs").list.get(0)``,

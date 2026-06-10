@@ -16,7 +16,7 @@ PLY004 = "PLY004"  # cast: column not found
 PLY005 = "PLY005"  # drop_nulls: subset column not found
 PLY006 = "PLY006"  # with_row_index: name collides with existing column
 PLY007 = "PLY007"  # sort: column not found
-PLY008 = "PLY008"  # filter: predicate dtype is not Boolean
+PLY008 = "PLY008"  # filter predicate / when condition dtype is not Boolean
 PLY009 = "PLY009"  # binary operation between incompatible dtypes (arithmetic, comparison, is_in)
 PLY013 = "PLY013"  # cast between structurally incompatible dtypes
 

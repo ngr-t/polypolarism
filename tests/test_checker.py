@@ -1580,3 +1580,114 @@ class TestSortKeyEndToEnd:
 
         assert len(results) == 1
         assert results[0].passed is True, results[0].errors
+
+
+class TestWhenConditionEndToEnd:
+    """Issue #37 repro: a non-Boolean ``pl.when`` condition must fail the check.
+
+    Probed (polars 1.41.2): ``pl.when(pl.col("a"))`` with ``a: Int64`` raises
+    ``SchemaError: invalid series dtype: expected `Boolean`, got `i64```.
+    """
+
+    HEADER = textwrap.dedent("""
+        import polars as pl
+        import pandera.polars as pa
+        from pandera.typing.polars import DataFrame
+
+        class In(pa.DataFrameModel):
+            a: int
+            flag: bool
+    """)
+
+    def test_nonbool_when_condition_fails_with_ply008(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            class Out(pa.DataFrameModel):
+                a: int
+                flag: bool
+                x: int
+
+            @pa.check_types
+            def bug_when_nonbool(df: DataFrame[In]) -> DataFrame[Out]:
+                return df.with_columns(x=pl.when(pl.col("a")).then(1).otherwise(0))
+        """
+        )
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is False
+        assert any("PLY008" in str(e) and "when" in str(e) for e in results[0].errors)
+
+    def test_boolean_when_condition_passes(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            class Out(pa.DataFrameModel):
+                a: int
+                flag: bool
+                x: int
+
+            @pa.check_types
+            def ok_when(df: DataFrame[In]) -> DataFrame[Out]:
+                return df.with_columns(x=pl.when(pl.col("flag")).then(1).otherwise(0))
+        """
+        )
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is True, results[0].errors
+
+
+class TestWhenSupertypeEndToEnd:
+    """Issue #40 repro: mixed-dtype when/then/otherwise branches infer the
+    polars supertype, so wrong declarations fail and the right one passes.
+
+    Probed (polars 1.41.2):
+    ``pl.when(pl.col("a") > 0).then(pl.lit(1)).otherwise(pl.lit("x"))``
+    -> ``Schema({'literal': String})``.
+    """
+
+    HEADER = textwrap.dedent("""
+        import polars as pl
+        import pandera.polars as pa
+        from pandera.typing.polars import DataFrame
+
+        class In(pa.DataFrameModel):
+            a: int
+    """)
+
+    def _check(self, declared: str):
+        source = self.HEADER + textwrap.dedent(
+            f"""
+            class Out(pa.DataFrameModel):
+                a: int
+                x: {declared}
+
+            @pa.check_types
+            def mixed_branches(df: DataFrame[In]) -> DataFrame[Out]:
+                return df.with_columns(
+                    x=pl.when(pl.col("a") > 0).then(pl.lit(1)).otherwise(pl.lit("x"))
+                )
+        """
+        )
+        results = check_source(source)
+        assert len(results) == 1
+        return results[0]
+
+    def test_str_declaration_passes(self):
+        result = self._check("str")
+        assert result.passed is True, result.errors
+
+    def test_int_declaration_fails_with_type_difference(self):
+        result = self._check("int")
+        assert result.passed is False
+        assert any(isinstance(e, TypeDifference) for e in result.errors)
+
+    def test_bool_declaration_fails_with_type_difference(self):
+        result = self._check("bool")
+        assert result.passed is False
+        assert any(isinstance(e, TypeDifference) for e in result.errors)
+
+    def test_float_declaration_fails_with_type_difference(self):
+        result = self._check("float")
+        assert result.passed is False
+        assert any(isinstance(e, TypeDifference) for e in result.errors)

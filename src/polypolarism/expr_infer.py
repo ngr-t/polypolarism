@@ -279,40 +279,14 @@ def unify_types(left: DataType, right: DataType) -> DataType:
     raise TypeUnificationError(f"Cannot unify types {left} and {right}")
 
 
-def infer_when_then_otherwise(
-    condition: DataType,
-    then_type: DataType,
-    otherwise_type: DataType,
-) -> DataType:
-    """Infer the result type of a when/then/otherwise expression.
-
-    Args:
-        condition: The type of the condition expression (should be Boolean).
-        then_type: The type of the then branch.
-        otherwise_type: The type of the otherwise branch.
-
-    Returns:
-        The unified type of then and otherwise branches.
-
-    Raises:
-        TypeError: If condition is not Boolean.
-        TypeUnificationError: If then and otherwise types cannot be unified.
-    """
-    # Validate condition type
-    condition_inner, condition_nullable = _unwrap_nullable(condition)
-    if not isinstance(condition_inner, Boolean):
-        raise TypeError(f"Condition must be Boolean, got {condition}")
-
-    # Unify then and otherwise types
-    unified = unify_types(then_type, otherwise_type)
-
-    # If condition is nullable, result is also nullable
-    # (because when condition is null, the result could be null)
-    if condition_nullable:
-        inner, _ = _unwrap_nullable(unified)
-        return Nullable(inner)
-
-    return unified
+# ``infer_when_then_otherwise`` used to live here but was never wired into
+# the analyzer and is retired (issues #37/#40): its nullable-condition rule
+# ("a Nullable condition makes the result Nullable") contradicts probed
+# polars behaviour — a null condition row takes the *otherwise* branch
+# (``pl.when(pl.Series([True, None, False])).then(10).otherwise(20)`` ->
+# ``[10, 20, 20]``, null_count 0 on polars 1.41.2) — and its numeric-only
+# ``unify_types`` fold is superseded by ``supertype`` below. The analyzer's
+# ``_analyze_when_chain`` implements the probed semantics.
 
 
 # ---------------------------------------------------------------------------

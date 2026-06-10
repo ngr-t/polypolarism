@@ -4154,6 +4154,9 @@ class TestUnknownColumnRegistration:
     )
 
     def test_when_then_otherwise_column_registers_and_chains(self):
+        # Since #40 the when/then/otherwise dtype is inferred precisely
+        # (then(1).otherwise(0) -> Int64); the column must still register
+        # and chain downstream.
         source = self.HEADER + textwrap.dedent(
             """
             def f(df: DataFrame[In]) -> DataFrame[In]:
@@ -4166,8 +4169,8 @@ class TestUnknownColumnRegistration:
         assert results[0].errors == []
         inferred = results[0].inferred_return_type
         assert inferred is not None
-        assert inferred.columns["a"].dtype == Unknown()
-        assert "b" in inferred.columns
+        assert inferred.columns["a"].dtype == Int64()
+        assert inferred.columns["b"].dtype == Int64()
 
     def test_cast_after_uninferable_method_pins_dtype(self):
         source = self.HEADER + textwrap.dedent(
@@ -4238,11 +4241,15 @@ class TestUnknownColumnRegistration:
         assert inferred.columns["ym"].dtype == Utf8()
 
     def test_unknown_column_usable_as_group_by_key(self):
+        # ``interpolate`` is not in the inference tables, so the kwarg
+        # column registers as Unknown and stays usable as a group_by key.
+        # (This used to use a when/then/otherwise expression, which since
+        # #40 infers precisely.)
         source = self.HEADER + textwrap.dedent(
             """
             def f(df: DataFrame[In]) -> DataFrame[In]:
                 return (
-                    df.with_columns(ym=pl.when(pl.col("v") > 0).then(1).otherwise(0))
+                    df.with_columns(ym=pl.col("v").interpolate())
                     .group_by("ym")
                     .agg(total=pl.col("v").sum())
                 )
@@ -4271,10 +4278,13 @@ class TestUnknownColumnRegistration:
         assert inferred.columns["n"].dtype == Unknown()
 
     def test_select_kwarg_uninferable_registers_unknown(self):
+        # ``interpolate`` is not in the inference tables — the kwarg output
+        # column must still register (as Unknown). (This used to use a
+        # when/then/otherwise expression, which since #40 infers precisely.)
         source = self.HEADER + textwrap.dedent(
             """
             def f(df: DataFrame[In]) -> DataFrame[In]:
-                return df.select(a=pl.when(pl.col("v") > 0).then(1).otherwise(0))
+                return df.select(a=pl.col("v").interpolate())
             """
         )
         results = analyze_source(source)
@@ -7250,3 +7260,233 @@ class TestCastImpossibleFrameLevel:
         analyzer = _run_body(self._frame(), "out = df.cast({'u': pl.Int64})")
         assert analyzer.errors == [], analyzer.errors
         assert analyzer.var_types["out"].columns["u"].dtype == Int64()
+
+
+class TestWhenConditionDtype:
+    """Issue #37: ``pl.when(<cond>)`` with a non-Boolean condition is PLY008.
+
+    Probed (polars 1.41.2): ``pl.when(pl.col("a"))`` with ``a: Int64`` raises
+    ``SchemaError: invalid series dtype: expected `Boolean`, got `i64```;
+    the same holds for a chained ``.when(...)`` condition and for a bare
+    non-bool constant (``pl.when(1)``).
+    """
+
+    HEADER = textwrap.dedent(
+        PANDERA_HEADER
+        + """
+            class In(pa.DataFrameModel):
+                a: int
+                flag: bool
+                v: pl.Float64 = pa.Field(nullable=True)
+        """
+    )
+
+    def _analyze(self, body: str):
+        source = self.HEADER + textwrap.dedent(
+            f"""
+            def f(df: DataFrame[In]):
+                return {body}
+            """
+        )
+        return analyze_source(source)
+
+    def test_nonbool_column_condition_flags_ply008(self):
+        results = self._analyze('df.select(x=pl.when(pl.col("a")).then(1).otherwise(0))')
+        assert any("PLY008" in e and "when" in e and "Int64" in e for e in results[0].errors), (
+            results[0].errors
+        )
+
+    def test_chained_when_nonbool_condition_flags_ply008(self):
+        results = self._analyze(
+            'df.select(x=pl.when(pl.col("flag")).then(1).when(pl.col("a")).then(2).otherwise(0))'
+        )
+        assert any("PLY008" in e and "when" in e for e in results[0].errors)
+
+    def test_nonbool_constant_condition_flags_ply008(self):
+        # Probed: ``pl.when(1)`` raises SchemaError (expected Boolean, got i32).
+        results = self._analyze("df.select(x=pl.when(1).then(1).otherwise(0))")
+        assert any("PLY008" in e for e in results[0].errors)
+
+    def test_bare_string_condition_is_column_reference(self):
+        # Probed: ``pl.when("flag")`` resolves the string as a column name.
+        results = self._analyze('df.select(x=pl.when("a").then(1).otherwise(0))')
+        assert any("PLY008" in e for e in results[0].errors)
+
+    def test_boolean_bare_string_condition_passes(self):
+        results = self._analyze('df.select(x=pl.when("flag").then(1).otherwise(0))')
+        assert results[0].errors == []
+
+    def test_missing_column_condition_is_ply001_not_ply008(self):
+        results = self._analyze('df.select(x=pl.when("ghost").then(1).otherwise(0))')
+        assert any("PLY001" in e and "ghost" in e for e in results[0].errors)
+        assert not any("PLY008" in e for e in results[0].errors)
+
+    def test_boolean_condition_passes(self):
+        results = self._analyze('df.select(x=pl.when(pl.col("flag")).then(1).otherwise(0))')
+        assert results[0].errors == []
+
+    def test_comparison_condition_passes(self):
+        results = self._analyze('df.select(x=pl.when(pl.col("a") > 0).then(1).otherwise(0))')
+        assert results[0].errors == []
+
+    def test_nullable_boolean_condition_passes(self):
+        # ``Nullable[Boolean]`` is a valid condition — probed: a null
+        # condition row simply takes the otherwise branch.
+        results = self._analyze('df.select(x=pl.when(pl.col("v") > 0).then(1).otherwise(0))')
+        assert results[0].errors == []
+
+    def test_each_positional_condition_is_checked(self):
+        # ``when(p1, p2)`` ANDs its positional predicates (probed).
+        results = self._analyze(
+            'df.select(x=pl.when(pl.col("flag"), pl.col("a")).then(1).otherwise(0))'
+        )
+        ply008 = [e for e in results[0].errors if "PLY008" in e]
+        assert len(ply008) == 1
+
+    def test_kwarg_equality_constraint_not_flagged(self):
+        # ``when(a=1)`` is an equality constraint — boolean by construction.
+        results = self._analyze("df.select(x=pl.when(a=1).then(1).otherwise(0))")
+        assert not any("PLY008" in e for e in results[0].errors)
+
+    def test_unknown_dtype_condition_not_flagged(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]):
+                df2 = df.with_columns(u=pl.col("a").interpolate())
+                return df2.select(x=pl.when(pl.col("u")).then(1).otherwise(0))
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+
+
+class TestWhenThenOtherwiseInference:
+    """Issue #40: when/then/otherwise infers the common supertype of its
+    branches instead of Unknown.
+
+    Probed (polars 1.41.2):
+      - ``when(c).then(pl.lit(1)).otherwise(pl.lit("x"))`` -> String
+      - a null condition row takes the *otherwise* branch
+        (``[True, None, False]`` -> ``[10, 20, 20]``, null_count 0), so a
+        Nullable condition does NOT make the result nullable
+      - ``when(c).then(10)`` without otherwise pads unmatched rows with
+        null (``[10, None, None]``) -> Nullable result
+      - strings in then/otherwise are *column references*
+        (``then("s")`` selects column s — schema shows its dtype)
+    """
+
+    HEADER = textwrap.dedent(
+        PANDERA_HEADER
+        + """
+            class In(pa.DataFrameModel):
+                a: int
+                f: pl.Float64
+                s: str
+                flag: bool
+                v: pl.Float64 = pa.Field(nullable=True)
+                xs: pl.List(pl.Int64) = pa.Field()
+        """
+    )
+
+    def _infer(self, body: str):
+        source = self.HEADER + textwrap.dedent(
+            f"""
+            def f(df: DataFrame[In]):
+                return {body}
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == [], results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        return ft
+
+    def test_same_type_branches_infer_precisely(self):
+        ft = self._infer('df.select(x=pl.when(pl.col("a") > 0).then(1).otherwise(0))')
+        assert ft.columns["x"].dtype == Int64()
+
+    def test_mixed_int_str_branches_infer_string(self):
+        # The #40 repro: polars Schema({'literal': String}).
+        ft = self._infer(
+            'df.select(x=pl.when(pl.col("a") > 0).then(pl.lit(1)).otherwise(pl.lit("x")))'
+        )
+        assert ft.columns["x"].dtype == Utf8()
+
+    def test_numeric_branches_promote(self):
+        ft = self._infer('df.select(x=pl.when(pl.col("a") > 0).then(2.5).otherwise(pl.col("a")))')
+        assert ft.columns["x"].dtype == Float64()
+
+    def test_column_branches_infer_supertype(self):
+        ft = self._infer(
+            'df.select(x=pl.when(pl.col("flag")).then(pl.col("a")).otherwise(pl.col("s")))'
+        )
+        assert ft.columns["x"].dtype == Utf8()
+
+    def test_string_branch_is_column_reference(self):
+        # ``then("s")`` selects column s (Utf8), it is not a literal.
+        ft = self._infer('df.select(x=pl.when(pl.col("flag")).then("f").otherwise(0))')
+        assert ft.columns["x"].dtype == Float64()
+
+    def test_no_otherwise_is_nullable(self):
+        # Probed: unmatched rows become null.
+        ft = self._infer('df.select(x=pl.when(pl.col("a") > 0).then(1))')
+        assert ft.columns["x"].dtype == Nullable(Int64())
+
+    def test_null_branch_makes_result_nullable(self):
+        ft = self._infer('df.select(x=pl.when(pl.col("a") > 0).then(None).otherwise(0))')
+        assert ft.columns["x"].dtype == Nullable(Int64())
+
+    def test_nullable_branch_makes_result_nullable(self):
+        ft = self._infer('df.select(x=pl.when(pl.col("a") > 0).then(pl.col("v")).otherwise(0.0))')
+        assert ft.columns["x"].dtype == Nullable(Float64())
+
+    def test_nullable_condition_does_not_make_result_nullable(self):
+        # Probed: a null condition row takes the otherwise branch — the
+        # result has null_count 0 when both branches are non-null.
+        ft = self._infer('df.select(x=pl.when(pl.col("v") > 0).then(1).otherwise(0))')
+        assert ft.columns["x"].dtype == Int64()
+
+    def test_multi_when_folds_all_branches(self):
+        ft = self._infer(
+            'df.select(x=pl.when(pl.col("a") > 1).then(1)'
+            '.when(pl.col("a") > 0).then(2.5).otherwise(pl.lit("x")))'
+        )
+        assert ft.columns["x"].dtype == Utf8()
+
+    def test_unknown_branch_stays_unknown(self):
+        ft = self._infer(
+            'df.select(x=pl.when(pl.col("flag")).then(pl.col("a").interpolate()).otherwise(0))'
+        )
+        assert ft.columns["x"].dtype == Unknown()
+
+    def test_no_supertype_branches_stay_unknown(self):
+        # List + Int64 has no polars supertype; inference stays silent
+        # (the runtime error is out of scope for #40).
+        ft = self._infer(
+            'df.select(x=pl.when(pl.col("flag")).then(pl.col("xs")).otherwise(pl.col("a")))'
+        )
+        assert ft.columns["x"].dtype == Unknown()
+
+    def test_alias_names_the_output(self):
+        ft = self._infer('df.select(pl.when(pl.col("a") > 0).then(1).otherwise(0).alias("y"))')
+        assert ft.columns["y"].dtype == Int64()
+
+    def test_when_chain_result_usable_downstream(self):
+        ft = self._infer(
+            'df.with_columns(x=pl.when(pl.col("a") > 0).then(1).otherwise(0))'
+            '.with_columns(y=pl.col("x") + 1)'
+        )
+        assert ft.columns["x"].dtype == Int64()
+        assert ft.columns["y"].dtype == Int64()
+
+    def test_method_chain_after_otherwise(self):
+        ft = self._infer(
+            'df.select(x=pl.when(pl.col("a") > 0).then(1).otherwise(0).cast(pl.Int32))'
+        )
+        assert ft.columns["x"].dtype == Int32()
+
+    def test_when_chain_in_agg(self):
+        ft = self._infer(
+            'df.group_by("s").agg(x=pl.when(pl.col("a") > 0).then(1).otherwise(0).sum())'
+        )
+        assert ft.columns["x"].dtype == Int64()
