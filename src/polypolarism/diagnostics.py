@@ -17,6 +17,7 @@ PLY005 = "PLY005"  # drop_nulls: subset column not found
 PLY006 = "PLY006"  # with_row_index: name collides with existing column
 PLY007 = "PLY007"  # sort: column not found
 PLY008 = "PLY008"  # filter: predicate dtype is not Boolean
+PLY009 = "PLY009"  # binary operation between incompatible dtypes
 
 # Join
 PLY010 = "PLY010"  # join key error (missing or dtype mismatch)
