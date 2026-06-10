@@ -1493,12 +1493,13 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             "neg",
             "shrink_dtype",
             "rechunk",
-            # Cumulative / window — preserve receiver dtype.
+            # Cumulative / window — preserve receiver dtype. (``over`` is
+            # absent: its dtype depends on ``mapping_strategy`` and is
+            # handled by a dedicated branch — issues #32/#45.)
             "cum_sum",
             "cum_max",
             "cum_min",
             "cum_prod",
-            "over",
             "rolling_sum",
             "rolling_min",
             "rolling_max",
