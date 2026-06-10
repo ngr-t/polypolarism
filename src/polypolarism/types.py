@@ -259,6 +259,20 @@ class Boolean(DataType):
 
 
 @dataclass(frozen=True)
+class Binary(DataType):
+    """Binary (bytes) type."""
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, Binary)
+
+    def __hash__(self) -> int:
+        return hash("Binary")
+
+    def __str__(self) -> str:
+        return "Binary"
+
+
+@dataclass(frozen=True)
 class Date(DataType):
     """Date type (no time component)."""
 

@@ -12,7 +12,8 @@ recognizes:
   ``EAGER_ONLY_METHODS`` — frame method classification.
 - ``STR_NAMESPACE_RETURN`` / ``DT_NAMESPACE_RETURN`` /
   ``DT_NAMESPACE_PRESERVING`` / ``LIST_NAMESPACE_PRESERVING`` /
-  ``LIST_NAMESPACE_ELEMENT_RETURN`` — sub-namespace return tables.
+  ``LIST_NAMESPACE_ELEMENT_RETURN`` / ``BIN_NAMESPACE_RETURN`` —
+  sub-namespace return tables.
 - ``JOIN_HOW_VALUES`` / ``JOIN_HOW_INFERRED`` and the
   ``join_left_nullable`` / ``join_right_nullable`` predicates.
 - ``agg_function_for(name)`` / ``AGG_SHORTHAND_NAMES`` — polars-side
@@ -34,6 +35,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from polypolarism.types import (
+    Binary,
     Boolean,
     Categorical,
     DataType,
@@ -136,6 +138,40 @@ def parse_decimal_call(node: ast.Call) -> Decimal | None:
     return Decimal(precision, scale)
 
 
+def parse_datetime_call(node: ast.Call) -> Datetime | None:
+    """Parse a ``pl.Datetime(...)`` call form into a ``Datetime`` dtype.
+
+    Shared by the analyzer (``cast`` targets, ``schema=`` dicts) and
+    ``pandera_dtype`` (schema field annotations) — issue #50. The polars
+    signature is ``pl.Datetime(time_unit="us", time_zone=None)``;
+    ``time_unit`` is not modeled (the ``Datetime`` dtype only carries
+    ``tz``), so only the second positional argument / ``time_zone=``
+    keyword matters. A string literal sets the tz; an omitted argument or
+    an explicit ``None`` literal is tz-naive (polars' own default).
+
+    Returns ``None`` when a time_zone argument is present but not
+    statically readable (a variable, a ``timezone`` object, ...): the tz is
+    unknowable and each caller picks its own fallback (the analyzer
+    degrades to unresolved; ``pandera_dtype`` uses ``Unknown``). Claiming
+    tz-naive would be a false-positive trap now that tz mismatches are
+    flagged.
+    """
+    tz_node: ast.expr | None = None
+    if len(node.args) >= 2:
+        tz_node = node.args[1]
+    for kw in node.keywords:
+        if kw.arg == "time_zone":
+            tz_node = kw.value
+    if tz_node is None:
+        return Datetime()
+    if isinstance(tz_node, ast.Constant):
+        if tz_node.value is None:
+            return Datetime()
+        if isinstance(tz_node.value, str):
+            return Datetime(tz=tz_node.value)
+    return None
+
+
 # Single source of truth for ``pl.<Name>`` attribute → DataType. Both the
 # analyzer (for column / cast inference) and pandera_dtype (for schema
 # field annotations) consume this mapping.
@@ -166,6 +202,7 @@ DTYPE_NAME_MAP: dict[str, DataType] = {
     "Utf8": Utf8(),
     "String": Utf8(),
     "Boolean": Boolean(),
+    "Binary": Binary(),
     "Date": Date(),
     "Time": Time(),
     "Datetime": Datetime(),
@@ -396,6 +433,20 @@ LIST_NAMESPACE_ELEMENT_RETURN: frozenset[str] = frozenset(
         "median",
     }
 )
+
+# ``pl.col("b").bin.<method>(...)`` return types (issue #51). Probed on
+# polars 1.41.2: ``encode("hex"/"base64")`` -> String, ``decode`` ->
+# Binary, ``size()`` -> UInt32, the predicates -> Boolean. Unlisted
+# methods (e.g. ``reinterpret``, whose dtype is argument-dependent) fall
+# through to Unknown as usual.
+BIN_NAMESPACE_RETURN: dict[str, DataType] = {
+    "encode": Utf8(),
+    "decode": Binary(),
+    "size": UInt32(),
+    "contains": Boolean(),
+    "starts_with": Boolean(),
+    "ends_with": Boolean(),
+}
 
 
 def canonicalize_method(name: str) -> str:

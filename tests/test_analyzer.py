@@ -8691,3 +8691,447 @@ class TestListEvalBody:
         analyzer = _run_body(frame, 'out = df.select(pl.col("v").list.eval(pl.element() * 2))')
         assert analyzer.errors == [], analyzer.errors
         assert analyzer.var_types["out"].columns["v"].dtype == ListT(Nullable(Int64()))
+
+
+class TestResolvePlDtypeDatetime:
+    """``_resolve_pl_dtype`` Datetime call forms route through the shared
+    ``compat.parse_datetime_call`` (issue #50) — same forms, same results,
+    on the analyzer side (cast targets, ``schema=`` dicts)."""
+
+    @staticmethod
+    def _resolve(src: str):
+        import ast as _ast
+
+        from polypolarism.analyzer import _resolve_pl_dtype
+
+        return _resolve_pl_dtype(_ast.parse(src, mode="eval").body)
+
+    def test_bare_attribute_is_naive(self):
+        assert self._resolve("pl.Datetime") == Datetime()
+
+    def test_call_no_args_is_naive(self):
+        assert self._resolve("pl.Datetime()") == Datetime()
+
+    def test_positional_tz(self):
+        assert self._resolve('pl.Datetime("us", "UTC")') == Datetime(tz="UTC")
+
+    def test_keyword_tz(self):
+        assert self._resolve('pl.Datetime(time_zone="Asia/Tokyo")') == Datetime(tz="Asia/Tokyo")
+
+    def test_explicit_none_tz_is_naive(self):
+        assert self._resolve('pl.Datetime("us", None)') == Datetime()
+
+    def test_time_unit_only_is_naive(self):
+        assert self._resolve('pl.Datetime("ms")') == Datetime()
+
+    def test_non_literal_tz_is_unresolved(self):
+        # A variable time zone is unknowable; claiming naive would be a
+        # false-positive trap now that tz mismatches are flagged.
+        assert self._resolve("pl.Datetime(time_zone=tz)") is None
+
+    def test_cast_target_carries_tz(self):
+        # End-to-end: ``cast(pl.Datetime("us", "UTC"))`` pins the tz-aware
+        # dtype on the output column (probed: any tz x tz cast is valid).
+        frame = FrameType({"t": Datetime()})
+        analyzer = _run_body(
+            frame, 'out = df.with_columns(pl.col("t").cast(pl.Datetime("us", "UTC")))'
+        )
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["t"].dtype == Datetime(tz="UTC")
+
+
+class TestTzMismatchedDatetimeOps:
+    """Issue #50: mixing tz-aware and tz-naive Datetimes (or two different
+    time zones) in binary operations.
+
+    Ground truth (polars 1.41.2 probe):
+
+    ==========================================  =========================
+    operation                                    naive/UTC    UTC/Tokyo
+    ==========================================  =========================
+    ``concat`` vertical / diagonal               SchemaError  SchemaError
+    ``-`` (Datetime - Datetime)                  SchemaError  SchemaError
+    ``==`` ``<`` (all six comparison ops)        SchemaError  SchemaError
+    join on Datetime keys (incl. ``join_asof``)  SchemaError  SchemaError
+    when/then branches (supertype)               SchemaError  SchemaError
+    ``is_in``                                    OK           OK
+    ``±  Duration``                              OK (tz kept) OK (tz kept)
+    Date vs tz-aware Datetime (cmp / - / sup.)   OK           OK
+    ==========================================  =========================
+
+    Same-tz pairs keep working everywhere (``tz - tz`` -> Duration etc.,
+    pinned in TestArithmeticIncompatibleDtypes).
+    """
+
+    def _frame(self) -> FrameType:
+        return FrameType(
+            {
+                "n": Datetime(),
+                "utc": Datetime(tz="UTC"),
+                "utc2": Datetime(tz="UTC"),
+                "tokyo": Datetime(tz="Asia/Tokyo"),
+                "d": Date(),
+                "du": Duration(),
+            }
+        )
+
+    # -- arithmetic (PLY009) ---------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "expr",
+        [
+            "pl.col('utc') - pl.col('n')",
+            "pl.col('n') - pl.col('utc')",
+            "pl.col('utc') - pl.col('tokyo')",
+        ],
+    )
+    def test_tz_mismatched_subtraction_flags_ply009(self, expr: str) -> None:
+        analyzer = _run_body(self._frame(), f"out = df.select(r={expr})")
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY009" in analyzer.errors[0]
+        assert analyzer.var_types["out"].columns["r"].dtype == Unknown()
+
+    @pytest.mark.parametrize(
+        ("expr", "expected"),
+        [
+            ("pl.col('utc') - pl.col('utc2')", Duration()),
+            ("pl.col('tokyo') - pl.col('tokyo')", Duration()),
+            ("pl.col('n') - pl.col('n')", Duration()),
+            # Date vs tz-aware Datetime is probed-valid in either order.
+            ("pl.col('d') - pl.col('utc')", Duration()),
+            ("pl.col('utc') - pl.col('d')", Duration()),
+            # Duration shifts keep the operand's tz.
+            ("pl.col('utc') + pl.col('du')", Datetime(tz="UTC")),
+            ("pl.col('du') + pl.col('tokyo')", Datetime(tz="Asia/Tokyo")),
+            ("pl.col('utc') - pl.col('du')", Datetime(tz="UTC")),
+        ],
+    )
+    def test_tz_compatible_arithmetic_keeps_working(self, expr: str, expected) -> None:
+        analyzer = _run_body(self._frame(), f"out = df.select(r={expr})")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["r"].dtype == expected
+
+    # -- comparisons (PLY009) ---------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "expr",
+        [
+            "pl.col('utc') == pl.col('n')",
+            "pl.col('n') < pl.col('utc')",
+            "pl.col('utc') >= pl.col('tokyo')",
+            "pl.col('tokyo') != pl.col('utc')",
+        ],
+    )
+    def test_tz_mismatched_comparison_flags_ply009(self, expr: str) -> None:
+        analyzer = _run_body(self._frame(), f"out = df.select(r={expr})")
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY009" in analyzer.errors[0]
+
+    @pytest.mark.parametrize(
+        "expr",
+        [
+            "pl.col('utc') == pl.col('utc2')",
+            "pl.col('utc') < pl.col('utc2')",
+            "pl.col('n') == pl.col('n')",
+            # Date vs tz-aware Datetime comparison is probed-valid.
+            "pl.col('d') == pl.col('utc')",
+            "pl.col('utc') > pl.col('d')",
+        ],
+    )
+    def test_tz_compatible_comparison_keeps_working(self, expr: str) -> None:
+        analyzer = _run_body(self._frame(), f"out = df.select(r={expr})")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["r"].dtype == Boolean()
+
+    # -- is_in stays valid across tz (probed OK — do NOT "fix" this) -----------
+
+    @pytest.mark.parametrize(
+        "expr",
+        [
+            "pl.col('utc').is_in(pl.col('n'))",
+            "pl.col('utc').is_in(pl.col('tokyo'))",
+            "pl.col('n').is_in(pl.col('utc'))",
+        ],
+    )
+    def test_is_in_across_tz_stays_silent(self, expr: str) -> None:
+        analyzer = _run_body(self._frame(), f"out = df.select(r={expr})")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["r"].dtype == Boolean()
+
+    # -- join keys (PLY010 via JoinError) ---------------------------------------
+
+    def _run_two(self, left: FrameType, right: FrameType, body: str):
+        import ast as _ast
+
+        errors: list[str] = []
+        analyzer = FunctionBodyAnalyzer({"a": left, "b": right}, errors)
+        tree = _ast.parse(textwrap.dedent(body))
+        for stmt in tree.body:
+            analyzer.visit(stmt)
+        return analyzer
+
+    def test_join_on_tz_mismatched_keys_flags_ply010(self) -> None:
+        left = FrameType({"t": Datetime(), "x": Int64()})
+        right = FrameType({"t": Datetime(tz="UTC"), "y": Int64()})
+        analyzer = self._run_two(left, right, "out = a.join(b, on='t', how='inner')")
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY010" in analyzer.errors[0]
+
+    def test_join_on_same_tz_keys_passes(self) -> None:
+        left = FrameType({"t": Datetime(tz="UTC"), "x": Int64()})
+        right = FrameType({"t": Datetime(tz="UTC"), "y": Int64()})
+        analyzer = self._run_two(left, right, "out = a.join(b, on='t', how='inner')")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["t"].dtype == Datetime(tz="UTC")
+
+    # -- concat (PLY020 via unify_types) ----------------------------------------
+
+    def test_concat_vertical_tz_mismatch_flags_ply020(self) -> None:
+        naive = FrameType({"t": Datetime()})
+        utc = FrameType({"t": Datetime(tz="UTC")})
+        analyzer = self._run_two(naive, utc, "out = pl.concat([a, b], how='vertical')")
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY020" in analyzer.errors[0]
+
+    def test_concat_vertical_same_tz_passes(self) -> None:
+        utc = FrameType({"t": Datetime(tz="UTC")})
+        utc2 = FrameType({"t": Datetime(tz="UTC")})
+        analyzer = self._run_two(utc, utc2, "out = pl.concat([a, b], how='vertical')")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["t"].dtype == Datetime(tz="UTC")
+
+
+class TestTzAwareDtypeOutputs:
+    """Collateral of issue #50: methods that SET a time zone must not keep
+    claiming the receiver's (or a naive) Datetime now that tz mismatches
+    are flagged — that would manufacture false positives against tz-aware
+    declared schemas.
+
+    Probed (polars 1.41.2):
+    - ``dt.replace_time_zone("X")`` / ``dt.convert_time_zone("X")`` ->
+      ``Datetime[X]`` for naive AND aware receivers;
+      ``replace_time_zone(None)`` -> naive.
+    - ``str.to_datetime()`` -> naive; ``time_zone="UTC"`` -> ``Datetime[UTC]``;
+      a format literal containing ``%z`` -> ``Datetime[UTC]``.
+    - ``pl.datetime_range(..., time_zone="UTC", eager=True)`` -> ``Datetime[UTC]``.
+
+    Non-literal time zones / formats are unknowable -> Unknown (silent).
+    """
+
+    def _frame(self) -> FrameType:
+        return FrameType(
+            {
+                "n": Datetime(),
+                "utc": Datetime(tz="UTC"),
+                "nn": Nullable(Datetime()),
+                "s": Utf8(),
+                "d": Date(),
+            }
+        )
+
+    @pytest.mark.parametrize(
+        ("expr", "expected"),
+        [
+            ("pl.col('n').dt.replace_time_zone('UTC')", Datetime(tz="UTC")),
+            ("pl.col('utc').dt.replace_time_zone('Asia/Tokyo')", Datetime(tz="Asia/Tokyo")),
+            ("pl.col('utc').dt.replace_time_zone(None)", Datetime()),
+            ("pl.col('utc').dt.convert_time_zone('Asia/Tokyo')", Datetime(tz="Asia/Tokyo")),
+            ("pl.col('n').dt.convert_time_zone('UTC')", Datetime(tz="UTC")),
+            # Unknowable arguments degrade to Unknown — never guess a tz.
+            ("pl.col('n').dt.replace_time_zone(tzvar)", Unknown()),
+            ("pl.col('utc').dt.convert_time_zone(tzvar)", Unknown()),
+            # str.to_datetime tz forms
+            ("pl.col('s').str.to_datetime()", Datetime()),
+            ("pl.col('s').str.to_datetime('%Y-%m-%d %H:%M:%S')", Datetime()),
+            ("pl.col('s').str.to_datetime(time_zone='UTC')", Datetime(tz="UTC")),
+            ("pl.col('s').str.to_datetime('%Y-%m-%dT%H:%M:%S%z')", Datetime(tz="UTC")),
+            ("pl.col('s').str.to_datetime(format='%Y-%m-%dT%H:%M:%S%z')", Datetime(tz="UTC")),
+            ("pl.col('s').str.to_datetime(fmtvar)", Unknown()),
+            ("pl.col('s').str.to_datetime(time_zone=tzvar)", Unknown()),
+        ],
+    )
+    def test_tz_setting_method_output(self, expr: str, expected) -> None:
+        analyzer = _run_body(self._frame(), f"out = df.select(r={expr})")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["r"].dtype == expected
+
+    def test_nullable_receiver_keeps_wrapper(self) -> None:
+        analyzer = _run_body(
+            self._frame(), "out = df.select(r=pl.col('nn').dt.replace_time_zone('UTC'))"
+        )
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["r"].dtype == Nullable(Datetime(tz="UTC"))
+
+    def test_non_datetime_receiver_keeps_legacy_preserving(self) -> None:
+        # ``.dt.replace_time_zone`` on a Date column is outside the probed
+        # surface — the legacy dtype-preserving fallback stays (silent).
+        analyzer = _run_body(
+            self._frame(), "out = df.select(r=pl.col('d').dt.replace_time_zone('UTC'))"
+        )
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["r"].dtype == Date()
+
+    def test_replace_then_subtract_same_tz_passes(self) -> None:
+        # End-to-end shape of the realistic false-positive scenario: make
+        # both sides UTC, subtract -> Duration, no errors.
+        analyzer = _run_body(
+            self._frame(),
+            "out = df.select(r=pl.col('n').dt.replace_time_zone('UTC') - pl.col('utc'))",
+        )
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["r"].dtype == Duration()
+
+    def test_datetime_range_with_literal_tz(self) -> None:
+        analyzer = _run_body(
+            FrameType({}),
+            "out = pl.DataFrame({'ts': pl.datetime_range(a, b, time_zone='UTC', eager=True)})",
+        )
+        assert analyzer.var_types["out"].columns["ts"].dtype == Datetime(tz="UTC")
+
+    def test_datetime_range_with_non_literal_tz_is_unknown(self) -> None:
+        analyzer = _run_body(
+            FrameType({}),
+            "out = pl.DataFrame({'ts': pl.datetime_range(a, b, time_zone=tzv, eager=True)})",
+        )
+        assert analyzer.var_types["out"].columns["ts"].dtype == Unknown()
+
+    def test_datetime_range_without_tz_stays_naive(self) -> None:
+        analyzer = _run_body(
+            FrameType({}),
+            "out = pl.DataFrame({'ts': pl.datetime_range(a, b, eager=True)})",
+        )
+        assert analyzer.var_types["out"].columns["ts"].dtype == Datetime()
+
+
+class TestBinNamespace:
+    """Issue #51: the ``.bin`` expression namespace.
+
+    Probed (polars 1.41.2):
+    - ``.bin`` on a non-Binary receiver raises SchemaError ("expected
+      `Binary`") for Int64 AND String alike -> PLY012; only Binary passes.
+    - Return dtypes: ``encode("hex"/"base64")`` -> String, ``decode`` ->
+      Binary, ``size()`` -> UInt32, ``contains`` / ``starts_with`` /
+      ``ends_with`` -> Boolean.
+    """
+
+    def _frame(self) -> FrameType:
+        from polypolarism.types import Binary
+
+        return FrameType(
+            {
+                "b": Binary(),
+                "nb": Nullable(Binary()),
+                "i": Int64(),
+                "s": Utf8(),
+                "u": Unknown(),
+            }
+        )
+
+    @pytest.mark.parametrize("col", ["i", "s"])
+    def test_bin_on_non_binary_flags_ply012(self, col: str) -> None:
+        analyzer = _run_body(self._frame(), f"out = df.select(r=pl.col('{col}').bin.size())")
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY012" in analyzer.errors[0]
+        assert "Binary" in analyzer.errors[0]
+        assert analyzer.var_types["out"].columns["r"].dtype == Unknown()
+
+    def test_bin_on_unknown_receiver_stays_silent(self) -> None:
+        analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('u').bin.size())")
+        assert analyzer.errors == [], analyzer.errors
+
+    @pytest.mark.parametrize(
+        ("expr", "expected"),
+        [
+            ("pl.col('b').bin.encode('hex')", Utf8()),
+            ("pl.col('b').bin.encode('base64')", Utf8()),
+            ("pl.col('b').bin.decode('hex')", None),  # placeholder, fixed below
+            ("pl.col('b').bin.size()", UInt32()),
+            ("pl.col('b').bin.contains(b'a')", Boolean()),
+            ("pl.col('b').bin.starts_with(b'a')", Boolean()),
+            ("pl.col('b').bin.ends_with(b'a')", Boolean()),
+        ],
+    )
+    def test_bin_return_dtypes(self, expr: str, expected) -> None:
+        from polypolarism.types import Binary
+
+        if expected is None:
+            expected = Binary()
+        analyzer = _run_body(self._frame(), f"out = df.select(r={expr})")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["r"].dtype == expected
+
+    def test_nullable_receiver_keeps_wrapper(self) -> None:
+        analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('nb').bin.size())")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["r"].dtype == Nullable(UInt32())
+
+    def test_unlisted_method_degrades_to_unknown(self) -> None:
+        # ``bin.reinterpret`` returns an argument-dependent dtype — not
+        # modeled, falls through to Unknown without errors.
+        analyzer = _run_body(
+            self._frame(), "out = df.select(r=pl.col('b').bin.reinterpret(dtype=pl.Int64))"
+        )
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["r"].dtype == Unknown()
+
+    # -- PLY013 cast layer: Binary is outside the understood set — silent ------
+
+    @pytest.mark.parametrize(
+        ("expr", "expected"),
+        [
+            # Probed-valid casts resolve precisely.
+            ("pl.col('s').cast(pl.Binary)", None),  # Utf8 -> Binary, fixed below
+            ("pl.col('i').cast(pl.Binary)", None),
+            ("pl.col('b').cast(pl.String)", Utf8()),
+            # Binary -> Int64 is a probed runtime error in both strict
+            # modes, but Binary is outside the PLY013 category set — it
+            # must stay SILENT (false positives are worse), and the cast
+            # pins the target dtype as usual.
+            ("pl.col('b').cast(pl.Int64)", Int64()),
+            ("pl.col('b').cast(pl.Boolean)", Boolean()),
+        ],
+    )
+    def test_binary_casts_stay_silent(self, expr: str, expected) -> None:
+        from polypolarism.types import Binary
+
+        if expected is None:
+            expected = Binary()
+        analyzer = _run_body(self._frame(), f"out = df.select(r={expr})")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["r"].dtype == expected
+
+
+class TestBytesLiterals:
+    """bytes literals infer Binary (probed: ``pl.lit(b"x")``, frame-literal
+    dict values and ``select`` kwarg broadcasts are all Binary on polars
+    1.41.2)."""
+
+    def test_select_kwarg_bytes_constant(self) -> None:
+        from polypolarism.types import Binary
+
+        analyzer = _run_body(FrameType({"i": Int64()}), "out = df.select(x=b'abc')")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["x"].dtype == Binary()
+
+    def test_pl_lit_bytes(self) -> None:
+        from polypolarism.types import Binary
+
+        analyzer = _run_body(FrameType({"i": Int64()}), "out = df.select(x=pl.lit(b'abc'))")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["x"].dtype == Binary()
+
+    def test_frame_literal_bytes_list(self) -> None:
+        from polypolarism.types import Binary
+
+        analyzer = _run_body(FrameType({}), "out = pl.DataFrame({'b': [b'x', b'y']})")
+        assert analyzer.var_types["out"].columns["b"].dtype == Binary()
+
+    def test_frame_literal_bytes_with_none_is_nullable(self) -> None:
+        from polypolarism.types import Binary
+
+        analyzer = _run_body(FrameType({}), "out = pl.DataFrame({'b': [b'x', None]})")
+        assert analyzer.var_types["out"].columns["b"].dtype == Nullable(Binary())
+
+    def test_frame_literal_bytes_mixed_with_str_is_unknown(self) -> None:
+        analyzer = _run_body(FrameType({}), "out = pl.DataFrame({'b': [b'x', 'y']})")
+        assert analyzer.var_types["out"].columns["b"].dtype == Unknown()

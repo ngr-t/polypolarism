@@ -36,6 +36,7 @@ from polypolarism.expr_infer import (
     unify_types,
 )
 from polypolarism.types import (
+    Binary,
     Boolean,
     Categorical,
     ColumnSpec,
@@ -77,9 +78,11 @@ _SIMPLE: tuple[DataType, ...] = (
     Float64(),
     Utf8(),
     Boolean(),
+    Binary(),
     Date(),
     Time(),
     Datetime(),
+    Datetime(tz="UTC"),
     Duration(),
     Categorical(),
 )

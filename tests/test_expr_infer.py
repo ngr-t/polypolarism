@@ -114,6 +114,13 @@ class TestInferLit:
         result = infer_lit("hello")
         assert result == Utf8()
 
+    def test_lit_bytes_returns_binary(self) -> None:
+        """Probed (polars 1.41.2): ``pl.lit(b"x")`` is a Binary literal."""
+        from polypolarism.types import Binary
+
+        result = infer_lit(b"x")
+        assert result == Binary()
+
     def test_lit_bool_returns_boolean(self) -> None:
         """pl.lit(True) should infer Boolean."""
         result = infer_lit(True)
@@ -283,6 +290,19 @@ class TestUnifyTypes:
         """Unifying Int64 with Utf8 should raise TypeUnificationError."""
         with pytest.raises(TypeUnificationError):
             unify_types(Int64(), Utf8())
+
+    def test_unify_tz_mismatched_datetimes_raises_error(self) -> None:
+        """Issue #50 regression: ``pl.concat`` of tz-aware and tz-naive
+        Datetime columns is a probed SchemaError — unification must fail
+        for any tz-mismatched pair (naive/aware and aware/aware alike)."""
+        with pytest.raises(TypeUnificationError):
+            unify_types(Datetime(), Datetime(tz="UTC"))
+        with pytest.raises(TypeUnificationError):
+            unify_types(Datetime(tz="UTC"), Datetime(tz="Asia/Tokyo"))
+
+    def test_unify_same_tz_datetimes_returns_same_dtype(self) -> None:
+        assert unify_types(Datetime(tz="UTC"), Datetime(tz="UTC")) == Datetime(tz="UTC")
+        assert unify_types(Datetime(), Datetime()) == Datetime()
 
     def test_unify_utf8_and_utf8_returns_utf8(self) -> None:
         """Unifying Utf8 with Utf8 should return Utf8."""
@@ -618,3 +638,18 @@ class TestInferShiftFill:
     def test_unknown_receiver_stays_unknown(self) -> None:
         assert infer_shift_fill(Unknown(), Int64(), fill_is_literal=True) == Unknown()
         assert infer_shift_fill(Nullable(Unknown()), Utf8(), fill_is_literal=False) == Unknown()
+
+
+class TestShiftFillTzMismatch:
+    """Issue #50: a tz-mismatched expression fill has no supertype; the
+    probed runtime failure is out of scope for shift, so the receiver
+    dtype is kept SILENTLY — pinned so the no-supertype path never starts
+    fabricating a dtype or erroring."""
+
+    def test_tz_mismatched_expression_fill_keeps_receiver(self) -> None:
+        result = infer_shift_fill(Datetime("UTC"), Datetime(), fill_is_literal=False)
+        assert result == Datetime("UTC")
+
+    def test_same_tz_expression_fill_keeps_dtype(self) -> None:
+        result = infer_shift_fill(Datetime("UTC"), Datetime("UTC"), fill_is_literal=False)
+        assert result == Datetime("UTC")

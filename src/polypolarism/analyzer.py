@@ -10,6 +10,7 @@ from pathlib import Path
 
 from polypolarism.compat.polars_api import (
     AGG_SHORTHAND_NAMES,
+    BIN_NAMESPACE_RETURN,
     DT_NAMESPACE_PRESERVING,
     DT_NAMESPACE_RETURN,
     DTYPE_NAME_MAP,
@@ -21,6 +22,7 @@ from polypolarism.compat.polars_api import (
     STR_NAMESPACE_RETURN,
     agg_function_for,
     canonicalize_method,
+    parse_datetime_call,
     parse_decimal_call,
 )
 from polypolarism.diagnostics import (
@@ -93,6 +95,7 @@ from polypolarism.pandera_schema import (
 )
 from polypolarism.types import (
     NUMERIC_DTYPES,
+    Binary,
     Boolean,
     Categorical,
     ColumnSpec,
@@ -183,18 +186,12 @@ def _resolve_pl_dtype(node: ast.expr) -> DataType | None:
             # the bare default, which would be a false-positive trap.
             if node.func.attr == "Decimal":
                 return parse_decimal_call(node)
-            base = _PL_DTYPE_NAME_MAP.get(node.func.attr)
-            if isinstance(base, Datetime):
-                tz: str | None = None
-                if len(node.args) >= 2 and isinstance(node.args[1], ast.Constant):
-                    if isinstance(node.args[1].value, str):
-                        tz = node.args[1].value
-                for kw in node.keywords:
-                    if kw.arg == "time_zone" and isinstance(kw.value, ast.Constant):
-                        if isinstance(kw.value.value, str):
-                            tz = kw.value.value
-                return Datetime(tz=tz)
-            return base
+            # ``pl.Datetime("us", "UTC")`` preserves the time zone (shared
+            # parser in compat; issue #50). A non-literal time_zone is
+            # unknowable — unresolved (None), like Decimal above.
+            if node.func.attr == "Datetime":
+                return parse_datetime_call(node)
+            return _PL_DTYPE_NAME_MAP.get(node.func.attr)
     return None
 
 
@@ -246,7 +243,7 @@ def _unify_literal_values(values: list[object]) -> DataType:
         return Unknown()
     unified: DataType | None = None
     for value in values:
-        if value is not None and not isinstance(value, (bool, int, float, str)):
+        if value is not None and not isinstance(value, (bool, int, float, str, bytes)):
             return Unknown()
         elem = infer_lit(value)
         if unified is None:
@@ -300,10 +297,22 @@ def _frame_literal_value_dtype(
     ):
         range_dtype = _RANGE_CONSTRUCTOR_DTYPES.get(node.func.attr)
         if range_dtype is not None:
+            # ``pl.datetime_range(..., time_zone="UTC", eager=True)`` is
+            # probed to yield a tz-aware Series (issue #50 collateral). A
+            # non-literal time_zone is unknowable -> Unknown.
+            if node.func.attr == "datetime_range":
+                for kw in node.keywords:
+                    if kw.arg == "time_zone":
+                        if isinstance(kw.value, ast.Constant):
+                            if isinstance(kw.value.value, str):
+                                return Datetime(tz=kw.value.value)
+                            if kw.value.value is None:
+                                return Datetime()
+                        return Unknown()
             return range_dtype
 
     if isinstance(node, ast.Constant) and (
-        node.value is None or isinstance(node.value, (bool, int, float, str))
+        node.value is None or isinstance(node.value, (bool, int, float, str, bytes))
     ):
         return infer_lit(node.value)
 
@@ -435,6 +444,11 @@ def _temporal_arith(
         return _ARITH_INVALID  # Time+Duration errors too (verified)
     if isinstance(op, ast.Sub):
         if lcat in ("date", "datetime") and rcat in ("date", "datetime"):
+            # Two Datetimes must agree on tz (probed: aware - naive and
+            # UTC - Asia/Tokyo both raise SchemaError; issue #50). Date vs
+            # tz-aware Datetime is probed-valid in either order.
+            if isinstance(left, Datetime) and isinstance(right, Datetime) and left.tz != right.tz:
+                return _ARITH_INVALID
             return Duration()
         if lcat == "time" and rcat == "time":
             return Duration()
@@ -560,6 +574,17 @@ _CMP_INVALID_PAIRS: frozenset[frozenset[str]] = frozenset(
 
 def _comparison_invalid(left_inner: DataType, right_inner: DataType) -> bool:
     """True when polars provably rejects comparing the (unwrapped) dtype pair."""
+    # Datetime pairs must agree on tz (probed: every comparison operator
+    # raises SchemaError for aware vs naive AND for two different zones —
+    # polars does not compare instants across zones; issue #50). Date vs
+    # tz-aware Datetime stays valid, and ``is_in`` across zones is
+    # probed-OK, so this rule lives here and not in the category table.
+    if (
+        isinstance(left_inner, Datetime)
+        and isinstance(right_inner, Datetime)
+        and left_inner.tz != right_inner.tz
+    ):
+        return True
     lcat = _cmp_category(left_inner)
     rcat = _cmp_category(right_inner)
     if lcat is None or rcat is None:
@@ -831,6 +856,8 @@ def _nonboolean_predicate_error(
 #   statically indistinguishable here, so ``.arr`` on a true List column
 #   (a runtime error) is deliberately not flagged: false positives are
 #   worse than false negatives.
+# - ``.bin`` rejects every non-Binary dtype (issue #51) — probed: Int64
+#   and String receivers both raise "SchemaError: expected `Binary`".
 # Unknown / unresolved receivers are exempted by the caller.
 _NAMESPACE_VALID_DTYPES: dict[str, tuple[type[DataType], ...]] = {
     "str": (Utf8,),
@@ -838,6 +865,7 @@ _NAMESPACE_VALID_DTYPES: dict[str, tuple[type[DataType], ...]] = {
     "list": (ListT,),
     "arr": (ListT,),
     "struct": (Struct,),
+    "bin": (Binary,),
 }
 
 _NAMESPACE_EXPECTED_DESC: dict[str, str] = {
@@ -846,6 +874,7 @@ _NAMESPACE_EXPECTED_DESC: dict[str, str] = {
     "list": "a List or Array column",
     "arr": "a List or Array column",
     "struct": "a Struct column",
+    "bin": "a Binary column",
 }
 
 
@@ -853,6 +882,68 @@ def _str_constant(node: ast.expr) -> str | None:
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return node.value
     return None
+
+
+def _call_arg(call: ast.Call | None, *, position: int, name: str) -> ast.expr | None:
+    """One call argument: positional index or keyword (keyword wins)."""
+    if call is None:
+        return None
+    node: ast.expr | None = None
+    if position < len(call.args):
+        node = call.args[position]
+    for kw in call.keywords:
+        if kw.arg == name:
+            node = kw.value
+    return node
+
+
+def _time_zone_arg_dtype(method: str, call_node: ast.Call | None) -> DataType:
+    """Result dtype of ``dt.replace_time_zone(...)`` / ``dt.convert_time_zone(...)``
+    on a Datetime receiver (issue #50 collateral).
+
+    Probed (polars 1.41.2): both methods yield ``Datetime[arg]`` for naive
+    AND aware receivers; ``replace_time_zone(None)`` strips the tz.
+    Anything not statically readable (a variable, ``convert_time_zone(None)``
+    — unprobed) degrades to Unknown: claiming a tz would be a guess.
+    """
+    tz_node = _call_arg(call_node, position=0, name="time_zone")
+    if isinstance(tz_node, ast.Constant):
+        if isinstance(tz_node.value, str):
+            return Datetime(tz=tz_node.value)
+        if tz_node.value is None and method == "replace_time_zone":
+            return Datetime()
+    return Unknown()
+
+
+def _str_to_datetime_dtype(call_node: ast.Call | None) -> DataType:
+    """Result dtype of ``str.to_datetime(...)`` (issue #50 collateral).
+
+    Probed (polars 1.41.2): no tz-affecting arguments -> naive Datetime;
+    ``time_zone="X"`` (string literal) -> ``Datetime[X]``; a format literal
+    containing ``%z`` -> ``Datetime[UTC]``. A non-literal ``time_zone`` /
+    format (and the unprobed ``%:z`` / ``%#z`` directives) degrade to
+    Unknown rather than claiming naive.
+    """
+    if call_node is not None:
+        for kw in call_node.keywords:
+            if kw.arg == "time_zone":
+                if isinstance(kw.value, ast.Constant):
+                    if isinstance(kw.value.value, str):
+                        return Datetime(tz=kw.value.value)
+                    if kw.value.value is None:
+                        break  # explicit None — same as omitted
+                return Unknown()
+    fmt_node = _call_arg(call_node, position=0, name="format")
+    if fmt_node is None:
+        return Datetime()
+    fmt = _str_constant(fmt_node)
+    if fmt is None:
+        return Unknown()
+    if "%z" in fmt:
+        return Datetime(tz="UTC")
+    if "%:z" in fmt or "%#z" in fmt:
+        return Unknown()
+    return Datetime()
 
 
 def _str_list_or_tuple(node: ast.expr) -> list[str] | None:
@@ -1614,7 +1705,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
     )
 
     # ---- sub-namespace return type tables ----------------------------------
-    # All five tables are re-exports from compat.polars_api so the polars
+    # All six tables are re-exports from compat.polars_api so the polars
     # surface knowledge stays in one place.
 
     _STR_RETURN = STR_NAMESPACE_RETURN
@@ -1622,6 +1713,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
     _DT_PRESERVING = DT_NAMESPACE_PRESERVING
     _LIST_PRESERVING = LIST_NAMESPACE_PRESERVING
     _LIST_ELEMENT_RETURN = LIST_NAMESPACE_ELEMENT_RETURN
+    _BIN_RETURN = BIN_NAMESPACE_RETURN
 
     def analyze_select_expr(self, node: ast.expr) -> tuple[str | None, DataType | None]:
         """Analyze a select expression, return (output_name, type)."""
@@ -1645,7 +1737,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         # the callers (``_str_constant``) before this method ever sees them.
         # ``infer_lit`` checks bool before int (bool subclasses int).
         if isinstance(inner_node, ast.Constant) and (
-            inner_node.value is None or isinstance(inner_node.value, (bool, int, float, str))
+            inner_node.value is None or isinstance(inner_node.value, (bool, int, float, str, bytes))
         ):
             return alias, infer_lit(inner_node.value)
 
@@ -1973,8 +2065,10 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         is preserved on the result for almost all of these methods.
 
         ``call_node`` is the full ``ast.Call`` (e.g. ``...struct.field("x")``);
-        passed in so per-namespace handlers that need positional arguments
-        (currently just ``struct.field``) can read them.
+        passed in so per-namespace handlers that need arguments
+        (``struct.field`` / ``struct.rename_fields``, ``list.eval``,
+        ``str.to_datetime``, ``dt.replace_time_zone`` /
+        ``dt.convert_time_zone``) can read them.
         """
         receiver_inner = receiver_type
         receiver_is_nullable = False
@@ -1984,10 +2078,26 @@ class ExpressionAnalyzer(ast.NodeVisitor):
 
         result: DataType | None = None
 
-        if namespace == "str":
-            result = self._STR_RETURN.get(method)
+        if namespace == "bin":
+            result = self._BIN_RETURN.get(method)
+        elif namespace == "str":
+            if method == "to_datetime":
+                # The output tz depends on the arguments (issue #50
+                # collateral): default naive, ``time_zone=`` literal sets
+                # the tz, a format literal containing ``%z`` is probed to
+                # yield Datetime[UTC]. Unknowable arguments -> Unknown.
+                result = _str_to_datetime_dtype(call_node)
+            else:
+                result = self._STR_RETURN.get(method)
         elif namespace == "dt":
-            if method in self._DT_RETURN:
+            if method in ("replace_time_zone", "convert_time_zone") and isinstance(
+                receiver_inner, Datetime
+            ):
+                # These SET the tz — blanket receiver-preservation would
+                # claim the old tz and manufacture false positives now
+                # that tz mismatches are flagged (issue #50 collateral).
+                result = _time_zone_arg_dtype(method, call_node)
+            elif method in self._DT_RETURN:
                 result = self._DT_RETURN[method]
             elif method in self._DT_PRESERVING and receiver_inner is not None:
                 result = receiver_inner
@@ -2375,14 +2485,10 @@ class ExpressionAnalyzer(ast.NodeVisitor):
 
         # Sub-namespace: ``pl.col("x").str.contains(...)``,
         # ``pl.col("ts").dt.year()``, ``pl.col("xs").list.get(0)``,
-        # ``pl.col("s").struct.field("name")`` etc.
-        if isinstance(receiver, ast.Attribute) and receiver.attr in (
-            "str",
-            "dt",
-            "list",
-            "arr",
-            "struct",
-        ):
+        # ``pl.col("s").struct.field("name")``, ``pl.col("b").bin.size()``
+        # etc. — the recognised accessor names are exactly the keys of the
+        # receiver-validity table.
+        if isinstance(receiver, ast.Attribute) and receiver.attr in _NAMESPACE_VALID_DTYPES:
             ns = receiver.attr
             col_name, col_type = self.analyze_select_expr(receiver.value)
             # Receiver-dtype validation (issue #31): a known dtype outside
@@ -2731,24 +2837,14 @@ class ExpressionAnalyzer(ast.NodeVisitor):
 
     def _extract_lit_type(self, node: ast.expr) -> DataType | None:
         """Extract type from pl.lit(value) expression."""
-        from polypolarism.types import Boolean, Float64, Int64, Null, Utf8
-
         if isinstance(node, ast.Call):
             if isinstance(node.func, ast.Attribute):
                 if node.func.attr == "lit":
                     if isinstance(node.func.value, ast.Name) and node.func.value.id == "pl":
                         if node.args and isinstance(node.args[0], ast.Constant):
                             value = node.args[0].value
-                            if value is None:
-                                return Null()
-                            elif isinstance(value, bool):
-                                return Boolean()
-                            elif isinstance(value, int):
-                                return Int64()
-                            elif isinstance(value, float):
-                                return Float64()
-                            elif isinstance(value, str):
-                                return Utf8()
+                            if value is None or isinstance(value, (bool, int, float, str, bytes)):
+                                return infer_lit(value)
         return None
 
 
