@@ -1,0 +1,2 @@
+bug_sort_nonexistent: FAIL
+  error: [PLY007] sort: column 'ghost' not found

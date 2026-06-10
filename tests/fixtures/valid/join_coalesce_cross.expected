@@ -1,0 +1,4 @@
+full_join_coalesced: OK
+full_join_default: OK
+cross_join: OK
+cross_join_collision: OK

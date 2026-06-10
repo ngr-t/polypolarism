@@ -1,0 +1,2 @@
+unpivot_list_and_scalar: FAIL
+  error: [PLY022] unpivot: value columns ['xs', 'label'] have incompatible dtypes — polars finds no common supertype of List[Int64] and Utf8

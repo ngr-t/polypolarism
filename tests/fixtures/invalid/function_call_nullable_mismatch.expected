@@ -1,0 +1,3 @@
+expects_non_nullable: OK
+caller: FAIL
+  error: Argument 'df' column 'value' has type Int64? but expected Int64

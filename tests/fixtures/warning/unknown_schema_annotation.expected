@@ -1,0 +1,2 @@
+passthrough: WARN
+  warning: [PLW006] schema 'ExternalSchema' referenced in annotation but not found. Define it in this module, or import it from a project-local module via `from <module> import ExternalSchema`. Stdlib/third-party imports aren't followed.

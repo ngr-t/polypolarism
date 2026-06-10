@@ -1,0 +1,2 @@
+f: FAIL
+  error: [PLY003] rename: column 'nope' not found
