@@ -572,6 +572,197 @@ class TestExprLenAggregation:
         assert any("missing" in e for e in results[0].errors)
 
 
+class TestExprFilterChain:
+    """``Expr.filter(...)`` is row-subsetting and dtype-preserving (issue #23)."""
+
+    def test_filter_then_sum_in_agg(self):
+        """Conditional aggregation: ``filter(...).sum()`` resolves to Int64."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                g: str
+                v: int
+
+            def agg(data: DataFrame[In]):
+                return data.group_by("g").agg(
+                    pl.col("v").filter(pl.col("v") > 0).sum().alias("fs")
+                )
+        """
+        )
+
+        results = analyze_source(source)
+
+        assert results[0].has_errors is False, results[0].errors
+        expected = FrameType({"g": Utf8(), "fs": Int64()})
+        assert results[0].inferred_return_type == expected
+
+    def test_filter_then_mean_in_agg(self):
+        """``filter(...).mean()`` resolves to Float64."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                g: str
+                v: int
+
+            def agg(data: DataFrame[In]):
+                return data.group_by("g").agg(
+                    m=pl.col("v").filter(pl.col("v") > 0).mean()
+                )
+        """
+        )
+
+        results = analyze_source(source)
+
+        assert results[0].has_errors is False, results[0].errors
+        expected = FrameType({"g": Utf8(), "m": Float64()})
+        assert results[0].inferred_return_type == expected
+
+    def test_filter_preserves_dtype_in_select(self):
+        """``select(pl.col("v").filter(...))`` keeps the receiver dtype."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                v: int
+                keep: bool
+
+            def f(data: DataFrame[In]):
+                return data.select(pl.col("v").filter(pl.col("keep")).alias("x"))
+        """
+        )
+
+        results = analyze_source(source)
+
+        assert results[0].has_errors is False, results[0].errors
+        expected = FrameType({"x": Int64()})
+        assert results[0].inferred_return_type == expected
+
+    def test_filter_preserves_nullable_receiver(self):
+        """Filtering does not strip a Nullable wrapper (nulls may survive)."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                v: int = pa.Field(nullable=True)
+                keep: bool
+
+            def f(data: DataFrame[In]):
+                return data.select(pl.col("v").filter(pl.col("keep")).alias("x"))
+        """
+        )
+
+        results = analyze_source(source)
+
+        assert results[0].has_errors is False, results[0].errors
+        expected = FrameType({"x": Nullable(Int64())})
+        assert results[0].inferred_return_type == expected
+
+    def test_filter_predicate_missing_column_errors(self):
+        """A predicate referencing a missing column surfaces PLY001."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                g: str
+                v: int
+
+            def agg(data: DataFrame[In]):
+                return data.group_by("g").agg(
+                    pl.col("v").filter(pl.col("missing") > 0).sum().alias("fs")
+                )
+        """
+        )
+
+        results = analyze_source(source)
+
+        assert any("PLY001" in e for e in results[0].errors)
+        assert any("missing" in e for e in results[0].errors)
+
+    def test_filter_kwarg_constraint_missing_column_is_validated(self):
+        """Kwarg-value expressions are validated through the analyser too."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                g: str
+                v: int
+
+            def agg(data: DataFrame[In]):
+                return data.group_by("g").agg(
+                    pl.col("v").filter(g=pl.col("missing")).sum().alias("fs")
+                )
+        """
+        )
+
+        results = analyze_source(source)
+
+        assert any("PLY001" in e for e in results[0].errors)
+
+
+class TestExprDropNullsChain:
+    """``Expr.drop_nulls()`` strips the Nullable wrapper (issue #23)."""
+
+    def test_drop_nulls_strips_nullable(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                v: int = pa.Field(nullable=True)
+
+            def f(data: DataFrame[In]):
+                return data.select(pl.col("v").drop_nulls().alias("x"))
+        """
+        )
+
+        results = analyze_source(source)
+
+        assert results[0].has_errors is False, results[0].errors
+        expected = FrameType({"x": Int64()})
+        assert results[0].inferred_return_type == expected
+
+    def test_drop_nulls_on_non_nullable_is_identity(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                v: int
+
+            def f(data: DataFrame[In]):
+                return data.select(pl.col("v").drop_nulls().alias("x"))
+        """
+        )
+
+        results = analyze_source(source)
+
+        assert results[0].has_errors is False, results[0].errors
+        expected = FrameType({"x": Int64()})
+        assert results[0].inferred_return_type == expected
+
+    def test_drop_nulls_then_sum_in_agg(self):
+        """``drop_nulls().sum()`` on a nullable column aggregates non-null Int64."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                g: str
+                v: int = pa.Field(nullable=True)
+
+            def agg(data: DataFrame[In]):
+                return data.group_by("g").agg(
+                    s=pl.col("v").drop_nulls().sum()
+                )
+        """
+        )
+
+        results = analyze_source(source)
+
+        assert results[0].has_errors is False, results[0].errors
+        expected = FrameType({"g": Utf8(), "s": Int64()})
+        assert results[0].inferred_return_type == expected
+
+
 class TestRankMethod:
     """``Expr.rank()`` dtype inference (issue #9)."""
 

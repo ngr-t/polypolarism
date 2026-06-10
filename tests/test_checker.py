@@ -828,7 +828,9 @@ class TestIssue23AggExprEndToEnd:
     """
 
     def _check(self, body: str):
-        source = textwrap.dedent(self.HEADER + body)
+        # HEADER and the per-test bodies have different leading indents, so
+        # they must be dedented separately before concatenation.
+        source = textwrap.dedent(self.HEADER) + textwrap.dedent(body)
         return check_source(source)[0]
 
     def test_agg_sum_alias_passes(self):
@@ -860,6 +862,24 @@ class TestIssue23AggExprEndToEnd:
 
             def agg_len(df: DataFrame[In]) -> DataFrame[OLen]:
                 return df.group_by("g").agg(pl.col("v").len().alias("n"))
+        """)
+        assert result.passed is True, result.errors
+
+    def test_agg_filter_sum_alias_passes(self):
+        """Conditional aggregation: ``filter(...).sum()`` infers Int64."""
+        result = self._check("""
+            class OFSum(pa.DataFrameModel):
+                g: str
+                fs: int
+
+                class Config:
+                    strict = True
+                    coerce = True
+
+            def agg_filter_sum(df: DataFrame[In]) -> DataFrame[OFSum]:
+                return df.group_by("g").agg(
+                    pl.col("v").filter(pl.col("v") > 0).sum().alias("fs")
+                )
         """)
         assert result.passed is True, result.errors
 
