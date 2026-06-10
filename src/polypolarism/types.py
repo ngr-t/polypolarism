@@ -273,6 +273,20 @@ class Date(DataType):
 
 
 @dataclass(frozen=True)
+class Time(DataType):
+    """Time of day (no date component)."""
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, Time)
+
+    def __hash__(self) -> int:
+        return hash("Time")
+
+    def __str__(self) -> str:
+        return "Time"
+
+
+@dataclass(frozen=True)
 class Datetime(DataType):
     """Datetime type with optional timezone."""
 

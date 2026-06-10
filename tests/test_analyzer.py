@@ -14,6 +14,7 @@ from polypolarism.types import (
     Boolean,
     Date,
     Datetime,
+    Decimal,
     Float64,
     FrameType,
     Int8,
@@ -23,6 +24,7 @@ from polypolarism.types import (
     Null,
     Nullable,
     RowVar,
+    Time,
     UInt32,
     Unknown,
     Utf8,
@@ -484,6 +486,280 @@ class TestPlLenAggregation:
         results = analyze_source(source)
 
         expected = FrameType({"len": UInt32()})
+        assert results[0].inferred_return_type == expected
+
+
+class TestExprLenAggregation:
+    """``pl.col("v").len()`` — the count-including-nulls variant (issue #23)."""
+
+    def test_expr_len_in_agg_with_alias(self):
+        """``agg(pl.col("v").len().alias("n"))`` infers n: UInt32."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                g: str
+                v: int
+
+            def agg(data: DataFrame[In]):
+                return data.group_by("g").agg(pl.col("v").len().alias("n"))
+        """
+        )
+
+        results = analyze_source(source)
+
+        assert results[0].has_errors is False, results[0].errors
+        expected = FrameType({"g": Utf8(), "n": UInt32()})
+        assert results[0].inferred_return_type == expected
+
+    def test_expr_len_in_agg_kwarg_form(self):
+        """``agg(n=pl.col("v").len())`` infers n: UInt32."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                g: str
+                v: int
+
+            def agg(data: DataFrame[In]):
+                return data.group_by("g").agg(n=pl.col("v").len())
+        """
+        )
+
+        results = analyze_source(source)
+
+        assert results[0].has_errors is False, results[0].errors
+        expected = FrameType({"g": Utf8(), "n": UInt32()})
+        assert results[0].inferred_return_type == expected
+
+    def test_expr_len_in_select(self):
+        """``select(n=pl.col("v").len())`` infers UInt32 outside agg context."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                g: str
+                v: int
+
+            def count_rows(data: DataFrame[In]):
+                return data.select(n=pl.col("v").len())
+        """
+        )
+
+        results = analyze_source(source)
+
+        assert results[0].has_errors is False, results[0].errors
+        expected = FrameType({"n": UInt32()})
+        assert results[0].inferred_return_type == expected
+
+    def test_expr_len_on_missing_column_errors(self):
+        """``pl.col("missing").len()`` still surfaces the column error."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                g: str
+                v: int
+
+            def agg(data: DataFrame[In]):
+                return data.group_by("g").agg(pl.col("missing").len().alias("n"))
+        """
+        )
+
+        results = analyze_source(source)
+
+        assert results[0].has_errors is True
+        assert any("missing" in e for e in results[0].errors)
+
+
+class TestExprFilterChain:
+    """``Expr.filter(...)`` is row-subsetting and dtype-preserving (issue #23)."""
+
+    def test_filter_then_sum_in_agg(self):
+        """Conditional aggregation: ``filter(...).sum()`` resolves to Int64."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                g: str
+                v: int
+
+            def agg(data: DataFrame[In]):
+                return data.group_by("g").agg(
+                    pl.col("v").filter(pl.col("v") > 0).sum().alias("fs")
+                )
+        """
+        )
+
+        results = analyze_source(source)
+
+        assert results[0].has_errors is False, results[0].errors
+        expected = FrameType({"g": Utf8(), "fs": Int64()})
+        assert results[0].inferred_return_type == expected
+
+    def test_filter_then_mean_in_agg(self):
+        """``filter(...).mean()`` resolves to Float64."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                g: str
+                v: int
+
+            def agg(data: DataFrame[In]):
+                return data.group_by("g").agg(
+                    m=pl.col("v").filter(pl.col("v") > 0).mean()
+                )
+        """
+        )
+
+        results = analyze_source(source)
+
+        assert results[0].has_errors is False, results[0].errors
+        expected = FrameType({"g": Utf8(), "m": Float64()})
+        assert results[0].inferred_return_type == expected
+
+    def test_filter_preserves_dtype_in_select(self):
+        """``select(pl.col("v").filter(...))`` keeps the receiver dtype."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                v: int
+                keep: bool
+
+            def f(data: DataFrame[In]):
+                return data.select(pl.col("v").filter(pl.col("keep")).alias("x"))
+        """
+        )
+
+        results = analyze_source(source)
+
+        assert results[0].has_errors is False, results[0].errors
+        expected = FrameType({"x": Int64()})
+        assert results[0].inferred_return_type == expected
+
+    def test_filter_preserves_nullable_receiver(self):
+        """Filtering does not strip a Nullable wrapper (nulls may survive)."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                v: int = pa.Field(nullable=True)
+                keep: bool
+
+            def f(data: DataFrame[In]):
+                return data.select(pl.col("v").filter(pl.col("keep")).alias("x"))
+        """
+        )
+
+        results = analyze_source(source)
+
+        assert results[0].has_errors is False, results[0].errors
+        expected = FrameType({"x": Nullable(Int64())})
+        assert results[0].inferred_return_type == expected
+
+    def test_filter_predicate_missing_column_errors(self):
+        """A predicate referencing a missing column surfaces PLY001."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                g: str
+                v: int
+
+            def agg(data: DataFrame[In]):
+                return data.group_by("g").agg(
+                    pl.col("v").filter(pl.col("missing") > 0).sum().alias("fs")
+                )
+        """
+        )
+
+        results = analyze_source(source)
+
+        assert any("PLY001" in e for e in results[0].errors)
+        assert any("missing" in e for e in results[0].errors)
+
+    def test_filter_kwarg_constraint_missing_column_is_validated(self):
+        """Kwarg-value expressions are validated through the analyser too."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                g: str
+                v: int
+
+            def agg(data: DataFrame[In]):
+                return data.group_by("g").agg(
+                    pl.col("v").filter(g=pl.col("missing")).sum().alias("fs")
+                )
+        """
+        )
+
+        results = analyze_source(source)
+
+        assert any("PLY001" in e for e in results[0].errors)
+
+
+class TestExprDropNullsChain:
+    """``Expr.drop_nulls()`` strips the Nullable wrapper (issue #23)."""
+
+    def test_drop_nulls_strips_nullable(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                v: int = pa.Field(nullable=True)
+
+            def f(data: DataFrame[In]):
+                return data.select(pl.col("v").drop_nulls().alias("x"))
+        """
+        )
+
+        results = analyze_source(source)
+
+        assert results[0].has_errors is False, results[0].errors
+        expected = FrameType({"x": Int64()})
+        assert results[0].inferred_return_type == expected
+
+    def test_drop_nulls_on_non_nullable_is_identity(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                v: int
+
+            def f(data: DataFrame[In]):
+                return data.select(pl.col("v").drop_nulls().alias("x"))
+        """
+        )
+
+        results = analyze_source(source)
+
+        assert results[0].has_errors is False, results[0].errors
+        expected = FrameType({"x": Int64()})
+        assert results[0].inferred_return_type == expected
+
+    def test_drop_nulls_then_sum_in_agg(self):
+        """``drop_nulls().sum()`` on a nullable column aggregates non-null Int64."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                g: str
+                v: int = pa.Field(nullable=True)
+
+            def agg(data: DataFrame[In]):
+                return data.group_by("g").agg(
+                    s=pl.col("v").drop_nulls().sum()
+                )
+        """
+        )
+
+        results = analyze_source(source)
+
+        assert results[0].has_errors is False, results[0].errors
+        expected = FrameType({"g": Utf8(), "s": Int64()})
         assert results[0].inferred_return_type == expected
 
 
@@ -1305,6 +1581,11 @@ class TestM3StrNamespace:
             ('pl.col("name").str.split(",")', ListT(Utf8())),
             ('pl.col("name").str.to_date()', Date()),
             ('pl.col("name").str.to_datetime()', Datetime()),
+            # Issue #19 — parse helpers
+            ('pl.col("name").str.to_integer()', Int64()),
+            ('pl.col("name").str.to_integer(base=10)', Int64()),
+            ('pl.col("name").str.to_decimal()', Decimal(38, 0)),
+            ('pl.col("name").str.to_time()', Time()),
         ],
     )
     def test_str_method_return_type(self, expr: str, expected_type):
@@ -1323,6 +1604,24 @@ class TestM3StrNamespace:
         ft = results[0].inferred_return_type
         assert ft is not None
         assert ft.columns["out"].dtype == expected_type, expr
+
+    def test_str_to_integer_wraps_nullable_receiver(self):
+        """Issue #19 — a Nullable receiver wraps the parse result in Nullable."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                name: str = pa.Field(nullable=True)
+
+            def f(data: DataFrame[S]):
+                return data.select(pl.col("name").str.to_integer().alias("out"))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["out"].dtype == Nullable(Int64())
 
     def test_str_method_on_missing_column_errors(self):
         source = textwrap.dedent(

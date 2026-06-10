@@ -15,6 +15,7 @@ from polypolarism.types import (
     List,
     Nullable,
     Struct,
+    Time,
     Unknown,
     Utf8,
 )
@@ -62,6 +63,23 @@ class TestDataTypes:
 
     def test_categorical_is_datatype(self):
         assert isinstance(Categorical(), DataType)
+
+    def test_time_is_datatype(self):
+        assert isinstance(Time(), DataType)
+
+    def test_time_equality(self):
+        assert Time() == Time()
+
+    def test_time_not_equal_to_date_or_datetime(self):
+        assert Time() != Date()
+        assert Time() != Datetime()
+
+    def test_time_str(self):
+        assert str(Time()) == "Time"
+
+    def test_time_hashable(self):
+        assert hash(Time()) == hash(Time())
+        assert len({Time(), Time()}) == 1
 
 
 class TestNullable:

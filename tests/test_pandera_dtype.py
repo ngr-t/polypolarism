@@ -122,6 +122,25 @@ class TestPolarsLandmarkDtypes:
         assert _parse("pl.Int128") == ColumnSpec(Int128(), required=True)
         assert _parse("pl.UInt128") != _parse("pl.Int128")
 
+    def test_pl_time_bare(self):
+        from polypolarism.types import Time
+
+        # Issue #19: ``str.to_time()`` returns pl.Time, so the dtype must be
+        # declarable in schemas too.
+        assert _parse("pl.Time") == ColumnSpec(Time(), required=True)
+
+    def test_pl_time_call(self):
+        from polypolarism.types import Time
+
+        assert _parse("pl.Time()") == ColumnSpec(Time(), required=True)
+
+    def test_pl_time_field_nullable(self):
+        from polypolarism.types import Time
+
+        assert _parse("pl.Time", "pa.Field(nullable=True)") == ColumnSpec(
+            Nullable(Time()), required=True
+        )
+
     def test_pl_decimal_bare_uses_default(self):
         from polypolarism.types import Decimal
 

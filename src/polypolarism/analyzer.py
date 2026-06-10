@@ -1259,6 +1259,25 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 inner_dtype = receiver_type.inner
             return receiver_name, inner_dtype if inner_dtype is not None else Boolean()
 
+        # ``Expr.filter(...)`` is row-subsetting: the dtype is preserved
+        # (Nullable wrapper included — nulls may survive the predicate).
+        # Predicate sub-expressions are validated so missing-column refs
+        # surface PLY001 (issue #23: conditional aggregation chains like
+        # ``pl.col("v").filter(pred).sum()``).
+        if method == "filter":
+            for arg in node.args:
+                self._validate_subexpr(arg)
+            for kw in node.keywords:
+                self._validate_subexpr(kw.value)
+            return receiver_name, receiver_type
+
+        # ``Expr.drop_nulls()`` removes the null rows, so the result keeps
+        # the receiver dtype with the Nullable wrapper stripped.
+        if method == "drop_nulls":
+            if isinstance(receiver_type, Nullable):
+                return receiver_name, receiver_type.inner
+            return receiver_name, receiver_type
+
         # Float-returning numeric methods.
         if method in self._FLOAT_RETURN_METHODS:
             receiver_type.inner if isinstance(receiver_type, Nullable) else receiver_type
@@ -1370,6 +1389,8 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             "sum": AggFunction.SUM,
             "mean": AggFunction.MEAN,
             "count": AggFunction.COUNT,
+            # ``Expr.len()`` counts nulls too; same UInt32 dtype (issue #23).
+            "len": AggFunction.COUNT,
             "n_unique": AggFunction.N_UNIQUE,
             "first": AggFunction.FIRST,
             "last": AggFunction.LAST,

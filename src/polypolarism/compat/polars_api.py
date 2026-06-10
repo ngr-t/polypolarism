@@ -50,6 +50,7 @@ from polypolarism.types import (
     Int64,
     Int128,
     Null,
+    Time,
     UInt8,
     UInt16,
     UInt32,
@@ -119,6 +120,7 @@ DTYPE_NAME_MAP: dict[str, DataType] = {
     "String": Utf8(),
     "Boolean": Boolean(),
     "Date": Date(),
+    "Time": Time(),
     "Datetime": Datetime(),
     "Duration": Duration(),
     "Categorical": Categorical(),
@@ -171,6 +173,11 @@ def _build_agg_name_map() -> dict[str, AggFunction]:
         "sum": AggFunction.SUM,
         "mean": AggFunction.MEAN,
         "count": AggFunction.COUNT,
+        # ``Expr.len()`` is the count-including-nulls variant of
+        # ``Expr.count()`` — same UInt32 result dtype (issue #23). Method
+        # form only: zero-arg ``pl.len()`` is handled separately and
+        # ``len`` is deliberately NOT in AGG_SHORTHAND_NAMES.
+        "len": AggFunction.COUNT,
         "n_unique": AggFunction.N_UNIQUE,
         "list": AggFunction.LIST,
         "first": AggFunction.FIRST,
@@ -246,6 +253,10 @@ STR_NAMESPACE_RETURN: dict[str, DataType] = {
     # Parsing into temporal types
     "to_date": Date(),
     "to_datetime": Datetime(),
+    "to_time": Time(),
+    # Parsing into numeric types (issue #19)
+    "to_integer": Int64(),
+    "to_decimal": DECIMAL_DEFAULT,
 }
 
 
