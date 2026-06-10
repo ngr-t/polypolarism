@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from polypolarism.analyzer import FunctionAnalysis, analyze_source
-from polypolarism.types import NUMERIC_DTYPES, DataType, List, Nullable, Unknown
+from polypolarism.types import NUMERIC_DTYPES, DataType, Datetime, List, Nullable, Unknown
 
 
 class TypeMismatch:
@@ -141,8 +141,10 @@ def _is_coercible_difference(inferred: DataType, declared: DataType) -> bool:
 
     Coercion casts values between numeric dtypes, so both bases must be
     numeric — non-numeric mismatches (e.g. Utf8 vs Int64) still error
-    under coerce. It does not remove nulls: a ``Nullable`` inferred side
-    can only coerce into a ``Nullable`` declared side.
+    under coerce. Datetime-vs-Datetime tz differences are also coercible
+    (probed: pandera ``coerce=True`` casts tz-naive into a tz-aware schema
+    and vice versa; issue #50). It does not remove nulls: a ``Nullable``
+    inferred side can only coerce into a ``Nullable`` declared side.
 
     Reused by ``analyzer._is_frame_subtype`` for the function-argument
     position (``pa.check_types`` coerces input frames too).
@@ -151,6 +153,8 @@ def _is_coercible_difference(inferred: DataType, declared: DataType) -> bool:
         return False
     inferred_base = _get_base_type(inferred)
     declared_base = _get_base_type(declared)
+    if isinstance(inferred_base, Datetime) and isinstance(declared_base, Datetime):
+        return True
     return type(inferred_base) in NUMERIC_DTYPES and type(declared_base) in NUMERIC_DTYPES
 
 

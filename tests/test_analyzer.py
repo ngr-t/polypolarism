@@ -8738,3 +8738,164 @@ class TestResolvePlDtypeDatetime:
         )
         assert analyzer.errors == [], analyzer.errors
         assert analyzer.var_types["out"].columns["t"].dtype == Datetime(tz="UTC")
+
+
+class TestTzMismatchedDatetimeOps:
+    """Issue #50: mixing tz-aware and tz-naive Datetimes (or two different
+    time zones) in binary operations.
+
+    Ground truth (polars 1.41.2 probe):
+
+    ==========================================  =========================
+    operation                                    naive/UTC    UTC/Tokyo
+    ==========================================  =========================
+    ``concat`` vertical / diagonal               SchemaError  SchemaError
+    ``-`` (Datetime - Datetime)                  SchemaError  SchemaError
+    ``==`` ``<`` (all six comparison ops)        SchemaError  SchemaError
+    join on Datetime keys (incl. ``join_asof``)  SchemaError  SchemaError
+    when/then branches (supertype)               SchemaError  SchemaError
+    ``is_in``                                    OK           OK
+    ``±  Duration``                              OK (tz kept) OK (tz kept)
+    Date vs tz-aware Datetime (cmp / - / sup.)   OK           OK
+    ==========================================  =========================
+
+    Same-tz pairs keep working everywhere (``tz - tz`` -> Duration etc.,
+    pinned in TestArithmeticIncompatibleDtypes).
+    """
+
+    def _frame(self) -> FrameType:
+        return FrameType(
+            {
+                "n": Datetime(),
+                "utc": Datetime(tz="UTC"),
+                "utc2": Datetime(tz="UTC"),
+                "tokyo": Datetime(tz="Asia/Tokyo"),
+                "d": Date(),
+                "du": Duration(),
+            }
+        )
+
+    # -- arithmetic (PLY009) ---------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "expr",
+        [
+            "pl.col('utc') - pl.col('n')",
+            "pl.col('n') - pl.col('utc')",
+            "pl.col('utc') - pl.col('tokyo')",
+        ],
+    )
+    def test_tz_mismatched_subtraction_flags_ply009(self, expr: str) -> None:
+        analyzer = _run_body(self._frame(), f"out = df.select(r={expr})")
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY009" in analyzer.errors[0]
+        assert analyzer.var_types["out"].columns["r"].dtype == Unknown()
+
+    @pytest.mark.parametrize(
+        ("expr", "expected"),
+        [
+            ("pl.col('utc') - pl.col('utc2')", Duration()),
+            ("pl.col('tokyo') - pl.col('tokyo')", Duration()),
+            ("pl.col('n') - pl.col('n')", Duration()),
+            # Date vs tz-aware Datetime is probed-valid in either order.
+            ("pl.col('d') - pl.col('utc')", Duration()),
+            ("pl.col('utc') - pl.col('d')", Duration()),
+            # Duration shifts keep the operand's tz.
+            ("pl.col('utc') + pl.col('du')", Datetime(tz="UTC")),
+            ("pl.col('du') + pl.col('tokyo')", Datetime(tz="Asia/Tokyo")),
+            ("pl.col('utc') - pl.col('du')", Datetime(tz="UTC")),
+        ],
+    )
+    def test_tz_compatible_arithmetic_keeps_working(self, expr: str, expected) -> None:
+        analyzer = _run_body(self._frame(), f"out = df.select(r={expr})")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["r"].dtype == expected
+
+    # -- comparisons (PLY009) ---------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "expr",
+        [
+            "pl.col('utc') == pl.col('n')",
+            "pl.col('n') < pl.col('utc')",
+            "pl.col('utc') >= pl.col('tokyo')",
+            "pl.col('tokyo') != pl.col('utc')",
+        ],
+    )
+    def test_tz_mismatched_comparison_flags_ply009(self, expr: str) -> None:
+        analyzer = _run_body(self._frame(), f"out = df.select(r={expr})")
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY009" in analyzer.errors[0]
+
+    @pytest.mark.parametrize(
+        "expr",
+        [
+            "pl.col('utc') == pl.col('utc2')",
+            "pl.col('utc') < pl.col('utc2')",
+            "pl.col('n') == pl.col('n')",
+            # Date vs tz-aware Datetime comparison is probed-valid.
+            "pl.col('d') == pl.col('utc')",
+            "pl.col('utc') > pl.col('d')",
+        ],
+    )
+    def test_tz_compatible_comparison_keeps_working(self, expr: str) -> None:
+        analyzer = _run_body(self._frame(), f"out = df.select(r={expr})")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["r"].dtype == Boolean()
+
+    # -- is_in stays valid across tz (probed OK — do NOT "fix" this) -----------
+
+    @pytest.mark.parametrize(
+        "expr",
+        [
+            "pl.col('utc').is_in(pl.col('n'))",
+            "pl.col('utc').is_in(pl.col('tokyo'))",
+            "pl.col('n').is_in(pl.col('utc'))",
+        ],
+    )
+    def test_is_in_across_tz_stays_silent(self, expr: str) -> None:
+        analyzer = _run_body(self._frame(), f"out = df.select(r={expr})")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["r"].dtype == Boolean()
+
+    # -- join keys (PLY010 via JoinError) ---------------------------------------
+
+    def _run_two(self, left: FrameType, right: FrameType, body: str):
+        import ast as _ast
+
+        errors: list[str] = []
+        analyzer = FunctionBodyAnalyzer({"a": left, "b": right}, errors)
+        tree = _ast.parse(textwrap.dedent(body))
+        for stmt in tree.body:
+            analyzer.visit(stmt)
+        return analyzer
+
+    def test_join_on_tz_mismatched_keys_flags_ply010(self) -> None:
+        left = FrameType({"t": Datetime(), "x": Int64()})
+        right = FrameType({"t": Datetime(tz="UTC"), "y": Int64()})
+        analyzer = self._run_two(left, right, "out = a.join(b, on='t', how='inner')")
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY010" in analyzer.errors[0]
+
+    def test_join_on_same_tz_keys_passes(self) -> None:
+        left = FrameType({"t": Datetime(tz="UTC"), "x": Int64()})
+        right = FrameType({"t": Datetime(tz="UTC"), "y": Int64()})
+        analyzer = self._run_two(left, right, "out = a.join(b, on='t', how='inner')")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["t"].dtype == Datetime(tz="UTC")
+
+    # -- concat (PLY020 via unify_types) ----------------------------------------
+
+    def test_concat_vertical_tz_mismatch_flags_ply020(self) -> None:
+        naive = FrameType({"t": Datetime()})
+        utc = FrameType({"t": Datetime(tz="UTC")})
+        analyzer = self._run_two(naive, utc, "out = pl.concat([a, b], how='vertical')")
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY020" in analyzer.errors[0]
+
+    def test_concat_vertical_same_tz_passes(self) -> None:
+        utc = FrameType({"t": Datetime(tz="UTC")})
+        utc2 = FrameType({"t": Datetime(tz="UTC")})
+        analyzer = self._run_two(utc, utc2, "out = pl.concat([a, b], how='vertical')")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["t"].dtype == Datetime(tz="UTC")

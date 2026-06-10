@@ -430,6 +430,11 @@ def _temporal_arith(
         return _ARITH_INVALID  # Time+Duration errors too (verified)
     if isinstance(op, ast.Sub):
         if lcat in ("date", "datetime") and rcat in ("date", "datetime"):
+            # Two Datetimes must agree on tz (probed: aware - naive and
+            # UTC - Asia/Tokyo both raise SchemaError; issue #50). Date vs
+            # tz-aware Datetime is probed-valid in either order.
+            if isinstance(left, Datetime) and isinstance(right, Datetime) and left.tz != right.tz:
+                return _ARITH_INVALID
             return Duration()
         if lcat == "time" and rcat == "time":
             return Duration()
@@ -555,6 +560,17 @@ _CMP_INVALID_PAIRS: frozenset[frozenset[str]] = frozenset(
 
 def _comparison_invalid(left_inner: DataType, right_inner: DataType) -> bool:
     """True when polars provably rejects comparing the (unwrapped) dtype pair."""
+    # Datetime pairs must agree on tz (probed: every comparison operator
+    # raises SchemaError for aware vs naive AND for two different zones —
+    # polars does not compare instants across zones; issue #50). Date vs
+    # tz-aware Datetime stays valid, and ``is_in`` across zones is
+    # probed-OK, so this rule lives here and not in the category table.
+    if (
+        isinstance(left_inner, Datetime)
+        and isinstance(right_inner, Datetime)
+        and left_inner.tz != right_inner.tz
+    ):
+        return True
     lcat = _cmp_category(left_inner)
     rcat = _cmp_category(right_inner)
     if lcat is None or rcat is None:

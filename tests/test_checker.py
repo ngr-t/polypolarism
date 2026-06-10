@@ -384,6 +384,22 @@ class TestIsCoercibleDifference:
     def test_non_nullable_inferred_to_nullable_declared_is_coercible(self):
         assert _is_coercible_difference(UInt32(), Nullable(Int64())) is True
 
+    def test_datetime_tz_difference_is_coercible(self):
+        # Probed (pandera + polars 1.41.2): ``Config.coerce = True`` casts
+        # a tz-naive frame into a tz-aware schema and vice versa — flagging
+        # the difference under coerce would be a false positive (issue #50).
+        from polypolarism.types import Datetime
+
+        assert _is_coercible_difference(Datetime(), Datetime(tz="UTC")) is True
+        assert _is_coercible_difference(Datetime(tz="UTC"), Datetime()) is True
+        assert _is_coercible_difference(Datetime(tz="UTC"), Datetime(tz="Asia/Tokyo")) is True
+
+    def test_datetime_vs_non_datetime_is_not_coercible(self):
+        from polypolarism.types import Date, Datetime
+
+        assert _is_coercible_difference(Datetime(tz="UTC"), Utf8()) is False
+        assert _is_coercible_difference(Date(), Datetime()) is False
+
 
 class TestCheckCoerce:
     """Config.coerce relaxes coercible dtype differences (issue #9)."""
@@ -2312,3 +2328,120 @@ class TestIssue49CumSumOnStringEndToEnd:
         assert len(results) == 1
         assert results[0].passed is False
         assert any("PLY016" in str(e) for e in results[0].errors), results[0].errors
+
+
+class TestIssue50TzMixingEndToEnd:
+    """Issue #50 repros: tz-aware and tz-naive Datetime mixing is flagged.
+
+    Probed (polars 1.41.2): ``pl.concat([naive, utc])`` and
+    ``aware - naive`` both raise SchemaError; the same-tz equivalents
+    succeed (``Datetime[UTC] - Datetime[UTC]`` -> Duration).
+    """
+
+    HEADER = textwrap.dedent(
+        """
+        import polars as pl
+        import pandera.polars as pa
+        from pandera.typing.polars import DataFrame
+        """
+    )
+
+    def test_concat_naive_and_utc_fails_with_ply020(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            class TsNaive(pa.DataFrameModel):
+                t: pl.Datetime
+
+            class TsUTC(pa.DataFrameModel):
+                t: pl.Datetime(time_zone="UTC")
+
+            def f(naive: DataFrame[TsNaive], utc: DataFrame[TsUTC]) -> DataFrame[TsNaive]:
+                return pl.concat([naive, utc], how="vertical")
+            """
+        )
+        result = check_source(source)[0]
+        assert result.passed is False
+        assert any("PLY020" in str(e) for e in result.errors), result.errors
+
+    def test_concat_same_tz_passes(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            class TsUTC(pa.DataFrameModel):
+                t: pl.Datetime(time_zone="UTC")
+
+            def f(x: DataFrame[TsUTC], y: DataFrame[TsUTC]) -> DataFrame[TsUTC]:
+                return pl.concat([x, y], how="vertical")
+            """
+        )
+        result = check_source(source)[0]
+        assert result.passed is True, result.errors
+
+    def test_aware_minus_naive_fails_with_ply009(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            class Mixed(pa.DataFrameModel):
+                a: pl.Datetime
+                b: pl.Datetime(time_zone="UTC")
+
+            class Out(pa.DataFrameModel):
+                span: pl.Duration
+
+            def f(df: DataFrame[Mixed]) -> DataFrame[Out]:
+                return df.select(span=pl.col("b") - pl.col("a"))
+            """
+        )
+        result = check_source(source)[0]
+        assert result.passed is False
+        assert len(result.errors) == 1, result.errors
+        assert "PLY009" in str(result.errors[0])
+
+    def test_same_tz_difference_declared_duration_passes(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            class TwoUTC(pa.DataFrameModel):
+                a: pl.Datetime(time_zone="UTC")
+                b: pl.Datetime(time_zone="UTC")
+
+            class Out(pa.DataFrameModel):
+                span: pl.Duration
+
+            def f(df: DataFrame[TwoUTC]) -> DataFrame[Out]:
+                return df.select(span=pl.col("b") - pl.col("a"))
+            """
+        )
+        result = check_source(source)[0]
+        assert result.passed is True, result.errors
+
+    def test_declared_tz_round_trips_through_identity(self):
+        # The declared tz must survive inference: returning the input
+        # unchanged satisfies the same tz-aware schema.
+        source = self.HEADER + textwrap.dedent(
+            """
+            class TsUTC(pa.DataFrameModel):
+                t: pl.Datetime(time_zone="UTC")
+
+            def f(df: DataFrame[TsUTC]) -> DataFrame[TsUTC]:
+                return df.sort("t")
+            """
+        )
+        result = check_source(source)[0]
+        assert result.passed is True, result.errors
+
+    def test_naive_inferred_vs_aware_declared_is_flagged(self):
+        # Probed: pandera rejects a naive frame against an aware schema —
+        # the dtype difference is real, not noise.
+        source = self.HEADER + textwrap.dedent(
+            """
+            class TsNaive(pa.DataFrameModel):
+                t: pl.Datetime
+
+            class TsUTC(pa.DataFrameModel):
+                t: pl.Datetime(time_zone="UTC")
+
+            def f(df: DataFrame[TsNaive]) -> DataFrame[TsUTC]:
+                return df.sort("t")
+            """
+        )
+        result = check_source(source)[0]
+        assert result.passed is False
+        assert any(isinstance(e, TypeDifference) for e in result.errors), result.errors
