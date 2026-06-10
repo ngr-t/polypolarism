@@ -1799,6 +1799,15 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                     fields[col] = infer_col(col, self.current_frame)
                 except ColumnNotFoundError as e:
                     self.errors.append(tag(PLY001, str(e)))
+            # Keyword args name the fields: ``pl.struct(x=expr)`` → field
+            # ``x`` (issue #47). The value can be any expression; an
+            # un-inferable one keeps the field as Unknown rather than
+            # dropping it (issue #8 philosophy).
+            for kw in node.keywords:
+                if kw.arg is None:
+                    continue
+                _, kw_dtype = self.analyze_select_expr(kw.value)
+                fields[kw.arg] = kw_dtype if kw_dtype is not None else Unknown()
             return None, Struct(fields)
 
         # ``pl.<agg>("col")`` top-level shorthand — equivalent to

@@ -2491,6 +2491,64 @@ class TestM6PlExprConstructors:
         assert ft.columns["ab"].dtype == Struct({"a": Int64(), "b": Float64()})
 
 
+class TestPlStructKeywordFields:
+    """Issue #47: ``pl.struct(name=expr)`` keyword args name struct fields."""
+
+    HEADER = textwrap.dedent(
+        PANDERA_HEADER
+        + """
+            class AB(pa.DataFrameModel):
+                a: int
+                b: pl.Float64
+"""
+    )
+
+    def _infer(self, body: str):
+        source = self.HEADER + textwrap.dedent(
+            f"""
+            def f(df: DataFrame[AB]):
+                return {body}
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        return ft
+
+    def test_kwarg_struct_field(self):
+        from polypolarism.types import Struct
+
+        ft = self._infer('df.select(w=pl.struct(x=pl.col("a")))')
+        assert ft.columns["w"].dtype == Struct({"x": Int64()})
+
+    def test_kwarg_struct_unnest_round_trip(self):
+        ft = self._infer('df.select(w=pl.struct(x=pl.col("a"))).unnest("w")')
+        assert ft.columns["x"].dtype == Int64()
+
+    def test_kwarg_struct_field_access(self):
+        ft = self._infer('df.select(x=pl.struct(x=pl.col("a")).struct.field("x"))')
+        assert ft.columns["x"].dtype == Int64()
+
+    def test_mixed_positional_and_kwarg_fields(self):
+        from polypolarism.types import Struct
+
+        ft = self._infer('df.select(w=pl.struct(pl.col("a"), y=pl.col("b")))')
+        assert ft.columns["w"].dtype == Struct({"a": Int64(), "y": Float64()})
+
+    def test_kwarg_expression_value(self):
+        from polypolarism.types import Struct
+
+        ft = self._infer('df.select(w=pl.struct(x=pl.col("a") + 1))')
+        assert ft.columns["w"].dtype == Struct({"x": Int64()})
+
+    def test_kwarg_uninferable_value_registers_unknown_field(self):
+        from polypolarism.types import Struct
+
+        ft = self._infer('df.select(w=pl.struct(x=pl.col("a").interpolate()))')
+        assert ft.columns["w"].dtype == Struct({"x": Unknown()})
+
+
 class TestExprListArgs:
     """Issue #16: a list/tuple literal of expressions is equivalent to varargs
     for multi-expression helpers (pl.struct, pl.coalesce, pl.concat_str, ...)."""
