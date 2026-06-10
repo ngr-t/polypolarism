@@ -4084,6 +4084,12 @@ class TestArithmeticBinOpInference:
         analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('a') / pl.col('u'))")
         assert analyzer.var_types["out"].columns["r"].dtype == Unknown()
 
+    def test_truediv_nullable_unknown_operand_is_unknown(self):
+        """Unknown is detected on the base type, after the Nullable unwrap."""
+        frame = FrameType({"a": Int64(), "nu": Nullable(Unknown())})
+        analyzer = _run_body(frame, "out = df.select(r=pl.col('a') / pl.col('nu'))")
+        assert analyzer.var_types["out"].columns["r"].dtype == Unknown()
+
     def test_truediv_one_resolved_operand_is_float64(self):
         """A single resolved operand is enough — / yields Float64 regardless."""
         analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('a') / helper())")
