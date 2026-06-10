@@ -3088,3 +3088,77 @@ class TestRestPropagation:
         assert out.rest is not None
         assert out.strict is True
         assert out.columns["doubled"].dtype == Int64()
+
+
+class TestSelectStringColumns:
+    """Issue #7: bare string column names in select / with_columns."""
+
+    def _source(self, call: str) -> str:
+        return textwrap.dedent(
+            PANDERA_HEADER
+            + f"""
+            class In(pa.DataFrameModel):
+                a: int
+                b: str
+                c: pl.Float64
+
+            class Out(pa.DataFrameModel):
+                a: int
+                b: str
+
+            def f(df: DataFrame[In]) -> DataFrame[Out]:
+                return df.{call}
+        """
+        )
+
+    def test_select_positional_strings(self):
+        results = analyze_source(self._source('select("a", "b")'))
+        assert results[0].errors == []
+        assert results[0].inferred_return_type == FrameType({"a": Int64(), "b": Utf8()})
+
+    def test_select_list_of_strings(self):
+        results = analyze_source(self._source('select(["a", "b"])'))
+        assert results[0].errors == []
+        assert results[0].inferred_return_type == FrameType({"a": Int64(), "b": Utf8()})
+
+    def test_select_string_missing_column_errors(self):
+        results = analyze_source(self._source('select("a", "ghost")'))
+        assert any("ghost" in str(e) for e in results[0].errors)
+
+    def test_select_list_with_missing_column_errors(self):
+        results = analyze_source(self._source('select(["a", "ghost"])'))
+        assert any("ghost" in str(e) for e in results[0].errors)
+
+    def test_select_mixes_strings_and_exprs(self):
+        results = analyze_source(self._source('select("a", pl.col("c").alias("b"))'))
+        assert results[0].errors == []
+        assert results[0].inferred_return_type == FrameType({"a": Int64(), "b": Float64()})
+
+    def test_select_string_on_open_frame_registers_unknown(self):
+        frame = FrameType({"id": Int64()}, rest=RowVar("r"))
+        analyzer = _run_body(frame, 'out = df.select("ghost")')
+        assert analyzer.errors == []
+        assert analyzer.var_types["out"].columns["ghost"].dtype == Unknown()
+
+    def test_with_columns_string_keeps_schema(self):
+        results = analyze_source(self._source('with_columns("a")'))
+        assert results[0].errors == []
+        assert results[0].inferred_return_type == FrameType(
+            {"a": Int64(), "b": Utf8(), "c": Float64()}
+        )
+
+    def test_with_columns_string_list_keeps_schema(self):
+        results = analyze_source(self._source('with_columns(["a", "b"])'))
+        assert results[0].errors == []
+        assert results[0].inferred_return_type == FrameType(
+            {"a": Int64(), "b": Utf8(), "c": Float64()}
+        )
+
+    def test_with_columns_string_missing_column_errors(self):
+        results = analyze_source(self._source('with_columns("ghost")'))
+        assert any("ghost" in str(e) for e in results[0].errors)
+
+    def test_with_columns_string_missing_on_open_frame_no_error(self):
+        frame = FrameType({"id": Int64()}, rest=RowVar("r"))
+        analyzer = _run_body(frame, 'out = df.with_columns("ghost")')
+        assert analyzer.errors == []

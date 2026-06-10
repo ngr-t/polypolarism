@@ -2040,6 +2040,30 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             names.append(s)
         return names
 
+    def _register_string_selection(
+        self,
+        name: str,
+        input_frame: FrameType,
+        result_columns: dict[str, DataType],
+    ) -> None:
+        """Resolve a bare string column name in ``select`` — equivalent to
+        ``pl.col(name)``. Missing names error on closed frames (PLY001);
+        on an open frame the column may exist among the unknown extras,
+        so it is selected as ``Unknown``."""
+        spec = input_frame.columns.get(name)
+        if spec is not None:
+            result_columns[name] = spec.dtype
+        elif input_frame.rest is not None:
+            result_columns[name] = Unknown()
+        else:
+            self.errors.append(
+                tag(
+                    PLY001,
+                    f"Column '{name}' not found. Available columns: "
+                    f"{list(input_frame.columns.keys())}",
+                )
+            )
+
     def _infer_select_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
         """Infer type of .select() call."""
         expr_analyzer = ExpressionAnalyzer(
@@ -2074,6 +2098,17 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                         )
                         continue
                     result_columns[c] = spec.dtype
+                continue
+            # Bare string / list-of-strings column names — the most common
+            # polars idiom: ``select("a", "b")`` / ``select(["a", "b"])``.
+            single = _str_constant(arg)
+            if single is not None:
+                self._register_string_selection(single, input_frame, result_columns)
+                continue
+            str_list = _str_list_or_tuple(arg)
+            if str_list is not None:
+                for c in str_list:
+                    self._register_string_selection(c, input_frame, result_columns)
                 continue
             name, dtype = expr_analyzer.analyze_select_expr(arg)
             if name and dtype:
@@ -2115,6 +2150,24 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 # the existing columns; nothing to add. On an open frame a
                 # missing name may exist among the unknown extras — no error.
                 for c in plural:
+                    if c not in input_frame.columns and input_frame.rest is None:
+                        self.errors.append(
+                            tag(
+                                PLY001,
+                                f"Column '{c}' not found. Available columns: "
+                                f"{list(input_frame.columns.keys())}",
+                            )
+                        )
+                continue
+            # Bare string / list-of-strings — equivalent to ``pl.col(name)``,
+            # a re-selection of existing columns. Validate existence (PLY001
+            # on closed frames) but leave the schema unchanged.
+            single = _str_constant(arg)
+            str_list = _str_list_or_tuple(arg)
+            if single is not None or str_list is not None:
+                names = [single] if single is not None else str_list
+                assert names is not None
+                for c in names:
                     if c not in input_frame.columns and input_frame.rest is None:
                         self.errors.append(
                             tag(
