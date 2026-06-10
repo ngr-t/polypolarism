@@ -4978,3 +4978,208 @@ class TestPlAllExcludeSelectors:
         analyzer = _run_body(frame, "out = df.drop(pl.exclude('id'))")
         assert analyzer.errors == []
         assert analyzer.var_types["out"] == FrameType({"id": Int64()})
+
+
+class TestSelectConstantResolution:
+    """#22: constant-bound column names resolve in select / with_columns."""
+
+    def test_select_module_constant(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            KEY = "a"
+
+            class S(pa.DataFrameModel):
+                a: int
+                b: str
+
+            def f(df: DataFrame[S]):
+                return df.select(KEY)
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        assert results[0].inferred_return_type == FrameType({"a": Int64()})
+
+    def test_select_module_constant_list(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            COLS = ["a", "b"]
+
+            class S(pa.DataFrameModel):
+                a: int
+                b: str
+                c: pl.Float64
+
+            def f(df: DataFrame[S]):
+                return df.select(COLS)
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        assert results[0].inferred_return_type == FrameType({"a": Int64(), "b": Utf8()})
+
+    def test_select_local_constant_shadows_module_constant(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            KEY = "ghost"
+
+            class S(pa.DataFrameModel):
+                a: int
+                b: str
+
+            def f(df: DataFrame[S]):
+                KEY = "b"
+                return df.select(KEY)
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        assert results[0].inferred_return_type == FrameType({"b": Utf8()})
+
+    def test_select_kwarg_constant_is_renamed_column_reference(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            KEY = "a"
+
+            class S(pa.DataFrameModel):
+                a: int
+                b: str
+
+            def f(df: DataFrame[S]):
+                return df.select(x=KEY)
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        assert results[0].inferred_return_type == FrameType({"x": Int64()})
+
+    def test_select_missing_column_via_constant_errors(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            KEY = "ghost"
+
+            class S(pa.DataFrameModel):
+                a: int
+
+            def f(df: DataFrame[S]):
+                return df.select(KEY)
+        """
+        )
+        results = analyze_source(source)
+        assert any("PLY001" in str(e) and "ghost" in str(e) for e in results[0].errors)
+
+    def test_select_unknown_name_still_falls_through(self):
+        """A bare Name that is NOT a constant (e.g. a frame variable) keeps
+        going to expression analysis — no false PLY001."""
+        frame = FrameType({"a": Int64()})
+        analyzer = _run_body(frame, "out = df.select(mystery)")
+        assert analyzer.errors == []
+
+    def test_with_columns_constant_keeps_schema(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            KEY = "a"
+
+            class S(pa.DataFrameModel):
+                a: int
+                b: str
+
+            def f(df: DataFrame[S]):
+                return df.with_columns(KEY)
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        assert results[0].inferred_return_type == FrameType({"a": Int64(), "b": Utf8()})
+
+    def test_with_columns_missing_constant_errors(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            KEY = "ghost"
+
+            class S(pa.DataFrameModel):
+                a: int
+
+            def f(df: DataFrame[S]):
+                return df.with_columns(KEY)
+        """
+        )
+        results = analyze_source(source)
+        assert any("PLY001" in str(e) and "ghost" in str(e) for e in results[0].errors)
+
+    def test_with_columns_kwarg_constant_is_column_reference(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            KEY = "a"
+
+            class S(pa.DataFrameModel):
+                a: int
+                b: str
+
+            def f(df: DataFrame[S]):
+                return df.with_columns(x=KEY)
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["x"].dtype == Int64()
+        assert ft.columns["a"].dtype == Int64()
+
+    def test_select_seq_constant_cross_feature(self):
+        """#21 x #22: the seq variant resolves constants too."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            KEY = "a"
+
+            class S(pa.DataFrameModel):
+                a: int
+                b: str
+
+            def f(df: DataFrame[S]):
+                return df.select_seq(KEY)
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        assert results[0].inferred_return_type == FrameType({"a": Int64()})
+
+    def test_real_world_recon_pattern(self):
+        """Issue #22's surfacing pattern: a renamed-select via a constant
+        feeding a full join keyed on the same constant."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            RECON_KEY = "txn_id"
+
+            class GL(pa.DataFrameModel):
+                txn_id: int
+                amount: pl.Float64
+
+            class Sub(pa.DataFrameModel):
+                txn_id: int
+                sub_amount: pl.Float64
+
+            def recon(gl: DataFrame[GL], sub: DataFrame[Sub]):
+                return gl.select(RECON_KEY, gl_amount=pl.col("amount")).join(
+                    sub, on=RECON_KEY, how="full"
+                )
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert "txn_id" in ft.columns
+        assert "gl_amount" in ft.columns
+        assert "sub_amount" in ft.columns

@@ -907,3 +907,42 @@ class TestIssue20PlAllExcludeEndToEnd:
         by_name = {r.function_name: r for r in results}
         for name in ("sel_all", "sel_exclude", "sel_cs", "with_cols_all"):
             assert by_name[name].passed is True, (name, by_name[name].errors)
+
+
+class TestIssue22SelectConstantEndToEnd:
+    """Issue #22 repro: select(KEY) with a module-level constant infers
+    the same schema as the literal form, satisfying a strict Out."""
+
+    ISSUE_SOURCE = textwrap.dedent("""
+        import polars as pl
+        import pandera.polars as pa
+        from pandera.typing.polars import DataFrame
+
+        class In(pa.DataFrameModel):
+            a: int
+            b: int
+            class Config:
+                coerce = True
+
+        class OutA(pa.DataFrameModel):
+            a: int
+            class Config:
+                strict = True
+                coerce = True
+
+        KEY = "a"
+
+        def ok_select_var(df: DataFrame[In]) -> DataFrame[OutA]:
+            return df.select(KEY)
+
+        def ok_select_seq_var(df: DataFrame[In]) -> DataFrame[OutA]:
+            return df.select_seq(KEY)
+    """)
+
+    def test_issue_22_repro_functions_pass(self):
+        results = check_source(self.ISSUE_SOURCE)
+
+        assert len(results) == 2
+        by_name = {r.function_name: r for r in results}
+        for name in ("ok_select_var", "ok_select_seq_var"):
+            assert by_name[name].passed is True, (name, by_name[name].errors)
