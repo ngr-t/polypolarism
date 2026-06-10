@@ -97,6 +97,14 @@ class TestCheckDirectory:
             assert result.passed is False
             assert any("PLY009" in str(e) for e in result.errors)
 
+    def test_cast_impossible_fixture_fails_with_ply013(self):
+        """Issue #34 fixture: List(Int64) -> Int64 cast is structurally impossible."""
+        results = check_file(FIXTURES_DIR / "invalid" / "cast_impossible.py")
+
+        assert len(results) == 1
+        assert results[0].passed is False
+        assert any("PLY013" in str(e) for e in results[0].errors)
+
 
 class TestCheckWarningFixtures:
     """Files in fixtures/warning produce warnings but still pass type-check."""

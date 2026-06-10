@@ -6787,3 +6787,206 @@ class TestIsInIncompatibleDtypes:
         analyzer = _run_body(self._frame(), f"out = df.select(m={expr})")
         assert analyzer.errors == [], analyzer.errors
         assert analyzer.var_types["out"].columns["m"].dtype == Boolean()
+
+
+class TestCastImpossibleDtypes:
+    """Issue #34: ``cast()`` to a structurally impossible target flags PLY013.
+
+    Ground truth verified against polars 1.41.2 with BOTH ``strict=True``
+    and ``strict=False`` (probe output in the implementing commit
+    message) — only combinations that fail in both modes are flagged;
+    value-dependent failures (``Utf8 -> Int64``, ``num -> Categorical``,
+    ``str/int -> Enum``, ``str -> Struct``) stay silent. Flagged source ->
+    target category pairs:
+
+    - str -> bool;  bool -> cat/enum
+    - date -> bool/time/dur/cat/enum/list/struct
+    - datetime -> bool/dur/cat/enum/list/struct
+    - time -> bool/date/datetime/cat/enum/list/struct
+    - dur -> str/bool/date/datetime/time/cat/enum/list/struct
+    - cat/enum -> float/bool/date/datetime/time/dur/list/struct
+    - list -> any non-list; list -> list recurses on element dtypes
+      (List(Date) -> List(Duration) errors in both modes)
+
+    Notable probed-OK cells: Struct -> anything (polars casts the fields;
+    Struct -> Utf8 yields String), num -> List/Struct (wraps), cat/enum
+    -> int (physical), num <-> temporal. On a flagged expression cast the
+    output degrades to Unknown — fabricating the target dtype would hide
+    declared-type mismatches (the issue #34 repro).
+    """
+
+    def _frame(self) -> FrameType:
+        from polypolarism.types import Struct
+
+        return FrameType(
+            {
+                "i": Int64(),
+                "f": Float64(),
+                "s": Utf8(),
+                "b": Boolean(),
+                "d": Date(),
+                "dt": Datetime(),
+                "t": Time(),
+                "du": Duration(),
+                "cat": Categorical(),
+                "en": Enum(),
+                "li": ListT(Int64()),
+                "ld": ListT(Date()),
+                "st": Struct({"x": Int64()}),
+                "nli": Nullable(ListT(Int64())),
+                "ni": Nullable(Int64()),
+                "u": Unknown(),
+                "dec": Decimal(10, 2),
+            }
+        )
+
+    # -- known-impossible casts -------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "expr",
+        [
+            # the issue #34 repro and other List -> scalar casts
+            "pl.col('li').cast(pl.Int64)",
+            "pl.col('li').cast(pl.Utf8)",
+            "pl.col('li').cast(pl.Boolean)",
+            "pl.col('ld').cast(pl.Date)",
+            # strict=False exempts nothing structural (probed)
+            "pl.col('li').cast(pl.Int64, strict=False)",
+            # temporal cross-family
+            "pl.col('d').cast(pl.Time)",
+            "pl.col('d').cast(pl.Boolean)",
+            "pl.col('dt').cast(pl.Duration)",
+            "pl.col('t').cast(pl.Date)",
+            "pl.col('t').cast(pl.Datetime)",
+            "pl.col('du').cast(pl.Utf8)",
+            "pl.col('du').cast(pl.Date)",
+            # string / bool / categorical
+            "pl.col('s').cast(pl.Boolean)",
+            "pl.col('b').cast(pl.Categorical)",
+            "pl.col('b').cast(pl.Enum)",
+            "pl.col('cat').cast(pl.Float64)",
+            "pl.col('en').cast(pl.Float64)",
+            "pl.col('cat').cast(pl.Duration)",
+            "pl.col('d').cast(pl.Enum)",
+            # scalar -> List only errors for temporal/categorical sources
+            "pl.col('d').cast(pl.List(pl.Int64))",
+            # list -> list recurses on the element pair
+            "pl.col('ld').cast(pl.List(pl.Duration))",
+            # Nullable receiver unwraps
+            "pl.col('nli').cast(pl.Int64)",
+        ],
+    )
+    def test_impossible_cast_flags_ply013_and_degrades_to_unknown(self, expr: str) -> None:
+        analyzer = _run_body(self._frame(), f"out = df.select(r={expr})")
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY013" in analyzer.errors[0]
+        # The error is the signal — don't fabricate the target dtype, or a
+        # declared-type mismatch downstream would be hidden (issue #34).
+        assert analyzer.var_types["out"].columns["r"].dtype == Unknown()
+
+    def test_error_message_names_source_and_target(self):
+        analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('li').cast(pl.Int64))")
+        assert "List[Int64]" in analyzer.errors[0]
+        assert "Int64" in analyzer.errors[0]
+        assert "strict=False" in analyzer.errors[0]
+
+    # -- allowed / value-dependent casts stay silent ------------------------------
+
+    @pytest.mark.parametrize(
+        ("expr", "expected"),
+        [
+            ("pl.col('i').cast(pl.Utf8)", Utf8()),
+            ("pl.col('i').cast(pl.Float64)", Float64()),
+            # value-dependent failure -> allowed
+            ("pl.col('s').cast(pl.Int64)", Int64()),
+            ("pl.col('i').cast(pl.Date)", Date()),
+            ("pl.col('b').cast(pl.Int64)", Int64()),
+            ("pl.col('cat').cast(pl.Int64)", Int64()),  # physical repr
+            ("pl.col('cat').cast(pl.Utf8)", Utf8()),
+            ("pl.col('en').cast(pl.Categorical)", Categorical()),
+            ("pl.col('i').cast(pl.Categorical)", Categorical()),  # strict=False ok
+            ("pl.col('s').cast(pl.Enum)", Enum()),  # value-dependent
+            ("pl.col('dt').cast(pl.Time)", Time()),  # probed ok
+            ("pl.col('d').cast(pl.Datetime)", Datetime()),
+            # list -> list with a castable element pair
+            ("pl.col('li').cast(pl.List(pl.Float64))", ListT(Float64())),
+            ("pl.col('li').cast(pl.List(pl.Utf8))", ListT(Utf8())),
+            # num -> List wraps each value (probed ok)
+            ("pl.col('i').cast(pl.List(pl.Int64))", ListT(Int64())),
+        ],
+    )
+    def test_allowed_cast_infers_target_dtype(self, expr: str, expected) -> None:
+        analyzer = _run_body(self._frame(), f"out = df.select(r={expr})")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["r"].dtype == expected
+
+    def test_struct_source_casts_are_silent(self):
+        # Struct -> scalar is probed-OK (polars casts the fields).
+        analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('st').cast(pl.Int64))")
+        assert analyzer.errors == [], analyzer.errors
+
+    def test_nullable_receiver_keeps_nullable_target(self):
+        analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('ni').cast(pl.Float64))")
+        assert analyzer.errors == []
+        assert analyzer.var_types["out"].columns["r"].dtype == Nullable(Float64())
+
+    # -- Unknown / outside-the-set exemptions --------------------------------------
+
+    @pytest.mark.parametrize(
+        "expr",
+        [
+            "pl.col('u').cast(pl.Int64)",  # Unknown source
+            "pl.col('dec').cast(pl.Time)",  # Decimal outside the closed set
+            "pl.col('v').interpolate().cast(pl.Int64)",  # un-inferable receiver pins
+            "pl.col('li').cast(unknown_target)",  # unresolvable target
+        ],
+    )
+    def test_unknown_source_or_target_is_silent(self, expr: str) -> None:
+        from polypolarism.types import ColumnSpec
+
+        frame = self._frame()
+        frame.columns["v"] = ColumnSpec(dtype=Int64())
+        analyzer = _run_body(frame, f"out = df.select(r={expr})")
+        assert analyzer.errors == [], analyzer.errors
+
+
+class TestCastImpossibleFrameLevel:
+    """Issue #34: frame-level ``df.cast({...})`` applies the same per-column check."""
+
+    def _frame(self) -> FrameType:
+        return FrameType(
+            {
+                "v": ListT(Int64()),
+                "w": Int64(),
+                "u": Unknown(),
+            }
+        )
+
+    def test_frame_cast_list_to_int_flags_ply013(self):
+        analyzer = _run_body(self._frame(), "out = df.cast({'v': pl.Int64})")
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY013" in analyzer.errors[0]
+        assert "'v'" in analyzer.errors[0]
+
+    def test_frame_cast_keeps_source_spec_for_flagged_column(self):
+        analyzer = _run_body(self._frame(), "out = df.cast({'v': pl.Int64, 'w': pl.Int32})")
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY013" in analyzer.errors[0]
+        # The flagged column keeps its source dtype; the valid one is cast.
+        assert analyzer.var_types["out"].columns["v"].dtype == ListT(Int64())
+        assert analyzer.var_types["out"].columns["w"].dtype == Int32()
+
+    def test_frame_cast_strict_false_still_flags(self):
+        analyzer = _run_body(self._frame(), "out = df.cast({'v': pl.Int64}, strict=False)")
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY013" in analyzer.errors[0]
+
+    def test_frame_cast_valid_column_no_error(self):
+        analyzer = _run_body(self._frame(), "out = df.cast({'w': pl.Utf8})")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["w"].dtype == Utf8()
+
+    def test_frame_cast_unknown_source_is_silent(self):
+        analyzer = _run_body(self._frame(), "out = df.cast({'u': pl.Int64})")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["u"].dtype == Int64()

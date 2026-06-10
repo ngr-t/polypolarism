@@ -38,6 +38,7 @@ from polypolarism.diagnostics import (
     PLY009,
     PLY010,
     PLY011,
+    PLY013,
     PLY020,
     PLY021,
     PLY022,
@@ -161,6 +162,11 @@ def _resolve_pl_dtype(node: ast.expr) -> DataType | None:
     # Parametric form like ``pl.Datetime("us", "UTC")`` — keep simple.
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
         if isinstance(node.func.value, ast.Name) and node.func.value.id == "pl":
+            # ``pl.List(pl.Int64)`` — resolve the element dtype recursively;
+            # an unresolvable element degrades to List[Unknown].
+            if node.func.attr == "List" and node.args:
+                element = _resolve_pl_dtype(node.args[0])
+                return ListT(element if element is not None else Unknown())
             base = _PL_DTYPE_NAME_MAP.get(node.func.attr)
             if isinstance(base, Datetime):
                 tz: str | None = None
@@ -554,6 +560,113 @@ def _is_in_invalid(receiver_inner: DataType, element_inner: DataType) -> bool:
     if rcat is None or ecat is None:
         return False
     return frozenset((rcat, ecat)) not in _IS_IN_VALID_PAIRS
+
+
+# ---- cast structural rules (issue #34) ---------------------------------------
+#
+# Casts whose source -> target dtype pair polars rejects with BOTH
+# ``strict=True`` and ``strict=False`` (``InvalidOperationError`` /
+# ``ComputeError`` — structural, not value-dependent). Verified against
+# polars 1.41.2 by driving the full source x target product through
+# ``df.select`` in both modes (table in TestCastImpossibleDtypes).
+# Value-dependent failures (``Utf8 -> Int64``, ``num -> Categorical``,
+# ``str/int -> Enum``, ``str -> Struct``) and anything outside the
+# understood set stay silent.
+
+
+def _cast_category(dtype: DataType) -> str | None:
+    """Category of a (Nullable-unwrapped) dtype for cast classification.
+
+    Unlike ``_cmp_category`` this splits int/float (``Categorical -> int``
+    is allowed via the physical repr while ``Categorical -> float`` is
+    rejected) and adds List / Struct.
+    """
+    if isinstance(dtype, (Float16, Float32, Float64)):
+        return "float"
+    if type(dtype) in NUMERIC_DTYPES:
+        return "int"
+    if isinstance(dtype, Utf8):
+        return "str"
+    if isinstance(dtype, Boolean):
+        return "bool"
+    if isinstance(dtype, Date):
+        return "date"
+    if isinstance(dtype, Datetime):
+        return "datetime"
+    if isinstance(dtype, Time):
+        return "time"
+    if isinstance(dtype, Duration):
+        return "dur"
+    if isinstance(dtype, Categorical):
+        return "cat"
+    if isinstance(dtype, Enum):
+        return "enum"
+    if isinstance(dtype, ListT):
+        return "list"
+    if isinstance(dtype, Struct):
+        return "struct"
+    return None
+
+
+# Directional (source_category, target_category) pairs that fail in both
+# strict modes. Struct *sources* never appear: polars casts a Struct's
+# fields instead of rejecting (``Struct -> Utf8`` yields String). Scalar
+# -> List/Struct only fails for temporal/categorical sources (numeric,
+# str and bool sources wrap).
+_CAST_INVALID_PAIRS: frozenset[tuple[str, str]] = frozenset(
+    {("str", "bool"), ("bool", "cat"), ("bool", "enum")}
+    | {("date", t) for t in ("bool", "time", "dur", "cat", "enum", "list", "struct")}
+    | {("datetime", t) for t in ("bool", "dur", "cat", "enum", "list", "struct")}
+    | {("time", t) for t in ("bool", "date", "datetime", "cat", "enum", "list", "struct")}
+    | {
+        ("dur", t)
+        for t in ("str", "bool", "date", "datetime", "time", "cat", "enum", "list", "struct")
+    }
+    | {
+        (s, t)
+        for s in ("cat", "enum")
+        for t in ("float", "bool", "date", "datetime", "time", "dur", "list", "struct")
+    }
+    | {
+        ("list", t)
+        for t in (
+            "int",
+            "float",
+            "str",
+            "bool",
+            "date",
+            "datetime",
+            "time",
+            "dur",
+            "cat",
+            "enum",
+            "struct",
+        )
+    }
+)
+
+
+def _cast_invalid(source_inner: DataType, target_inner: DataType) -> bool:
+    """True when polars provably rejects the cast even with ``strict=False``.
+
+    ``list -> list`` recurses on the element dtypes (``List(Date) ->
+    List(Duration)`` fails in both modes); an Unknown element on either
+    side stays silent.
+    """
+    scat = _cast_category(source_inner)
+    tcat = _cast_category(target_inner)
+    if scat is None or tcat is None:
+        return False
+    if scat == "list" and tcat == "list":
+        assert isinstance(source_inner, ListT) and isinstance(target_inner, ListT)
+        source_elem = source_inner.inner
+        target_elem = target_inner.inner
+        if isinstance(source_elem, Nullable):
+            source_elem = source_elem.inner
+        if isinstance(target_elem, Nullable):
+            target_elem = target_elem.inner
+        return _cast_invalid(source_elem, target_elem)
+    return (scat, tcat) in _CAST_INVALID_PAIRS
 
 
 def _wrap_like(receiver: DataType, new_inner: DataType) -> DataType:
@@ -1961,10 +2074,27 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 self.errors.append(str(e))
                 return receiver_name, receiver_type
 
-        # ``cast(pl.<dtype>)`` chained directly on column.
+        # ``cast(pl.<dtype>)`` chained directly on column. A structurally
+        # impossible source -> target pair flags PLY013 (issue #34) and the
+        # output degrades to Unknown — fabricating the target dtype would
+        # hide declared-type mismatches downstream. ``strict=False`` exempts
+        # nothing: the probed-invalid pairs fail in both modes.
         if method == "cast" and node.args:
             target = _resolve_pl_dtype(node.args[0])
             if target is not None and receiver_type is not None:
+                receiver_inner = (
+                    receiver_type.inner if isinstance(receiver_type, Nullable) else receiver_type
+                )
+                if _cast_invalid(receiver_inner, target):
+                    self.errors.append(
+                        tag(
+                            PLY013,
+                            f"cast: {receiver_inner} cannot be cast to {target} — "
+                            f"polars raises InvalidOperationError even with "
+                            f"strict=False",
+                        )
+                    )
+                    return receiver_name, None
                 return receiver_name, _wrap_like(receiver_type, target)
             if target is not None:
                 # Receiver dtype was uninferable (e.g. ``.interpolate()``)
@@ -3256,6 +3386,20 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             spec = result_columns.get(col)
             if spec is None:
                 self.errors.append(tag(PLY004, f"cast: column '{col}' not found"))
+                continue
+            source_inner = spec.dtype.inner if isinstance(spec.dtype, Nullable) else spec.dtype
+            if _cast_invalid(source_inner, target):
+                # Issue #34: structurally impossible cast — flag and keep
+                # the source spec rather than fabricating the target dtype.
+                # ``strict=False`` exempts nothing (probed).
+                self.errors.append(
+                    tag(
+                        PLY013,
+                        f"cast: column '{col}' with dtype {source_inner} cannot be "
+                        f"cast to {target} — polars raises InvalidOperationError "
+                        f"even with strict=False",
+                    )
+                )
                 continue
             result_columns[col] = ColumnSpec(
                 dtype=_wrap_like(spec.dtype, target),
