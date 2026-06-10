@@ -18,6 +18,7 @@ from polypolarism.types import (
     Decimal,
     Duration,
     Enum,
+    Float16,
     Float32,
     Float64,
     FrameType,
@@ -25,9 +26,11 @@ from polypolarism.types import (
     Int16,
     Int32,
     Int64,
+    Int128,
     Null,
     Nullable,
     RowVar,
+    Struct,
     Time,
     UInt8,
     UInt16,
@@ -2183,6 +2186,180 @@ class TestM5Cumulative:
         assert ft.columns["n"].dtype == UInt32()
 
 
+class TestCumulativeStrictDtypes:
+    """Issue #49: ``cum_sum``/``cum_prod``/``cum_min``/``cum_max`` are
+    strictly typed instead of blindly dtype-preserving.
+
+    Probed (polars 1.41.2) receiver-dtype matrix:
+
+    - invalid receivers raise InvalidOperationError at runtime — flagged
+      PLY016, output degrades to Unknown:
+        cum_sum:  Utf8, Date, Datetime, Time, List, Struct, Categorical,
+                  Enum, Null
+        cum_prod: the cum_sum set plus Duration and Decimal
+        cum_min / cum_max: Utf8, List, Struct, Null
+    - probed-valid non-preserving cells:
+        cum_sum:  Int8/Int16/UInt8/UInt16 -> Int64 (overflow guard),
+                  Boolean -> UInt32, Decimal(p, s) -> Decimal(38, s)
+        cum_prod: every int dtype narrower than UInt64 plus Boolean ->
+                  Int64 (UInt64/Int128/UInt128 keep their dtype)
+    - every other probed cell preserves the receiver dtype.
+    - ``cum_count`` returns UInt32 for EVERY receiver dtype (even the
+      ones the other cumulatives reject) and never raises.
+    """
+
+    def _run(self, receiver, method: str):
+        frame = FrameType({"v": receiver})
+        return _run_body(frame, f'out = df.select(c=pl.col("v").{method}())')
+
+    @pytest.mark.parametrize(
+        ("method", "receiver"),
+        [
+            ("cum_sum", Utf8()),
+            ("cum_sum", Date()),
+            ("cum_sum", Datetime()),
+            ("cum_sum", Datetime(tz="UTC")),
+            ("cum_sum", Time()),
+            ("cum_sum", ListT(Int64())),
+            ("cum_sum", Struct({"x": Int64()})),
+            ("cum_sum", Categorical()),
+            ("cum_sum", Enum()),
+            ("cum_sum", Null()),
+            ("cum_prod", Utf8()),
+            ("cum_prod", Date()),
+            ("cum_prod", Time()),
+            ("cum_prod", Duration()),
+            ("cum_prod", Decimal(10, 2)),
+            ("cum_prod", ListT(Int64())),
+            ("cum_prod", Null()),
+            ("cum_min", Utf8()),
+            ("cum_min", ListT(Int64())),
+            ("cum_min", Struct({"x": Int64()})),
+            ("cum_min", Null()),
+            ("cum_max", Utf8()),
+            ("cum_max", Struct({"x": Int64()})),
+        ],
+        ids=lambda p: str(p),
+    )
+    def test_invalid_receiver_flags_ply016_and_degrades(self, method, receiver):
+        analyzer = self._run(receiver, method)
+        assert len(analyzer.errors) == 1, analyzer.errors
+        err = analyzer.errors[0]
+        assert "PLY016" in err and method in err, err
+        assert "InvalidOperationError" in err, err
+        assert analyzer.var_types["out"].columns["c"].dtype == Unknown()
+
+    @pytest.mark.parametrize(
+        ("method", "receiver", "expected"),
+        [
+            ("cum_sum", Int8(), Int64()),
+            ("cum_sum", Int16(), Int64()),
+            ("cum_sum", UInt8(), Int64()),
+            ("cum_sum", UInt16(), Int64()),
+            ("cum_sum", Boolean(), UInt32()),
+            ("cum_sum", Decimal(10, 2), Decimal(38, 2)),
+            ("cum_prod", Int8(), Int64()),
+            ("cum_prod", Int16(), Int64()),
+            ("cum_prod", Int32(), Int64()),
+            ("cum_prod", UInt8(), Int64()),
+            ("cum_prod", UInt16(), Int64()),
+            ("cum_prod", UInt32(), Int64()),
+            ("cum_prod", Boolean(), Int64()),
+        ],
+        ids=lambda p: str(p),
+    )
+    def test_probed_widening_cells(self, method, receiver, expected):
+        analyzer = self._run(receiver, method)
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["c"].dtype == expected
+
+    @pytest.mark.parametrize(
+        ("method", "receiver"),
+        [
+            ("cum_sum", Int32()),
+            ("cum_sum", Int64()),
+            ("cum_sum", Int128()),
+            ("cum_sum", UInt32()),
+            ("cum_sum", UInt64()),
+            ("cum_sum", UInt128()),
+            ("cum_sum", Float16()),
+            ("cum_sum", Float32()),
+            ("cum_sum", Float64()),
+            ("cum_sum", Duration()),
+            ("cum_prod", Int64()),
+            ("cum_prod", UInt64()),
+            ("cum_prod", Int128()),
+            ("cum_prod", UInt128()),
+            ("cum_prod", Float32()),
+            ("cum_prod", Float64()),
+            ("cum_min", Int8()),
+            ("cum_min", UInt8()),
+            ("cum_min", Float64()),
+            ("cum_min", Boolean()),
+            ("cum_min", Date()),
+            ("cum_min", Datetime(tz="UTC")),
+            ("cum_min", Time()),
+            ("cum_min", Duration()),
+            ("cum_min", Decimal(10, 2)),
+            ("cum_min", Categorical()),
+            ("cum_min", Enum()),
+            ("cum_max", Int64()),
+            ("cum_max", Boolean()),
+            ("cum_max", Date()),
+            ("cum_max", Categorical()),
+        ],
+        ids=lambda p: str(p),
+    )
+    def test_probed_preserving_cells(self, method, receiver):
+        analyzer = self._run(receiver, method)
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["c"].dtype == receiver
+
+    def test_nullable_receiver_widening_preserves_wrapper(self):
+        analyzer = self._run(Nullable(Int8()), "cum_sum")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["c"].dtype == Nullable(Int64())
+
+    def test_nullable_receiver_preserving_keeps_wrapper(self):
+        analyzer = self._run(Nullable(Date()), "cum_min")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["c"].dtype == Nullable(Date())
+
+    def test_nullable_invalid_receiver_still_flags(self):
+        # Nullability does not rescue an invalid base dtype.
+        analyzer = self._run(Nullable(Utf8()), "cum_sum")
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY016" in analyzer.errors[0]
+        assert "Utf8" in analyzer.errors[0]
+        assert analyzer.var_types["out"].columns["c"].dtype == Unknown()
+
+    def test_unknown_receiver_stays_silent(self):
+        analyzer = self._run(Unknown(), "cum_sum")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["c"].dtype == Unknown()
+
+    def test_cum_count_never_flags_even_on_string(self):
+        # Probed: cum_count is UInt32 for every receiver dtype.
+        analyzer = self._run(Utf8(), "cum_count")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["c"].dtype == UInt32()
+
+    def test_regression_agg_sum_on_string_still_errors(self):
+        # ``pl.col(str).sum()`` goes through the aggregation chain path —
+        # must keep erroring (independent of the new cum_* rule).
+        analyzer = _run_body(FrameType({"s": Utf8()}), 'out = df.select(c=pl.col("s").sum())')
+        assert any("sum" in e for e in analyzer.errors), analyzer.errors
+
+    def test_regression_rolling_mean_on_string_stays_silent(self):
+        # Probed: polars ACCEPTS rolling_mean on String (all-null Float64
+        # output) — the rolling family must not be flagged (issue #49 note).
+        analyzer = _run_body(
+            FrameType({"s": Utf8()}),
+            'out = df.select(c=pl.col("s").rolling_mean(window_size=2))',
+        )
+        assert analyzer.errors == [], analyzer.errors
+
+
 class TestM5ShiftDiff:
     @pytest.mark.parametrize("method", ["shift", "diff", "pct_change"])
     def test_shift_like_makes_nullable(self, method: str):
@@ -3381,6 +3558,75 @@ class TestM9StructAccess:
         results = analyze_source(source)
         assert results[0].has_errors is True
         assert any("missing" in e for e in results[0].errors)
+
+
+class TestStructRenameFields:
+    """Issue #48: ``struct.rename_fields([...])`` retypes the Struct.
+
+    Probed (polars 1.41.2): the new names are applied positionally to the
+    existing fields, and length mismatches do NOT raise — fewer names
+    truncate the struct to the renamed prefix, surplus names are ignored
+    (plain ``zip`` semantics). Non-literal names degrade to Unknown:
+    keeping the original field names was the false positive being fixed.
+    """
+
+    def _frame(self) -> FrameType:
+        return FrameType({"s": Struct({"x": Int64(), "y": Utf8()})})
+
+    def test_rename_fields_applies_names_in_order(self):
+        analyzer = _run_body(
+            self._frame(), 'out = df.select(pl.col("s").struct.rename_fields(["p", "q"]))'
+        )
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["s"].dtype == Struct({"p": Int64(), "q": Utf8()})
+
+    def test_rename_fields_tuple_form(self):
+        analyzer = _run_body(
+            self._frame(), 'out = df.select(pl.col("s").struct.rename_fields(("p", "q")))'
+        )
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["s"].dtype == Struct({"p": Int64(), "q": Utf8()})
+
+    def test_rename_fields_fewer_names_truncates(self):
+        # Probed: polars drops the un-named trailing fields without error.
+        analyzer = _run_body(
+            self._frame(), 'out = df.select(pl.col("s").struct.rename_fields(["p"]))'
+        )
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["s"].dtype == Struct({"p": Int64()})
+
+    def test_rename_fields_more_names_ignores_extras(self):
+        # Probed: surplus names are silently ignored.
+        analyzer = _run_body(
+            self._frame(), 'out = df.select(pl.col("s").struct.rename_fields(["p", "q", "r"]))'
+        )
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["s"].dtype == Struct({"p": Int64(), "q": Utf8()})
+
+    def test_rename_fields_non_literal_names_degrade_to_unknown(self):
+        # A variable name list is unresolvable — the column must degrade to
+        # Unknown, NOT keep the stale field names (issue #48).
+        analyzer = _run_body(
+            self._frame(), 'out = df.select(pl.col("s").struct.rename_fields(names))'
+        )
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["s"].dtype == Unknown()
+
+    def test_rename_fields_unknown_receiver_stays_silent(self):
+        analyzer = _run_body(
+            FrameType({"s": Unknown()}),
+            'out = df.select(pl.col("s").struct.rename_fields(["p", "q"]))',
+        )
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["s"].dtype == Unknown()
+
+    def test_rename_fields_nullable_receiver_preserves_wrapper(self):
+        analyzer = _run_body(
+            FrameType({"s": Nullable(Struct({"x": Int64()}))}),
+            'out = df.select(pl.col("s").struct.rename_fields(["p"]))',
+        )
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["s"].dtype == Nullable(Struct({"p": Int64()}))
 
 
 class TestM9Unnest:
