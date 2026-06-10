@@ -98,6 +98,7 @@ from polypolarism.types import (
     Nullable,
     RowVar,
     Struct,
+    Time,
     UInt8,
     UInt16,
     UInt32,
@@ -167,6 +168,94 @@ def _resolve_pl_dtype(node: ast.expr) -> DataType | None:
                 return Datetime(tz=tz)
             return base
     return None
+
+
+# Python builtin type names accepted as dtypes in ``schema=`` dicts
+# (``pl.DataFrame({...}, schema={"a": int})``).
+_PY_BUILTIN_DTYPE_MAP: dict[str, DataType] = {
+    "int": Int64(),
+    "float": Float64(),
+    "str": Utf8(),
+    "bool": Boolean(),
+}
+
+
+# Eager range constructors usable as ``pl.DataFrame({...})`` dict values:
+# ``pl.<name>(..., eager=True)`` produces a Series of a fixed dtype.
+_RANGE_CONSTRUCTOR_DTYPES: dict[str, DataType] = {
+    "date_range": Date(),
+    "datetime_range": Datetime(),
+    "time_range": Time(),
+    "int_range": Int64(),
+}
+
+
+def _resolve_schema_dtype(node: ast.expr) -> DataType:
+    """Resolve one dtype value of a ``schema=`` / ``schema_overrides=`` dict.
+
+    Accepts the polars dtype literals handled by ``_resolve_pl_dtype`` plus
+    the python builtins ``int``/``float``/``str``/``bool``. Anything else
+    (variables, exotic dtypes) degrades to ``Unknown`` — the column still
+    registers under its declared name.
+    """
+    resolved = _resolve_pl_dtype(node)
+    if resolved is not None:
+        return resolved
+    if isinstance(node, ast.Name):
+        builtin = _PY_BUILTIN_DTYPE_MAP.get(node.id)
+        if builtin is not None:
+            return builtin
+    return Unknown()
+
+
+def _frame_literal_value_dtype(node: ast.expr) -> DataType:
+    """Per-column dtype for one value of a ``pl.DataFrame({...})`` data dict.
+
+    - list/tuple of constants → element dtypes folded with ``unify_types``
+      (``[1, None]`` → ``Nullable[Int64]``); empty or any non-constant /
+      non-unifiable element → ``Unknown``.
+    - recognised eager range constructors (``pl.date_range(...)`` etc.)
+      → their fixed Series dtype.
+    - a bare scalar constant (broadcast) → ``infer_lit``.
+    - anything else → ``Unknown``.
+    """
+    if isinstance(node, (ast.List, ast.Tuple)):
+        if not node.elts:
+            return Unknown()
+        unified: DataType | None = None
+        for elt in node.elts:
+            if not isinstance(elt, ast.Constant):
+                return Unknown()
+            value = elt.value
+            if value is not None and not isinstance(value, (bool, int, float, str)):
+                return Unknown()
+            elem = infer_lit(value)
+            if unified is None:
+                unified = elem
+                continue
+            try:
+                unified = unify_types(unified, elem)
+            except TypeUnificationError:
+                return Unknown()
+        assert unified is not None
+        return unified
+
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "pl"
+    ):
+        range_dtype = _RANGE_CONSTRUCTOR_DTYPES.get(node.func.attr)
+        if range_dtype is not None:
+            return range_dtype
+
+    if isinstance(node, ast.Constant) and (
+        node.value is None or isinstance(node.value, (bool, int, float, str))
+    ):
+        return infer_lit(node.value)
+
+    return Unknown()
 
 
 def _base_is_unknown(dtype: DataType) -> bool:
@@ -762,6 +851,21 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                             function=agg_func_value,
                             alias=alias,
                         )
+
+        # Implicit list aggregation (issue #27): a bare column reference in
+        # ``agg`` with no reducing function collects each group's values
+        # into a list — ``agg(vs=pl.col("v"))`` is ``List(Int64)`` at
+        # runtime, not the element dtype. Single-arg ``pl.col("x")`` only;
+        # anything with a method chain was consumed by the branches above
+        # or falls through to the chain fallback. A bare string constant is
+        # the same thing — polars parses ``agg("v")`` as ``pl.col("v")``.
+        if isinstance(agg_node, ast.Call) and len(agg_node.args) == 1 and not agg_node.keywords:
+            bare_col = self._extract_col_name(agg_node)
+            if bare_col is not None:
+                return AggExpr(column=bare_col, function=AggFunction.LIST, alias=alias)
+        bare_str = _str_constant(agg_node)
+        if bare_str is not None:
+            return AggExpr(column=bare_str, function=AggFunction.LIST, alias=alias)
 
         # Chain fallback: anything more elaborate (post-aggregation method
         # chains like ``pl.col("ts").max().dt.year()``, arithmetic on the
@@ -1852,6 +1956,16 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             if isinstance(receiver, ast.Name) and receiver.id == "pl" and method_name == "concat":
                 return self._infer_concat_call(node)
 
+            # ``pl.DataFrame({...})`` / ``pl.LazyFrame({...})`` literal
+            # constructors — the schema is read off the dict literal /
+            # explicit ``schema=`` (issue #25).
+            if (
+                isinstance(receiver, ast.Name)
+                and receiver.id == "pl"
+                and method_name in ("DataFrame", "LazyFrame")
+            ):
+                return self._infer_frame_literal(node, lazy=method_name == "LazyFrame")
+
             # Pandera narrowing: Schema.validate(df) -> Schema's FrameType
             if method_name == "validate":
                 schema_ft = self._infer_validate_call(node)
@@ -2798,6 +2912,72 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         except ReshapeError as e:
             self.errors.append(tag(PLY020, str(e)))
             return None
+
+    def _infer_frame_literal(self, node: ast.Call, lazy: bool) -> FrameType | None:
+        """Infer the schema of ``pl.DataFrame({...})`` / ``pl.LazyFrame({...})``
+        literal constructors (issue #25).
+
+        Column names come from the data dict-literal keys; per-column dtypes
+        from ``_frame_literal_value_dtype``. An explicit ``schema=`` wins
+        entirely (it defines names + dtypes — even renaming data columns),
+        whether the data argument is present, opaque, or missing; the
+        list-of-names form gives those names ``Unknown`` dtypes.
+        ``schema_overrides=`` patches individual data-inferred columns.
+
+        Returns ``None`` when neither a readable data dict nor a readable
+        ``schema=`` exists (``pl.DataFrame(some_var)`` is uninferable).
+        The result is a closed, non-strict frame; ``is_lazy`` reflects the
+        constructor used.
+        """
+        schema_kw: ast.expr | None = None
+        overrides_kw: ast.expr | None = None
+        for kw in node.keywords:
+            if kw.arg == "schema":
+                schema_kw = kw.value
+            elif kw.arg == "schema_overrides":
+                overrides_kw = kw.value
+
+        columns: dict[str, DataType] = {}
+
+        if schema_kw is not None:
+            if isinstance(schema_kw, ast.Dict):
+                for key_node, val_node in zip(schema_kw.keys, schema_kw.values, strict=False):
+                    if key_node is None:
+                        return None
+                    name = _str_constant(key_node)
+                    if name is None:
+                        return None
+                    columns[name] = _resolve_schema_dtype(val_node)
+                return FrameType(columns=columns, is_lazy=lazy)
+            names = _str_list_or_tuple(schema_kw)
+            if names is not None:
+                return FrameType(columns={n: Unknown() for n in names}, is_lazy=lazy)
+            # Opaque ``schema=`` (a variable) — even the column names are
+            # unknowable, so the whole literal is uninferable.
+            return None
+
+        if not node.args or not isinstance(node.args[0], ast.Dict):
+            return None
+        data = node.args[0]
+        for key_node, val_node in zip(data.keys, data.values, strict=False):
+            if key_node is None:
+                # ``{**spread}`` — names unknowable.
+                return None
+            name = _str_constant(key_node)
+            if name is None:
+                return None
+            columns[name] = _frame_literal_value_dtype(val_node)
+
+        if isinstance(overrides_kw, ast.Dict):
+            for key_node, val_node in zip(overrides_kw.keys, overrides_kw.values, strict=False):
+                if key_node is None:
+                    continue
+                name = _str_constant(key_node)
+                if name is None or name not in columns:
+                    continue
+                columns[name] = _resolve_schema_dtype(val_node)
+
+        return FrameType(columns=columns, is_lazy=lazy)
 
     def _infer_vstack_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
         if not node.args:

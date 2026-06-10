@@ -5717,3 +5717,247 @@ class TestSelectConstantResolution:
         assert "txn_id" in ft.columns
         assert "gl_amount" in ft.columns
         assert "sub_amount" in ft.columns
+
+
+class TestImplicitListAggregation:
+    """Issue #27: a bare column reference in ``agg`` (no reducer) collects
+    each group's values into a list — ``List(dtype)``, not the element dtype.
+
+    Ground truth: ``pl.DataFrame({"k": ["a", "a"], "v": [1, 2]})
+    .group_by("k").agg(vs=pl.col("v")).schema`` →
+    ``{'k': String, 'vs': List(Int64)}``.
+    """
+
+    HEADER = textwrap.dedent(
+        PANDERA_HEADER
+        + """
+            class In(pa.DataFrameModel):
+                k: str
+                v: int
+        """
+    )
+
+    def test_bare_col_kwarg_form(self):
+        """``agg(vs=pl.col("v"))`` infers vs: List(Int64)."""
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]):
+                return df.group_by("k").agg(vs=pl.col("v"))
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        assert results[0].inferred_return_type == FrameType({"k": Utf8(), "vs": ListT(Int64())})
+
+    def test_bare_col_positional_default_name(self):
+        """``agg(pl.col("v"))`` keeps the source column name."""
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]):
+                return df.group_by("k").agg(pl.col("v"))
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        assert results[0].inferred_return_type == FrameType({"k": Utf8(), "v": ListT(Int64())})
+
+    def test_bare_col_alias_form(self):
+        """``agg(pl.col("v").alias("vs"))`` renames the list column."""
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]):
+                return df.group_by("k").agg(pl.col("v").alias("vs"))
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        assert results[0].inferred_return_type == FrameType({"k": Utf8(), "vs": ListT(Int64())})
+
+    def test_bare_string_positional(self):
+        """``agg("v")`` — polars parses the string as a column reference."""
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]):
+                return df.group_by("k").agg("v")
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        assert results[0].inferred_return_type == FrameType({"k": Utf8(), "v": ListT(Int64())})
+
+    def test_bare_string_kwarg(self):
+        """``agg(vs="v")`` — string column reference renamed to the kwarg."""
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]):
+                return df.group_by("k").agg(vs="v")
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        assert results[0].inferred_return_type == FrameType({"k": Utf8(), "vs": ListT(Int64())})
+
+    def test_nullable_element_dtype_is_preserved(self):
+        """Implicit list over a nullable column keeps element nullability."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class NIn(pa.DataFrameModel):
+                k: str
+                v: int = pa.Field(nullable=True)
+
+            def f(df: DataFrame[NIn]):
+                return df.group_by("k").agg(vs=pl.col("v"))
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        assert results[0].inferred_return_type == FrameType(
+            {"k": Utf8(), "vs": ListT(Nullable(Int64()))}
+        )
+
+    def test_missing_column_raises_ply011(self):
+        """A bare reference to a missing column still surfaces PLY011."""
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]):
+                return df.group_by("k").agg(vs=pl.col("missing"))
+            """
+        )
+        results = analyze_source(source)
+        assert any("PLY011" in e and "missing" in e for e in results[0].errors)
+
+
+class TestFrameLiteralInference:
+    """Issue #25: infer the schema of ``pl.DataFrame({...})`` /
+    ``pl.LazyFrame({...})`` literal constructors from the dict literal
+    (names from keys, dtypes from values / explicit ``schema=``)."""
+
+    HEADER = textwrap.dedent(
+        PANDERA_HEADER
+        + """
+            class In(pa.DataFrameModel):
+                x: int
+        """
+    )
+
+    def _infer(self, body: str):
+        source = self.HEADER + textwrap.dedent(
+            f"""
+            def f(df: DataFrame[In]):
+                return {body}
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        return results[0].inferred_return_type
+
+    def test_int_list_literal(self):
+        ft = self._infer('pl.DataFrame({"a": [1, 2, 3]})')
+        assert ft == FrameType({"a": Int64()})
+        assert ft.is_lazy is False
+
+    def test_multiple_columns(self):
+        ft = self._infer('pl.DataFrame({"a": [1], "b": ["x"], "c": [1.5], "d": [True]})')
+        assert ft == FrameType({"a": Int64(), "b": Utf8(), "c": Float64(), "d": Boolean()})
+
+    def test_list_with_none_is_nullable(self):
+        ft = self._infer('pl.DataFrame({"a": [1, None]})')
+        assert ft == FrameType({"a": Nullable(Int64())})
+
+    def test_all_none_list_is_null(self):
+        ft = self._infer('pl.DataFrame({"a": [None, None]})')
+        assert ft == FrameType({"a": Null()})
+
+    def test_empty_list_is_unknown(self):
+        ft = self._infer('pl.DataFrame({"a": []})')
+        assert ft == FrameType({"a": Unknown()})
+
+    def test_mixed_numeric_list_unifies(self):
+        ft = self._infer('pl.DataFrame({"a": [1, 2.5]})')
+        assert ft == FrameType({"a": Float64()})
+
+    def test_non_unifiable_list_is_unknown(self):
+        ft = self._infer('pl.DataFrame({"a": [1, "x"]})')
+        assert ft == FrameType({"a": Unknown()})
+
+    def test_non_constant_element_is_unknown(self):
+        ft = self._infer('pl.DataFrame({"a": [some_value, 2]})')
+        assert ft == FrameType({"a": Unknown()})
+
+    def test_scalar_broadcast(self):
+        ft = self._infer('pl.DataFrame({"a": [1, 2], "b": "x"})')
+        assert ft == FrameType({"a": Int64(), "b": Utf8()})
+
+    def test_range_constructors(self):
+        ft = self._infer(
+            "pl.DataFrame({"
+            '"d": pl.date_range(pl.date(2024, 1, 1), pl.date(2024, 1, 3), eager=True),'
+            '"ts": pl.datetime_range(pl.datetime(2024, 1, 1), pl.datetime(2024, 1, 2), eager=True),'
+            '"t": pl.time_range(eager=True),'
+            '"i": pl.int_range(5, eager=True),'
+            "})"
+        )
+        assert ft == FrameType({"d": Date(), "ts": Datetime(), "t": Time(), "i": Int64()})
+
+    def test_schema_dict_wins_over_data(self):
+        ft = self._infer('pl.DataFrame({"a": [1]}, schema={"a": pl.Int32})')
+        assert ft == FrameType({"a": Int32()})
+
+    def test_schema_dict_defines_names(self):
+        ft = self._infer('pl.DataFrame({"a": [1]}, schema={"x": pl.Int32})')
+        assert ft == FrameType({"x": Int32()})
+
+    def test_schema_python_builtin_dtypes(self):
+        ft = self._infer('pl.DataFrame(schema={"a": int, "b": float, "c": str, "d": bool})')
+        assert ft == FrameType({"a": Int64(), "b": Float64(), "c": Utf8(), "d": Boolean()})
+
+    def test_schema_wins_over_opaque_data(self):
+        ft = self._infer('pl.DataFrame(some_rows, schema={"a": pl.Int32})')
+        assert ft == FrameType({"a": Int32()})
+
+    def test_schema_list_of_names(self):
+        ft = self._infer('pl.DataFrame(some_rows, schema=["a", "b"])')
+        assert ft == FrameType({"a": Unknown(), "b": Unknown()})
+
+    def test_schema_unresolvable_dtype_is_unknown(self):
+        ft = self._infer('pl.DataFrame(schema={"a": SOME_DTYPE})')
+        assert ft == FrameType({"a": Unknown()})
+
+    def test_schema_overrides_patch_data_dtypes(self):
+        ft = self._infer('pl.DataFrame({"a": [1], "b": [2]}, schema_overrides={"a": pl.Int8})')
+        assert ft == FrameType({"a": Int8(), "b": Int64()})
+
+    def test_opaque_data_without_schema_is_uninferable(self):
+        ft = self._infer("pl.DataFrame(some_rows)")
+        assert ft is None
+
+    def test_lazyframe_literal_is_lazy(self):
+        ft = self._infer('pl.LazyFrame({"a": [1]})')
+        assert ft == FrameType({"a": Int64()})
+        assert ft.is_lazy is True
+
+    def test_literal_frame_is_closed_and_non_strict(self):
+        ft = self._infer('pl.DataFrame({"a": [1]})')
+        assert ft.rest is None
+        assert ft.strict is False
+
+    def test_method_chain_on_literal(self):
+        ft = self._infer('pl.DataFrame({"a": [1, 2]}).with_columns(b=pl.col("a") * 2)')
+        assert ft == FrameType({"a": Int64(), "b": Int64()})
+
+    def test_lazy_literal_collect_is_eager(self):
+        ft = self._infer('pl.LazyFrame({"a": [1]}).collect()')
+        assert ft == FrameType({"a": Int64()})
+        assert ft.is_lazy is False
+
+    def test_select_missing_column_on_literal_errors(self):
+        """The literal frame is closed — a missing column is PLY001."""
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]):
+                return pl.DataFrame({"a": [1]}).select(pl.col("nope"))
+            """
+        )
+        results = analyze_source(source)
+        assert any("PLY001" in e and "nope" in e for e in results[0].errors)

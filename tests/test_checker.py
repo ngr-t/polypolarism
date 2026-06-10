@@ -1229,3 +1229,159 @@ class TestIssue22SelectConstantEndToEnd:
         by_name = {r.function_name: r for r in results}
         for name in ("ok_select_var", "ok_select_seq_var"):
             assert by_name[name].passed is True, (name, by_name[name].errors)
+
+
+class TestImplicitListAggEndToEnd:
+    """Issue #27 repro: ``agg(vs=pl.col("v"))`` must type as List(Int64)."""
+
+    SOURCE = """
+        import polars as pl
+        import pandera.polars as pa
+        from pandera.typing.polars import DataFrame
+
+        class In(pa.DataFrameModel):
+            k: str
+            v: int
+
+        class Listed(pa.DataFrameModel):
+            k: str
+            vs: pl.List(pl.Int64) = pa.Field()
+
+            class Config:
+                strict = True
+
+        @pa.check_types
+        def agg_to_list(df: DataFrame[In]) -> DataFrame[Listed]:
+            return df.group_by("k").agg(vs=pl.col("v"))
+    """
+
+    def test_agg_to_list_passes_strict_schema(self):
+        results = check_source(textwrap.dedent(self.SOURCE))
+
+        assert len(results) == 1
+        assert results[0].passed is True, results[0].errors
+        assert results[0].errors == []
+
+    def test_element_dtype_declared_fails(self):
+        """Declaring the old (wrong) element dtype is a TypeDifference."""
+        source = textwrap.dedent(self.SOURCE).replace(
+            "vs: pl.List(pl.Int64) = pa.Field()", "vs: int"
+        )
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is False
+        assert any(isinstance(e, TypeDifference) and e.column == "vs" for e in results[0].errors)
+
+
+class TestFrameLiteralEndToEnd:
+    """Issue #25 repros: functions returning frames built from scratch."""
+
+    HEADER = textwrap.dedent(
+        """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+
+            class Empty(pa.DataFrameModel):
+                pass
+        """
+    )
+
+    def test_pure_literal_passes_strict_schema(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            class Lit(pa.DataFrameModel):
+                a: int
+
+                class Config:
+                    strict = True
+
+            @pa.check_types
+            def pure_literal(df: DataFrame[Empty]) -> DataFrame[Lit]:
+                return pl.DataFrame({"a": [1, 2, 3]})
+        """
+        )
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is True, results[0].errors
+        assert results[0].errors == []
+
+    def test_build_calendar_passes_strict_schema(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            class Cal(pa.DataFrameModel):
+                d: pl.Date
+                year: pl.Int32
+
+                class Config:
+                    strict = True
+
+            @pa.check_types
+            def build_calendar(df: DataFrame[Empty]) -> DataFrame[Cal]:
+                cal = pl.DataFrame(
+                    {"d": pl.date_range(pl.date(2024, 1, 1), pl.date(2024, 1, 3), eager=True)}
+                )
+                return cal.with_columns(year=pl.col("d").dt.year())
+        """
+        )
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is True, results[0].errors
+        assert results[0].errors == []
+
+    def test_wrong_dtype_in_literal_fails(self):
+        """A literal whose dtype mismatches the declared schema is caught."""
+        source = self.HEADER + textwrap.dedent(
+            """
+            class Lit(pa.DataFrameModel):
+                a: str
+
+            @pa.check_types
+            def pure_literal(df: DataFrame[Empty]) -> DataFrame[Lit]:
+                return pl.DataFrame({"a": [1, 2, 3]})
+        """
+        )
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is False
+        assert any(isinstance(e, TypeDifference) and e.column == "a" for e in results[0].errors)
+
+    def test_lazy_literal_where_dataframe_declared_is_ply032(self):
+        """A ``pl.LazyFrame({...})`` literal returned from a function declared
+        ``-> DataFrame[...]`` trips the eager/lazy mismatch check."""
+        source = self.HEADER + textwrap.dedent(
+            """
+            class Lit(pa.DataFrameModel):
+                a: int
+
+            @pa.check_types
+            def lazy_literal(df: DataFrame[Empty]) -> DataFrame[Lit]:
+                return pl.LazyFrame({"a": [1, 2, 3]})
+        """
+        )
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is False
+        assert any("PLY032" in str(e) for e in results[0].errors)
+
+    def test_lazy_literal_collected_passes(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            class Lit(pa.DataFrameModel):
+                a: int
+
+            @pa.check_types
+            def lazy_literal(df: DataFrame[Empty]) -> DataFrame[Lit]:
+                return pl.LazyFrame({"a": [1, 2, 3]}).collect()
+        """
+        )
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is True, results[0].errors
+        assert results[0].errors == []
