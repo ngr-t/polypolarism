@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import copy
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -43,6 +44,7 @@ from polypolarism.diagnostics import (
     PLY012,
     PLY013,
     PLY014,
+    PLY015,
     PLY020,
     PLY021,
     PLY022,
@@ -760,6 +762,25 @@ def _unwrap_cast(node: ast.expr) -> ast.expr:
     return node
 
 
+class _ReplaceNode(ast.NodeTransformer):
+    """Swap one specific node — matched by identity — for a replacement.
+
+    Used by the plural-``pl.col`` expansion (issue #42): each clone of the
+    surrounding expression gets its plural node replaced by a single-name
+    ``pl.col(name)``. Identity matching makes the target unambiguous even
+    when the tree contains structurally equal calls.
+    """
+
+    def __init__(self, target: ast.AST, replacement: ast.AST) -> None:
+        self.target = target
+        self.replacement = replacement
+
+    def visit(self, node: ast.AST) -> ast.AST:
+        if node is self.target:
+            return self.replacement
+        return self.generic_visit(node)
+
+
 def _nonboolean_predicate_error(
     dtype: DataType | None, op: str = "filter", noun: str = "predicate"
 ) -> str | None:
@@ -1259,6 +1280,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         current_frame: FrameType,
         warnings: list[str] | None = None,
         registry: FunctionRegistry | None = None,
+        element_dtype: DataType | None = None,
     ):
         self.current_frame = current_frame
         self.errors: list[str] = []
@@ -1266,6 +1288,11 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         # bubble up to FunctionAnalysis). New list when used standalone.
         self.warnings: list[str] = warnings if warnings is not None else []
         self.registry = registry or FunctionRegistry()
+        # Dtype that ``pl.element()`` resolves to. Set only by the
+        # ``list.eval(...)`` body analysis (issue #44), where polars binds
+        # the element to the list's inner dtype; ``None`` everywhere else
+        # keeps ``pl.element()`` unresolved (silent).
+        self.element_dtype = element_dtype
 
     def analyze_agg_expr(self, node: ast.expr) -> AggExpr | None:
         """Analyze an aggregation expression like pl.col("x").sum().alias("total")."""
@@ -1666,6 +1693,14 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         if name == "len" and not node.args:
             return "len", UInt32()
 
+        # ``pl.element()`` — the per-element placeholder inside
+        # ``list.eval(...)`` bodies (issue #44). Resolves to the bound
+        # element dtype when this analyzer was spun up for an eval body;
+        # outside eval it stays unresolved (polars errors at runtime, but
+        # flagging that is out of scope — silence avoids false positives).
+        if name == "element" and not node.args and self.element_dtype is not None:
+            return None, self.element_dtype
+
         if name == "concat_str" or name == "format":
             for arg in _flatten_expr_args(node.args):
                 self._validate_subexpr(arg)
@@ -1836,6 +1871,24 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         elif namespace in ("list", "arr"):
             if method == "len":
                 result = UInt32()
+            elif method == "eval" and isinstance(receiver_inner, ListT):
+                # ``list.eval(body)`` runs ``body`` element-wise with
+                # ``pl.element()`` bound to the list's inner dtype
+                # (issue #44). A child analyzer type-checks the body —
+                # its errors (e.g. PLY009 from Int+String arithmetic)
+                # bubble up — and the result is List(body dtype);
+                # an unresolvable body degrades to List(Unknown).
+                body_dtype: DataType | None = None
+                if call_node is not None and call_node.args:
+                    child = ExpressionAnalyzer(
+                        self.current_frame,
+                        warnings=self.warnings,
+                        registry=self.registry,
+                        element_dtype=receiver_inner.inner,
+                    )
+                    _, body_dtype = child.analyze_select_expr(call_node.args[0])
+                    self.errors.extend(child.errors)
+                result = ListT(body_dtype if body_dtype is not None else Unknown())
             elif method in self._LIST_PRESERVING and receiver_inner is not None:
                 result = receiver_inner
             elif method in self._LIST_ELEMENT_RETURN and isinstance(receiver_inner, ListT):
@@ -3348,9 +3401,13 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         )
         agg_exprs: list[AggExpr] = []
         for arg in node.args:
-            agg_expr = expr_analyzer.analyze_agg_expr(arg)
-            if agg_expr:
-                agg_exprs.append(agg_expr)
+            # A plural ``pl.col`` inside an aggregation expression produces
+            # one output per column (issue #42): ``agg(pl.col("a", "b").sum())``
+            # yields columns ``a`` and ``b``. Analyze one clone per name.
+            for expr in self._expand_plural_expr(arg) or [arg]:
+                agg_expr = expr_analyzer.analyze_agg_expr(expr)
+                if agg_expr:
+                    agg_exprs.append(agg_expr)
 
         # Kwarg-form ``agg(name=expr)`` — polars uses the kwarg name as the
         # output column. It overrides any ``.alias(...)`` buried in the
@@ -3409,33 +3466,103 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             names.append(s)
         return names
 
+    def _expand_plural_expr(self, arg: ast.expr) -> list[ast.expr] | None:
+        """Expand an expression containing exactly one nested plural ``pl.col``.
+
+        polars runs ``select(pl.col("a", "b") * 10)`` once per column
+        (issue #42) — model that by returning one deep copy of ``arg`` per
+        name, with the plural node swapped for single-name ``pl.col(name)``.
+        Each clone then flows through the unchanged single-expression path,
+        so output names follow each column (polars keeps per-column names
+        through elementwise ops; probed on 1.41.2).
+
+        Returns ``None`` when the tree contains zero plural nodes (regular
+        path) or two-plus (polars' pairwise semantics there are out of
+        scope — stay silent). The bare-plural fast path in the callers
+        consumes ``pl.col("a", "b")`` arguments before this runs, so the
+        plural node is usually nested; a bare plural reaching here (the
+        ``agg`` loop has no fast path) expands to bare ``pl.col(name)``.
+        """
+        walked = list(ast.walk(arg))
+        found: list[tuple[int, list[str]]] = []
+        for idx, sub in enumerate(walked):
+            if isinstance(sub, ast.expr):
+                names = self._resolve_plural_col(sub)
+                if names is not None:
+                    found.append((idx, names))
+        if len(found) != 1:
+            return None
+        target_idx, names = found[0]
+        clones: list[ast.expr] = []
+        for name in names:
+            clone = copy.deepcopy(arg)
+            # ``ast.walk`` order is structural, so the clone's walk list
+            # lines up index-for-index with the original's.
+            clone_target = list(ast.walk(clone))[target_idx]
+            replacement = ast.Call(
+                func=ast.Attribute(
+                    value=ast.Name(id="pl", ctx=ast.Load()), attr="col", ctx=ast.Load()
+                ),
+                args=[ast.Constant(value=name)],
+                keywords=[],
+            )
+            ast.copy_location(replacement, clone_target)
+            ast.fix_missing_locations(replacement)
+            expanded = _ReplaceNode(clone_target, replacement).visit(clone)
+            assert isinstance(expanded, ast.expr)
+            clones.append(expanded)
+        return clones
+
     def _register_string_selection(
         self,
         name: str,
         input_frame: FrameType,
         result_columns: dict[str, DataType],
         output_name: str | None = None,
-    ) -> None:
+    ) -> str | None:
         """Resolve a bare string column name in ``select`` — equivalent to
         ``pl.col(name)``. Missing names error on closed frames (PLY001);
         on an open frame the column may exist among the unknown extras,
         so it is selected as ``Unknown``.
 
         ``output_name`` overrides the result column name for the kwarg
-        form: ``select(x="a")`` selects column ``a`` under the name ``x``."""
+        form: ``select(x="a")`` selects column ``a`` under the name ``x``.
+
+        Returns the output column name actually registered, or ``None``
+        when the name was missing on a closed frame (PLY001 emitted)."""
         spec = input_frame.columns.get(name)
         if spec is not None:
             result_columns[output_name or name] = spec.dtype
-        elif input_frame.rest is not None:
+            return output_name or name
+        if input_frame.rest is not None:
             result_columns[output_name or name] = Unknown()
-        else:
+            return output_name or name
+        self.errors.append(
+            tag(
+                PLY001,
+                f"Column '{name}' not found. Available columns: {list(input_frame.columns.keys())}",
+            )
+        )
+        return None
+
+    def _track_output_name(self, name: str, seen: set[str], call_name: str) -> None:
+        """Record one output column produced by a ``select`` / ``with_columns``
+        call; a repeated name WITHIN the same call is a guaranteed runtime
+        duplicate-name error (issue #36). ``with_columns`` overwriting a
+        pre-existing input column is legal, so callers seed ``seen`` with
+        only the names this call produced — never the input columns.
+        """
+        if name in seen:
             self.errors.append(
                 tag(
-                    PLY001,
-                    f"Column '{name}' not found. Available columns: "
-                    f"{list(input_frame.columns.keys())}",
+                    PLY015,
+                    f"duplicate output column '{name}' in {call_name} — "
+                    f"polars rejects duplicate output names at runtime; "
+                    f"rename one with `.alias(...)`",
                 )
             )
+        else:
+            seen.add(name)
 
     def _infer_select_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
         """Infer type of .select() call."""
@@ -3443,6 +3570,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             input_frame, warnings=self.warnings, registry=self.registry
         )
         result_columns: dict[str, DataType] = {}
+        # Output names produced by THIS call — a repeat is a runtime
+        # DuplicateError (issue #36). Registration keeps the last dtype.
+        seen_outputs: set[str] = set()
 
         for arg in node.args:
             sel = _resolve_selector(arg, input_frame)
@@ -3451,6 +3581,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     spec = input_frame.columns.get(c)
                     if spec is not None:
                         result_columns[c] = spec.dtype
+                        self._track_output_name(c, seen_outputs, "select")
                 continue
             plural = self._resolve_plural_col(arg)
             if plural is not None:
@@ -3461,6 +3592,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                         # unknown extras — select it as Unknown.
                         if input_frame.rest is not None:
                             result_columns[c] = Unknown()
+                            self._track_output_name(c, seen_outputs, "select")
                             continue
                         self.errors.append(
                             tag(
@@ -3471,6 +3603,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                         )
                         continue
                     result_columns[c] = spec.dtype
+                    self._track_output_name(c, seen_outputs, "select")
                 continue
             # Bare string / list-of-strings column names — the most common
             # polars idiom: ``select("a", "b")`` / ``select(["a", "b"])``.
@@ -3480,20 +3613,30 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             # be a frame variable).
             single = self._const_str(arg)
             if single is not None:
-                self._register_string_selection(single, input_frame, result_columns)
+                registered = self._register_string_selection(single, input_frame, result_columns)
+                if registered is not None:
+                    self._track_output_name(registered, seen_outputs, "select")
                 continue
             str_list = self._const_str_list(arg)
             if str_list is not None:
                 for c in str_list:
-                    self._register_string_selection(c, input_frame, result_columns)
+                    registered = self._register_string_selection(c, input_frame, result_columns)
+                    if registered is not None:
+                        self._track_output_name(registered, seen_outputs, "select")
                 continue
-            name, dtype = expr_analyzer.analyze_select_expr(arg)
-            if name and dtype:
-                result_columns[name] = dtype
-            elif name:
-                # Named output whose dtype is uninferable — register it as
-                # Unknown so later references resolve (issue #8).
-                result_columns[name] = Unknown()
+            # A plural ``pl.col`` nested inside an expression runs the
+            # expression once per column (issue #42) — analyze one clone
+            # per name through the unchanged single-expression path.
+            for expr in self._expand_plural_expr(arg) or [arg]:
+                name, dtype = expr_analyzer.analyze_select_expr(expr)
+                if name and dtype:
+                    result_columns[name] = dtype
+                    self._track_output_name(name, seen_outputs, "select")
+                elif name:
+                    # Named output whose dtype is uninferable — register it as
+                    # Unknown so later references resolve (issue #8).
+                    result_columns[name] = Unknown()
+                    self._track_output_name(name, seen_outputs, "select")
 
         # Kwarg form ``select(name=expr)`` — polars treats it as
         # ``expr.alias("name")``. Same for ``with_columns``.
@@ -3505,15 +3648,18 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             # Constant-bound names (``select(x=KEY)``) resolve too (#22).
             col_ref = self._const_str(kw.value)
             if col_ref is not None:
-                self._register_string_selection(
+                registered = self._register_string_selection(
                     col_ref, input_frame, result_columns, output_name=kw.arg
                 )
+                if registered is not None:
+                    self._track_output_name(registered, seen_outputs, "select")
                 continue
             _, dtype = expr_analyzer.analyze_select_expr(kw.value)
             if dtype is not None:
                 result_columns[kw.arg] = dtype
             else:
                 result_columns[kw.arg] = Unknown()
+            self._track_output_name(kw.arg, seen_outputs, "select")
 
         self.errors.extend(expr_analyzer.errors)
 
@@ -3529,12 +3675,20 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         expr_analyzer = ExpressionAnalyzer(
             input_frame, warnings=self.warnings, registry=self.registry
         )
+        # Output names produced by THIS call — a repeat within the call is a
+        # runtime duplicate-name error (issue #36). Collision with a
+        # pre-existing input column is NOT an error (overwrite semantics),
+        # so the set starts empty rather than seeded with the input columns.
+        seen_outputs: set[str] = set()
 
         for arg in node.args:
             sel = _resolve_selector(arg, input_frame)
             if sel is not None:
                 # cs.* selectors in with_columns are a no-op type-wise (re-include
-                # existing columns). Skip — keep the existing entries.
+                # existing columns) — but each re-included name is still an
+                # output of this call for duplicate detection.
+                for c in sel:
+                    self._track_output_name(c, seen_outputs, "with_columns")
                 continue
             plural = self._resolve_plural_col(arg)
             if plural is not None:
@@ -3550,6 +3704,8 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                                 f"{list(input_frame.columns.keys())}",
                             )
                         )
+                        continue
+                    self._track_output_name(c, seen_outputs, "with_columns")
                 continue
             # Bare string / list-of-strings — equivalent to ``pl.col(name)``,
             # a re-selection of existing columns. Validate existence (PLY001
@@ -3570,14 +3726,22 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                                 f"{list(input_frame.columns.keys())}",
                             )
                         )
+                        continue
+                    self._track_output_name(c, seen_outputs, "with_columns")
                 continue
-            name, dtype = expr_analyzer.analyze_select_expr(arg)
-            if name and dtype:
-                result_columns[name] = dtype
-            elif name:
-                # Named output whose dtype is uninferable — register it as
-                # Unknown so later references resolve (issue #8).
-                result_columns[name] = Unknown()
+            # A plural ``pl.col`` nested inside an expression runs the
+            # expression once per column (issue #42) — analyze one clone
+            # per name through the unchanged single-expression path.
+            for expr in self._expand_plural_expr(arg) or [arg]:
+                name, dtype = expr_analyzer.analyze_select_expr(expr)
+                if name and dtype:
+                    result_columns[name] = dtype
+                    self._track_output_name(name, seen_outputs, "with_columns")
+                elif name:
+                    # Named output whose dtype is uninferable — register it as
+                    # Unknown so later references resolve (issue #8).
+                    result_columns[name] = Unknown()
+                    self._track_output_name(name, seen_outputs, "with_columns")
 
         # Kwarg form ``with_columns(name=expr)`` — polars treats it as
         # ``expr.alias("name")``.
@@ -3602,12 +3766,15 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                             f"{list(input_frame.columns.keys())}",
                         )
                     )
+                    continue
+                self._track_output_name(kw.arg, seen_outputs, "with_columns")
                 continue
             _, dtype = expr_analyzer.analyze_select_expr(kw.value)
             if dtype is not None:
                 result_columns[kw.arg] = dtype
             else:
                 result_columns[kw.arg] = Unknown()
+            self._track_output_name(kw.arg, seen_outputs, "with_columns")
 
         self.errors.extend(expr_analyzer.errors)
 

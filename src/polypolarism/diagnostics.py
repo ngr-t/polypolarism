@@ -20,6 +20,7 @@ PLY008 = "PLY008"  # filter predicate / when condition dtype is not Boolean
 PLY009 = "PLY009"  # binary operation between incompatible dtypes (arithmetic, comparison, is_in)
 PLY013 = "PLY013"  # cast between structurally incompatible dtypes
 PLY014 = "PLY014"  # unique: subset column not found
+PLY015 = "PLY015"  # duplicate output column name in select/with_columns
 
 # Join
 PLY010 = "PLY010"  # join key error (missing or dtype mismatch)

@@ -7918,3 +7918,240 @@ class TestFrameLiteralConstantValues:
         results = analyze_source(source)
         assert results[0].errors == []
         assert results[0].inferred_return_type == FrameType({"name": Unknown()})
+
+
+class TestDuplicateOutputColumns:
+    """Issue #36: duplicate output names within one select/with_columns call.
+
+    polars raises DuplicateError (select) / ComputeError (with_columns) at
+    runtime when two expressions of the same call produce the same output
+    name. Overwriting a pre-existing input column in ``with_columns`` is
+    legal (that's its whole point) — only intra-call repeats are flagged.
+    Probed against polars 1.41.2.
+    """
+
+    def _frame(self) -> FrameType:
+        return FrameType({"a": Int64(), "b": Float64()})
+
+    def test_select_alias_collides_with_plain_col(self):
+        analyzer = _run_body(self._frame(), 'out = df.select(pl.col("a"), pl.col("b").alias("a"))')
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY015" in analyzer.errors[0]
+        assert "'a'" in analyzer.errors[0]
+        assert "select" in analyzer.errors[0]
+
+    def test_select_duplicate_keeps_last_dtype(self):
+        analyzer = _run_body(self._frame(), 'out = df.select(pl.col("a"), pl.col("b").alias("a"))')
+        # Registration keeps the last dtype so downstream stays sane.
+        assert analyzer.var_types["out"].columns["a"].dtype == Float64()
+
+    def test_select_duplicate_bare_strings(self):
+        analyzer = _run_body(self._frame(), 'out = df.select("a", "a")')
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY015" in analyzer.errors[0]
+
+    def test_select_selector_collides_with_string(self):
+        analyzer = _run_body(self._frame(), 'out = df.select(cs.all(), "a")')
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY015" in analyzer.errors[0]
+
+    def test_select_kwarg_collides_with_positional(self):
+        analyzer = _run_body(self._frame(), "out = df.select(pl.col('a'), a=pl.lit(1))")
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY015" in analyzer.errors[0]
+
+    def test_select_kwarg_string_rename_collides(self):
+        analyzer = _run_body(self._frame(), "out = df.select('a', a='b')")
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY015" in analyzer.errors[0]
+
+    def test_select_plural_col_overlaps_single(self):
+        analyzer = _run_body(self._frame(), 'out = df.select(pl.col("a", "b"), pl.col("a"))')
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY015" in analyzer.errors[0]
+
+    def test_select_distinct_outputs_no_error(self):
+        analyzer = _run_body(self._frame(), 'out = df.select(pl.col("a"), pl.col("b").alias("c"))')
+        assert analyzer.errors == [], analyzer.errors
+
+    def test_with_columns_intra_call_duplicate(self):
+        analyzer = _run_body(
+            self._frame(), 'out = df.with_columns(pl.col("a"), pl.col("b").alias("a"))'
+        )
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY015" in analyzer.errors[0]
+        assert "with_columns" in analyzer.errors[0]
+
+    def test_with_columns_overwrite_existing_is_legal(self):
+        analyzer = _run_body(self._frame(), "out = df.with_columns(a=pl.lit(1))")
+        assert analyzer.errors == [], analyzer.errors
+
+    def test_with_columns_alias_overwrite_existing_is_legal(self):
+        analyzer = _run_body(self._frame(), 'out = df.with_columns(pl.col("b").alias("a"))')
+        assert analyzer.errors == [], analyzer.errors
+
+    def test_with_columns_selector_collides_with_expr(self):
+        analyzer = _run_body(self._frame(), 'out = df.with_columns(cs.all(), pl.col("a"))')
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY015" in analyzer.errors[0]
+
+    def test_with_columns_string_collides_with_kwarg(self):
+        analyzer = _run_body(self._frame(), "out = df.with_columns('a', a=pl.lit(1))")
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY015" in analyzer.errors[0]
+
+
+class TestPluralColExpansion:
+    """Issue #42: a plural ``pl.col("a", "b")`` nested inside an expression
+    expands the whole expression per column, matching polars semantics
+    (probed on 1.41.2: ``select(pl.col("a","b") * 10)`` → columns a, b).
+    """
+
+    def _frame(self) -> FrameType:
+        return FrameType({"s": Utf8(), "a": Int64(), "b": Float64()})
+
+    def test_select_plural_arithmetic_expands(self):
+        analyzer = _run_body(self._frame(), 'out = df.select(pl.col("a", "b") * 10)')
+        assert analyzer.errors == [], analyzer.errors
+        out = analyzer.var_types["out"]
+        assert list(out.columns.keys()) == ["a", "b"]
+        assert out.columns["a"].dtype == Int64()
+        assert out.columns["b"].dtype == Float64()
+
+    def test_select_plural_list_form_expands(self):
+        analyzer = _run_body(self._frame(), 'out = df.select(pl.col(["a", "b"]) * 10)')
+        assert analyzer.errors == [], analyzer.errors
+        out = analyzer.var_types["out"]
+        assert out.columns["a"].dtype == Int64()
+        assert out.columns["b"].dtype == Float64()
+
+    def test_select_plural_cast_expands(self):
+        analyzer = _run_body(self._frame(), 'out = df.select(pl.col("a", "b").cast(pl.Float64))')
+        assert analyzer.errors == [], analyzer.errors
+        out = analyzer.var_types["out"]
+        assert out.columns["a"].dtype == Float64()
+        assert out.columns["b"].dtype == Float64()
+
+    def test_with_columns_plural_arithmetic_expands(self):
+        analyzer = _run_body(self._frame(), 'out = df.with_columns(pl.col("a", "b") / 2)')
+        assert analyzer.errors == [], analyzer.errors
+        out = analyzer.var_types["out"]
+        # True division retypes both columns to Float64; "s" survives.
+        assert out.columns["a"].dtype == Float64()
+        assert out.columns["b"].dtype == Float64()
+        assert out.columns["s"].dtype == Utf8()
+
+    def test_agg_plural_sum_expands(self):
+        analyzer = _run_body(self._frame(), 'out = df.group_by("s").agg(pl.col("a", "b").sum())')
+        assert analyzer.errors == [], analyzer.errors
+        out = analyzer.var_types["out"]
+        assert list(out.columns.keys()) == ["s", "a", "b"]
+        assert out.columns["a"].dtype == Int64()
+        assert out.columns["b"].dtype == Float64()
+
+    def test_agg_bare_plural_implicit_list(self):
+        analyzer = _run_body(self._frame(), 'out = df.group_by("s").agg(pl.col("a", "b"))')
+        assert analyzer.errors == [], analyzer.errors
+        out = analyzer.var_types["out"]
+        # Probed: agg(pl.col("a","b")) collects each column into a list.
+        assert out.columns["a"].dtype == ListT(Int64())
+        assert out.columns["b"].dtype == ListT(Float64())
+
+    def test_aliased_plural_flags_duplicate_output(self):
+        # Probed: select(pl.col("a","b").alias("x")) raises DuplicateError —
+        # the expansion produces "x" twice and PLY015 catches it (issue #36).
+        analyzer = _run_body(self._frame(), 'out = df.select(pl.col("a", "b").alias("x"))')
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY015" in analyzer.errors[0]
+
+    def test_missing_column_in_plural_expression_errors(self):
+        analyzer = _run_body(self._frame(), 'out = df.select(pl.col("a", "missing") * 10)')
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY001" in analyzer.errors[0]
+        assert "missing" in analyzer.errors[0]
+
+    def test_two_plural_nodes_stay_silent(self):
+        # Pairwise plural-x-plural semantics are out of scope — no errors,
+        # unchanged (single-name) inference path.
+        analyzer = _run_body(self._frame(), 'out = df.select(pl.col("a", "b") + pl.col("a", "b"))')
+        assert analyzer.errors == [], analyzer.errors
+
+    def test_single_col_expression_path_unchanged(self):
+        analyzer = _run_body(self._frame(), 'out = df.select(pl.col("a") * 10)')
+        assert analyzer.errors == [], analyzer.errors
+        assert list(analyzer.var_types["out"].columns.keys()) == ["a"]
+
+
+class TestListEvalBody:
+    """Issue #44: type-check the ``list.eval(...)`` body with ``pl.element()``
+    bound to the list's inner dtype. Probed on polars 1.41.2:
+    ``eval(pl.element() * 2)`` on List(Int64) → List(Int64);
+    ``eval(pl.element() + pl.lit("x"))`` raises InvalidOperationError.
+    """
+
+    def _frame(self) -> FrameType:
+        return FrameType({"v": ListT(Int64()), "s": ListT(Utf8())})
+
+    def test_valid_eval_arithmetic_dtype(self):
+        analyzer = _run_body(
+            self._frame(), 'out = df.select(pl.col("v").list.eval(pl.element() * 2))'
+        )
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["v"].dtype == ListT(Int64())
+
+    def test_invalid_eval_body_flags_ply009(self):
+        analyzer = _run_body(
+            self._frame(),
+            'out = df.select(pl.col("v").list.eval(pl.element() + pl.lit("x")))',
+        )
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY009" in analyzer.errors[0]
+
+    def test_invalid_eval_body_degrades_to_list_unknown(self):
+        analyzer = _run_body(
+            self._frame(),
+            'out = df.select(pl.col("v").list.eval(pl.element() + pl.lit("x")))',
+        )
+        # The error is the signal; the output column stays registered.
+        assert analyzer.var_types["out"].columns["v"].dtype == ListT(Unknown())
+
+    def test_eval_cast_changes_element_dtype(self):
+        analyzer = _run_body(
+            self._frame(),
+            'out = df.select(pl.col("v").list.eval(pl.element().cast(pl.Utf8)))',
+        )
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["v"].dtype == ListT(Utf8())
+
+    def test_eval_comparison_yields_list_boolean(self):
+        analyzer = _run_body(
+            self._frame(), 'out = df.select(pl.col("v").list.eval(pl.element() > 1))'
+        )
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["v"].dtype == ListT(Boolean())
+
+    def test_eval_string_concat_on_str_list(self):
+        analyzer = _run_body(
+            self._frame(),
+            'out = df.select(pl.col("s").list.eval(pl.element() + pl.lit("!")))',
+        )
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["s"].dtype == ListT(Utf8())
+
+    def test_element_outside_eval_stays_silent(self):
+        # ``pl.element()`` is invalid outside eval at runtime, but flagging
+        # it is out of scope — stay silent (no element binding, no errors).
+        analyzer = _run_body(self._frame(), "out = df.select(x=pl.element() + 1)")
+        assert analyzer.errors == [], analyzer.errors
+
+    def test_outer_nullable_receiver_preserved(self):
+        frame = FrameType({"v": Nullable(ListT(Int64()))})
+        analyzer = _run_body(frame, 'out = df.select(pl.col("v").list.eval(pl.element() * 2))')
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["v"].dtype == Nullable(ListT(Int64()))
+
+    def test_nullable_inner_element_propagates(self):
+        frame = FrameType({"v": ListT(Nullable(Int64()))})
+        analyzer = _run_body(frame, 'out = df.select(pl.col("v").list.eval(pl.element() * 2))')
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["v"].dtype == ListT(Nullable(Int64()))
