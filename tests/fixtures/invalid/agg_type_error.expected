@@ -1,0 +1,3 @@
+sum_on_string: FAIL
+  error: [PLY011] Cannot apply sum to type Utf8: sum requires numeric type
+  error: Could not infer return type

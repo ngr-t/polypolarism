@@ -1,0 +1,7 @@
+struct_list: OK
+struct_strings: OK
+struct_mixed: OK
+coalesce_list: OK
+concat_str_list: OK
+concat_list_list: OK
+horizontal_list: OK

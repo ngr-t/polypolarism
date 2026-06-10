@@ -1,0 +1,2 @@
+bug_over_nonexistent: FAIL
+  error: [PLY001] Column 'ghost' not found. Available columns: ['a', 's']

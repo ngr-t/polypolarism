@@ -1,0 +1,2 @@
+f: FAIL
+  error: [PLY002] drop: column 'missing' not found

@@ -1,0 +1,4 @@
+select_positional_strings: OK
+select_string_list: OK
+select_mixed_string_and_expr: OK
+with_columns_string_reselect: OK

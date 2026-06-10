@@ -1,0 +1,3 @@
+type_mismatch_join: FAIL
+  error: [PLY010] Join key dtype mismatch: left 'user_id' is Int64, right 'user_id' is Utf8
+  error: Could not infer return type

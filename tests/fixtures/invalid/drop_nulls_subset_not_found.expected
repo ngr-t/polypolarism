@@ -1,0 +1,2 @@
+drop_nulls_missing_subset: FAIL
+  error: [PLY005] drop_nulls: column 'price' not found

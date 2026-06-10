@@ -1,0 +1,2 @@
+f: WARN
+  warning: [PLW003] call to 'process': function isn't defined in this module so polypolarism cannot infer its return type. Define 'process' here with a DataFrame[Schema] return annotation, or inline the transformation.

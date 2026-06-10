@@ -1,0 +1,5 @@
+sel_all: OK
+sel_exclude: OK
+seq_pipeline: OK
+select_via_constant: OK
+select_seq_via_constant: OK

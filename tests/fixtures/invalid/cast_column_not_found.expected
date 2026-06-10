@@ -1,0 +1,2 @@
+cast_missing_column: FAIL
+  error: [PLY004] cast: column 'price' not found

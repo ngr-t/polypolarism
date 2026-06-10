@@ -1,0 +1,3 @@
+requires_two_columns: OK
+caller: FAIL
+  error: Argument 'df' is missing column 'name'

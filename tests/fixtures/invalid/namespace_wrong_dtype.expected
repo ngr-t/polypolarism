@@ -1,0 +1,6 @@
+bug_str_on_int: FAIL
+  error: [PLY012] `.str` accessor requires a String column, but column 'a' is Int64 — polars raises InvalidOperationError at runtime
+bug_dt_on_int: FAIL
+  error: [PLY012] `.dt` accessor requires a temporal column (Date, Datetime, Time or Duration), but column 'a' is Int64 — polars raises InvalidOperationError at runtime
+bug_list_on_int: FAIL
+  error: [PLY012] `.list` accessor requires a List or Array column, but column 'a' is Int64 — polars raises InvalidOperationError at runtime

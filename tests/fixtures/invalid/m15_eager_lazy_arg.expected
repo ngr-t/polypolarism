@@ -1,0 +1,3 @@
+helper: OK
+caller: FAIL
+  error: [PLY032] Argument 'df' expected DataFrame[...] but got LazyFrame[...]; .collect() the LazyFrame first.

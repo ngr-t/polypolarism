@@ -1,0 +1,2 @@
+double_value: FAIL
+  error: Column 'doubled' has type Float64, but declared type is Int64
