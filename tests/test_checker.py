@@ -714,3 +714,48 @@ class TestIssue14TrueDivisionEndToEnd:
             and e.inferred == Float64()
             for e in result.errors
         )
+
+
+class TestIssue18NullabilityEndToEnd:
+    """Issue #18 repro: nullability flows through expressions.
+
+    ``x`` is declared ``pa.Field(nullable=True)``; ``a + x`` can hold
+    nulls, so declaring the result non-nullable must fail (pandera
+    rejects the nulls at runtime) and declaring it nullable must pass.
+    """
+
+    SOURCE_TEMPLATE = """
+        import polars as pl
+        import pandera.polars as pa
+        from pandera.typing.polars import DataFrame
+
+        class In(pa.DataFrameModel):
+            a: int
+            x: int = pa.Field(nullable=True)
+
+        class Out(pa.DataFrameModel):
+            z: {declared}
+
+        def f(df: DataFrame[In]) -> DataFrame[Out]:
+            return df.select(z=pl.col("a") + pl.col("x"))
+    """
+
+    def _check(self, declared: str):
+        source = textwrap.dedent(self.SOURCE_TEMPLATE.format(declared=declared))
+        return check_source(source)[0]
+
+    def test_sum_with_nullable_operand_declared_nonnull_fails(self):
+        """The killed false negative: nulls flow into a non-nullable column."""
+        result = self._check("int")
+        assert result.passed is False
+        assert any(
+            isinstance(e, TypeDifference)
+            and e.column == "z"
+            and e.declared == Int64()
+            and e.inferred == Nullable(Int64())
+            for e in result.errors
+        )
+
+    def test_sum_with_nullable_operand_declared_nullable_passes(self):
+        result = self._check("int = pa.Field(nullable=True)")
+        assert result.passed is True, result.errors

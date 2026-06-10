@@ -873,25 +873,31 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         ):
             return alias, infer_lit(inner_node.value)
 
-        # Comparison expressions (==, !=, <, <=, >, >=) -> Boolean
+        # Comparison expressions (==, !=, <, <=, >, >=) -> Boolean.
+        # A Nullable operand makes the result Nullable (``null > 0`` is null).
         if isinstance(inner_node, ast.Compare):
-            self._validate_subexpr(inner_node.left)
+            operand_types = [self.analyze_select_expr(inner_node.left)[1]]
             for cmp in inner_node.comparators:
-                self._validate_subexpr(cmp)
-            return alias, Boolean()
+                operand_types.append(self.analyze_select_expr(cmp)[1])
+            resolved = [t for t in operand_types if t is not None]
+            return alias, _wrap_nullable_if_any(Boolean(), resolved)
 
-        # Logical operators expressed as bitwise: a & b, a | b, a ^ b -> Boolean
+        # Logical operators expressed as bitwise: a & b, a | b, a ^ b -> Boolean.
+        # Nullability propagates from either operand (``null & true`` is null).
         if isinstance(inner_node, ast.BinOp) and isinstance(
             inner_node.op, (ast.BitAnd, ast.BitOr, ast.BitXor)
         ):
-            self._validate_subexpr(inner_node.left)
-            self._validate_subexpr(inner_node.right)
-            return alias, Boolean()
+            _, left_type = self.analyze_select_expr(inner_node.left)
+            _, right_type = self.analyze_select_expr(inner_node.right)
+            resolved = [t for t in (left_type, right_type) if t is not None]
+            return alias, _wrap_nullable_if_any(Boolean(), resolved)
 
-        # Logical NOT: ~expr or `not expr` -> Boolean (when receiver is boolean-like)
+        # Logical NOT: ~expr or `not expr` -> Boolean (when receiver is
+        # boolean-like). ``~null`` is null, so nullability carries through.
         if isinstance(inner_node, ast.UnaryOp) and isinstance(inner_node.op, (ast.Invert, ast.Not)):
-            self._validate_subexpr(inner_node.operand)
-            return alias, Boolean()
+            _, operand_type = self.analyze_select_expr(inner_node.operand)
+            resolved = [operand_type] if operand_type is not None else []
+            return alias, _wrap_nullable_if_any(Boolean(), resolved)
 
         # Arithmetic binary operations like pl.col("x") * 2. Both operands
         # are resolved (keeping the missing-column error side-effects) and

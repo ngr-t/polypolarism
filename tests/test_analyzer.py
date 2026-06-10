@@ -4140,3 +4140,73 @@ class TestArithmeticBinOpInference:
     def test_utf8_concat_with_nullable_operand_is_nullable_utf8(self):
         analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('s') + pl.col('t'))")
         assert analyzer.var_types["out"].columns["r"].dtype == Nullable(Utf8())
+
+
+class TestNullabilityPropagationBoolean:
+    """Issue #18: elementwise boolean ops propagate operand nullability.
+
+    polars semantics: ``null > 0`` is null, ``null & true`` is null,
+    ``~null`` is null — so a Nullable operand makes the Boolean result
+    Nullable. Non-nullable operands keep the bare Boolean result.
+    """
+
+    def _frame(self) -> FrameType:
+        return FrameType(
+            {
+                "a": Int64(),
+                "n": Nullable(Int64()),
+                "flag": Boolean(),
+                "nflag": Nullable(Boolean()),
+            }
+        )
+
+    # -- comparisons ---------------------------------------------------------
+
+    def test_compare_non_nullable_operands_is_boolean(self):
+        analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('a') > 0)")
+        assert analyzer.var_types["out"].columns["r"].dtype == Boolean()
+
+    def test_compare_nullable_left_is_nullable_boolean(self):
+        analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('n') > 0)")
+        assert analyzer.var_types["out"].columns["r"].dtype == Nullable(Boolean())
+
+    def test_compare_nullable_comparator_is_nullable_boolean(self):
+        analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('a') == pl.col('n'))")
+        assert analyzer.var_types["out"].columns["r"].dtype == Nullable(Boolean())
+
+    # -- bitwise logical & | ^ -----------------------------------------------
+
+    def test_and_of_non_nullable_predicates_is_boolean(self):
+        analyzer = _run_body(self._frame(), "out = df.select(r=(pl.col('a') > 0) & pl.col('flag'))")
+        assert analyzer.var_types["out"].columns["r"].dtype == Boolean()
+
+    def test_and_with_nullable_operand_is_nullable_boolean(self):
+        analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('flag') & pl.col('nflag'))")
+        assert analyzer.var_types["out"].columns["r"].dtype == Nullable(Boolean())
+
+    def test_or_with_nullable_predicate_is_nullable_boolean(self):
+        analyzer = _run_body(self._frame(), "out = df.select(r=(pl.col('n') > 0) | pl.col('flag'))")
+        assert analyzer.var_types["out"].columns["r"].dtype == Nullable(Boolean())
+
+    def test_xor_with_nullable_operand_is_nullable_boolean(self):
+        analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('nflag') ^ pl.col('flag'))")
+        assert analyzer.var_types["out"].columns["r"].dtype == Nullable(Boolean())
+
+    # -- unary ~ / not ---------------------------------------------------------
+
+    def test_invert_non_nullable_is_boolean(self):
+        analyzer = _run_body(self._frame(), "out = df.select(r=~pl.col('flag'))")
+        assert analyzer.var_types["out"].columns["r"].dtype == Boolean()
+
+    def test_invert_nullable_is_nullable_boolean(self):
+        analyzer = _run_body(self._frame(), "out = df.select(r=~pl.col('nflag'))")
+        assert analyzer.var_types["out"].columns["r"].dtype == Nullable(Boolean())
+
+    def test_not_nullable_is_nullable_boolean(self):
+        analyzer = _run_body(self._frame(), "out = df.select(r=not pl.col('nflag'))")
+        assert analyzer.var_types["out"].columns["r"].dtype == Nullable(Boolean())
+
+    def test_invert_is_null_predicate_stays_non_nullable(self):
+        """is_null() on a nullable column is non-nullable Boolean; so is ~it."""
+        analyzer = _run_body(self._frame(), "out = df.select(r=~pl.col('n').is_null())")
+        assert analyzer.var_types["out"].columns["r"].dtype == Boolean()
