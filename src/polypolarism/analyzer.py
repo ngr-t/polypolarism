@@ -1285,6 +1285,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         warnings: list[str] | None = None,
         class_registry: ClassRegistry | None = None,
         current_class_name: str | None = None,
+        module_consts: dict[str, str | list[str]] | None = None,
     ):
         self.input_types = input_types
         self.errors = errors
@@ -1297,6 +1298,10 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         # module-level functions). Used to resolve ``self.method()`` /
         # ``cls.method()`` to a class-local method's return annotation.
         self.current_class_name = current_class_name
+        # Module-level ``NAME = "lit"`` / ``NAME = ["a", "b"]`` constants,
+        # collected by ``analyze_source``. Read-only here; function-local
+        # constants in ``var_consts`` shadow them.
+        self.module_consts: dict[str, str | list[str]] = module_consts or {}
         # Track variable -> FrameType mapping
         self.var_types: dict[str, FrameType] = dict(input_types)
         # Track variable -> FrameList element type (for partition_by results
@@ -1305,6 +1310,11 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         # Track variable -> class name for ``var = ClassName()`` assignments,
         # so a later ``var.method()`` call can resolve to the class's method.
         self.var_classes: dict[str, str] = {}
+        # Track function-local ``var = "lit"`` / ``var = ["a", "b"]``
+        # string(-list) constants so column-spec arguments passed by name
+        # (``join(on=key)``, ``unpivot(on=cols)``, ...) can be resolved.
+        # Reassigning the name to anything non-constant drops the entry.
+        self.var_consts: dict[str, str | list[str]] = {}
         self.return_type: FrameType | None = None
         # Bare ``Schema.validate(df)`` narrowing only fires at the function's
         # top level. We toggle this off when descending into if/for/while/try.
@@ -1384,6 +1394,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         """Handle variable assignments."""
         if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
             var_name = node.targets[0].id
+            # Any reassignment invalidates a previously recorded constant;
+            # it is re-recorded below if the new RHS is again a literal.
+            self.var_consts.pop(var_name, None)
             # ``parts = df.partition_by("k")`` — bind to FrameList element type.
             list_elem = self._infer_frame_list(node.value)
             if list_elem is not None:
@@ -1405,6 +1418,17 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     self.var_classes[var_name] = cls_name
                     self.var_types.pop(var_name, None)
                     self.var_lists.pop(var_name, None)
+                else:
+                    # ``key = "id"`` / ``cols = ["a", "b"]`` — record the
+                    # string(-list) constant for column-spec resolution.
+                    const_val: str | list[str] | None = _str_constant(node.value)
+                    if const_val is None:
+                        const_val = _str_list_or_tuple(node.value)
+                    if const_val is not None:
+                        self.var_consts[var_name] = const_val
+                        self.var_types.pop(var_name, None)
+                        self.var_lists.pop(var_name, None)
+                        self.var_classes.pop(var_name, None)
         self.generic_visit(node)
 
     def _instance_class_name(self, node: ast.expr) -> str | None:
@@ -1416,6 +1440,38 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             and node.func.id in self.class_registry
         ):
             return node.func.id
+        return None
+
+    # -- constant resolution ----------------------------------------------
+
+    def _lookup_const(self, name: str) -> str | list[str] | None:
+        """Look up a constant binding: function-locals shadow module-level."""
+        if name in self.var_consts:
+            return self.var_consts[name]
+        return self.module_consts.get(name)
+
+    def _const_str(self, node: ast.expr) -> str | None:
+        """Resolve ``node`` to a string: a literal, or a ``Name`` bound to a
+        string constant (function-local, falling back to module-level)."""
+        s = _str_constant(node)
+        if s is not None:
+            return s
+        if isinstance(node, ast.Name):
+            val = self._lookup_const(node.id)
+            if isinstance(val, str):
+                return val
+        return None
+
+    def _const_str_list(self, node: ast.expr) -> list[str] | None:
+        """Resolve ``node`` to a list of strings: a list/tuple literal, or a
+        ``Name`` bound to a string-list constant (locals shadow module)."""
+        lst = _str_list_or_tuple(node)
+        if lst is not None:
+            return lst
+        if isinstance(node, ast.Name):
+            val = self._lookup_const(node.id)
+            if isinstance(val, list):
+                return val
         return None
 
     def _resolve_method_call(self, node: ast.Call) -> FrameType | None:
@@ -1459,6 +1515,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         """Handle annotated assignments like: df: DataFrame[Schema] = expr."""
         if isinstance(node.target, ast.Name):
             var_name = node.target.id
+            # Any reassignment invalidates a previously recorded constant;
+            # it is re-recorded below if the new RHS is again a literal.
+            self.var_consts.pop(var_name, None)
             # Try to get type from a Pandera DataFrame[Schema] annotation
             frame_type, _ = _resolve_declared_type(node.annotation, self.schema_registry)
             if frame_type is not None:
@@ -1474,6 +1533,14 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 inferred = self._infer_expr_type(node.value)
                 if inferred:
                     self.var_types[var_name] = inferred
+                else:
+                    # ``key: str = "id"`` — record string(-list) constants
+                    # the same way un-annotated assignments do.
+                    const_val: str | list[str] | None = _str_constant(node.value)
+                    if const_val is None:
+                        const_val = _str_list_or_tuple(node.value)
+                    if const_val is not None:
+                        self.var_consts[var_name] = const_val
         self.generic_visit(node)
 
     def _infer_expr_type(self, node: ast.expr) -> FrameType | None:
@@ -1531,8 +1598,8 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         """
         keys: list[str] = []
         for arg in node.args:
-            single = _str_constant(arg)
-            multi = _str_list_or_tuple(arg)
+            single = self._const_str(arg)
+            multi = self._const_str_list(arg)
             if single is not None:
                 keys.append(single)
             elif multi is not None:
@@ -1912,6 +1979,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             self.registry,
             self.schema_registry,
             warnings=self.warnings,
+            module_consts=self.module_consts,
         )
         for stmt in func_node.body:
             body_analyzer.visit(stmt)
@@ -1932,24 +2000,35 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         if not right_type:
             return None
 
-        # Extract keyword arguments
-        on: str | None = None
-        left_on: str | None = None
-        right_on: str | None = None
+        # Extract keyword arguments. Key columns may be a string literal,
+        # a list/tuple of strings, or a name bound to such a constant.
+        on: str | list[str] | None = None
+        left_on: str | list[str] | None = None
+        right_on: str | list[str] | None = None
         how: str = "inner"
+        suffix: str = "_right"
 
         for kw in node.keywords:
-            if not isinstance(kw.value, ast.Constant) or not isinstance(kw.value.value, str):
-                continue
-            value = kw.value.value
-            if kw.arg == "on":
-                on = value
-            elif kw.arg == "left_on":
-                left_on = value
-            elif kw.arg == "right_on":
-                right_on = value
+            if kw.arg in ("on", "left_on", "right_on"):
+                keys: str | list[str] | None = self._const_str(kw.value)
+                if keys is None:
+                    keys = self._const_str_list(kw.value)
+                if keys is None:
+                    continue
+                if kw.arg == "on":
+                    on = keys
+                elif kw.arg == "left_on":
+                    left_on = keys
+                else:
+                    right_on = keys
             elif kw.arg == "how":
-                how = value
+                cand = self._const_str(kw.value)
+                if cand is not None:
+                    how = cand
+            elif kw.arg == "suffix":
+                cand = self._const_str(kw.value)
+                if cand is not None:
+                    suffix = cand
 
         if how == "inner" or how == "left" or how == "right" or how == "full":
             valid_how: JoinHow = how
@@ -1964,6 +2043,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 left_on=left_on,
                 right_on=right_on,
                 how=valid_how,
+                suffix=suffix,
             )
         except JoinError as e:
             self.errors.append(tag(PLY010, str(e)))
@@ -1980,8 +2060,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         on: str | None = None
         left_on: str | None = None
         right_on: str | None = None
+        suffix: str = "_right"
         for kw in node.keywords:
-            cand = _str_constant(kw.value)
+            cand = self._const_str(kw.value)
             if cand is None:
                 continue
             if kw.arg == "on":
@@ -1990,6 +2071,8 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 left_on = cand
             elif kw.arg == "right_on":
                 right_on = cand
+            elif kw.arg == "suffix":
+                suffix = cand
         try:
             return infer_join(
                 left_type,
@@ -1998,6 +2081,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 left_on=left_on,
                 right_on=right_on,
                 how="left",
+                suffix=suffix,
             )
         except JoinError as e:
             self.errors.append(tag(PLY010, str(e)))
@@ -2032,26 +2116,27 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 # ``group_by("a")`` and ``group_by("a", "b")`` (positional
                 # strings), plus ``group_by(["a", "b"])`` / ``group_by(("a",))``
                 # (list/tuple of strings) are all equivalent in polars.
-                single = _str_constant(arg)
+                # Names bound to such constants resolve too.
+                single = self._const_str(arg)
                 if single is not None:
                     keys.append(single)
                     continue
-                multi = _str_list_or_tuple(arg)
+                multi = self._const_str_list(arg)
                 if multi is not None:
                     keys.extend(multi)
         else:
             # group_by_dynamic / rolling: first positional / ``index_column`` is the time axis.
             index_col: str | None = None
             if groupby_receiver.args:
-                index_col = _str_constant(groupby_receiver.args[0])
+                index_col = self._const_str(groupby_receiver.args[0])
             for kw in groupby_receiver.keywords:
                 if kw.arg == "index_column":
-                    cand = _str_constant(kw.value)
+                    cand = self._const_str(kw.value)
                     if cand is not None:
                         index_col = cand
                 if kw.arg == "by" or kw.arg == "group_by":
-                    extra = _str_list_or_tuple(kw.value)
-                    single = _str_constant(kw.value)
+                    extra = self._const_str_list(kw.value)
+                    single = self._const_str(kw.value)
                     if extra is not None:
                         keys.extend(extra)
                     elif single is not None:
@@ -2303,17 +2388,18 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
     ) -> list[str]:
         """Resolve column-name args for ``drop`` / ``drop_nulls(subset=...)``.
 
-        Supports ``drop("a", "b")``, ``drop(["a", "b"])``, and ``drop(cs.numeric())``
-        when ``input_frame`` is supplied (selectors need a frame to resolve).
+        Supports ``drop("a", "b")``, ``drop(["a", "b"])``, ``drop(cs.numeric())``
+        when ``input_frame`` is supplied (selectors need a frame to resolve),
+        and names bound to string(-list) constants.
         Returns column names in argument order (lists / selectors flattened in).
         """
         names: list[str] = []
         for arg in node.args:
-            s = _str_constant(arg)
+            s = self._const_str(arg)
             if s is not None:
                 names.append(s)
                 continue
-            lst = _str_list_or_tuple(arg)
+            lst = self._const_str_list(arg)
             if lst is not None:
                 names.extend(lst)
                 continue
@@ -2390,14 +2476,16 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         # subset can be passed positionally or as keyword
         subset: list[str] | None = None
         if node.args:
-            single = _str_constant(node.args[0])
-            cand = _str_list_or_tuple(node.args[0]) or (None if single is None else [single])
+            single = self._const_str(node.args[0])
+            cand = self._const_str_list(node.args[0]) or (None if single is None else [single])
             if cand is not None:
                 subset = cand
         for kw in node.keywords:
             if kw.arg == "subset":
-                single_kw = _str_constant(kw.value)
-                cand2 = _str_list_or_tuple(kw.value) or (None if single_kw is None else [single_kw])
+                single_kw = self._const_str(kw.value)
+                cand2 = self._const_str_list(kw.value) or (
+                    None if single_kw is None else [single_kw]
+                )
                 if cand2 is not None:
                     subset = cand2
 
@@ -2484,11 +2572,11 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
     def _infer_explode_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
         targets: list[str] = []
         for arg in node.args:
-            s = _str_constant(arg)
+            s = self._const_str(arg)
             if s is not None:
                 targets.append(s)
                 continue
-            lst = _str_list_or_tuple(arg)
+            lst = self._const_str_list(arg)
             if lst is not None:
                 targets.extend(lst)
         if not targets:
@@ -2535,25 +2623,25 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         value_name = "value"
         for kw in node.keywords:
             if kw.arg == "index":
-                lst = _str_list_or_tuple(kw.value)
-                single = _str_constant(kw.value)
+                lst = self._const_str_list(kw.value)
+                single = self._const_str(kw.value)
                 if lst is not None:
                     index = lst
                 elif single is not None:
                     index = [single]
             elif kw.arg == "on":
-                lst = _str_list_or_tuple(kw.value)
-                single = _str_constant(kw.value)
+                lst = self._const_str_list(kw.value)
+                single = self._const_str(kw.value)
                 if lst is not None:
                     on = lst
                 elif single is not None:
                     on = [single]
             elif kw.arg == "variable_name":
-                cand = _str_constant(kw.value)
+                cand = self._const_str(kw.value)
                 if cand is not None:
                     variable_name = cand
             elif kw.arg == "value_name":
-                cand = _str_constant(kw.value)
+                cand = self._const_str(kw.value)
                 if cand is not None:
                     value_name = cand
         try:
@@ -2750,6 +2838,7 @@ def analyze_function(
     schema_registry: SchemaRegistry | None = None,
     class_registry: ClassRegistry | None = None,
     current_class_name: str | None = None,
+    module_consts: dict[str, str | list[str]] | None = None,
 ) -> FunctionAnalysis | None:
     """Analyze a single function definition."""
     schema_registry = schema_registry or SchemaRegistry()
@@ -2819,6 +2908,7 @@ def analyze_function(
         warnings=warnings,
         class_registry=class_registry,
         current_class_name=current_class_name,
+        module_consts=module_consts,
     )
     for stmt in func_node.body:
         body_analyzer.visit(stmt)
@@ -2833,6 +2923,38 @@ def analyze_function(
         errors=body_analyzer.errors,
         warnings=body_analyzer.warnings,
     )
+
+
+def _collect_module_consts(tree: ast.Module) -> dict[str, str | list[str]]:
+    """Collect top-level ``NAME = "lit"`` / ``NAME = ["a", "b"]`` constants.
+
+    Only single-``Name``-target ``Assign`` / ``AnnAssign`` statements whose
+    value is a string constant or a list/tuple of string constants are
+    recorded. These feed constant resolution for column-spec arguments
+    (``join(on=KEY)``, ``unpivot(on=ON_COLS)``, ...).
+    """
+    consts: dict[str, str | list[str]] = {}
+    for node in tree.body:
+        target: ast.expr | None = None
+        value: ast.expr | None = None
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+            value = node.value
+        elif isinstance(node, ast.AnnAssign):
+            target = node.target
+            value = node.value
+        if not isinstance(target, ast.Name) or value is None:
+            continue
+        const_val: str | list[str] | None = _str_constant(value)
+        if const_val is None:
+            const_val = _str_list_or_tuple(value)
+        if const_val is not None:
+            consts[target.id] = const_val
+        else:
+            # Rebinding the name to a non-constant at module level drops
+            # any earlier constant — we can't tell which value wins.
+            consts.pop(target.id, None)
+    return consts
 
 
 def analyze_source(source: str, file_path: Path | None = None) -> list[FunctionAnalysis]:
@@ -2865,6 +2987,9 @@ def analyze_source(source: str, file_path: Path | None = None) -> list[FunctionA
         schema_registry = collect_schemas_with_imports(tree, file_path)
     else:
         schema_registry = collect_schemas(tree)
+
+    # Module-level string(-list) constants for column-spec resolution.
+    module_consts = _collect_module_consts(tree)
 
     # Pass 1: Collect functions, separating module-level from class methods.
     # ``func_to_class`` maps each function node's ``id()`` to the name of
@@ -2915,6 +3040,7 @@ def analyze_source(source: str, file_path: Path | None = None) -> list[FunctionA
             schema_registry,
             class_registry=class_registry,
             current_class_name=func_to_class.get(id(func_node)),
+            module_consts=module_consts,
         )
         if analysis:
             results.append(analysis)
