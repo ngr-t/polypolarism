@@ -3,6 +3,7 @@
 from typing import Any
 
 from polypolarism.types import (
+    Binary,
     Boolean,
     Categorical,
     DataType,
@@ -112,6 +113,9 @@ def infer_lit(value: Any) -> DataType:
         return Float64()
     if isinstance(value, str):
         return Utf8()
+    # Probed (polars 1.41.2): ``pl.lit(b"x")`` is a Binary literal.
+    if isinstance(value, bytes):
+        return Binary()
     # For unsupported types, we could raise an error or return a generic type
     raise TypeError(f"Unsupported literal type: {type(value).__name__}")
 

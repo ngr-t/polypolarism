@@ -12,7 +12,8 @@ recognizes:
   ``EAGER_ONLY_METHODS`` — frame method classification.
 - ``STR_NAMESPACE_RETURN`` / ``DT_NAMESPACE_RETURN`` /
   ``DT_NAMESPACE_PRESERVING`` / ``LIST_NAMESPACE_PRESERVING`` /
-  ``LIST_NAMESPACE_ELEMENT_RETURN`` — sub-namespace return tables.
+  ``LIST_NAMESPACE_ELEMENT_RETURN`` / ``BIN_NAMESPACE_RETURN`` —
+  sub-namespace return tables.
 - ``JOIN_HOW_VALUES`` / ``JOIN_HOW_INFERRED`` and the
   ``join_left_nullable`` / ``join_right_nullable`` predicates.
 - ``agg_function_for(name)`` / ``AGG_SHORTHAND_NAMES`` — polars-side
@@ -432,6 +433,20 @@ LIST_NAMESPACE_ELEMENT_RETURN: frozenset[str] = frozenset(
         "median",
     }
 )
+
+# ``pl.col("b").bin.<method>(...)`` return types (issue #51). Probed on
+# polars 1.41.2: ``encode("hex"/"base64")`` -> String, ``decode`` ->
+# Binary, ``size()`` -> UInt32, the predicates -> Boolean. Unlisted
+# methods (e.g. ``reinterpret``, whose dtype is argument-dependent) fall
+# through to Unknown as usual.
+BIN_NAMESPACE_RETURN: dict[str, DataType] = {
+    "encode": Utf8(),
+    "decode": Binary(),
+    "size": UInt32(),
+    "contains": Boolean(),
+    "starts_with": Boolean(),
+    "ends_with": Boolean(),
+}
 
 
 def canonicalize_method(name: str) -> str:

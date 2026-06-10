@@ -2445,3 +2445,66 @@ class TestIssue50TzMixingEndToEnd:
         result = check_source(source)[0]
         assert result.passed is False
         assert any(isinstance(e, TypeDifference) for e in result.errors), result.errors
+
+
+class TestIssue51BinNamespaceEndToEnd:
+    """Issue #51 repro: ``.bin`` on a non-Binary column flags PLY012;
+    ``.bin.encode("hex")`` on a declared ``pl.Binary`` column passes with
+    the result declared ``str`` (probed: encode -> String)."""
+
+    HEADER = textwrap.dedent(
+        """
+        import polars as pl
+        import pandera.polars as pa
+        from pandera.typing.polars import DataFrame
+        """
+    )
+
+    def test_bin_on_int_fails_with_ply012(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            class In(pa.DataFrameModel):
+                a: int
+
+            class Out(pa.DataFrameModel):
+                hex: str
+
+            def f(df: DataFrame[In]) -> DataFrame[Out]:
+                return df.select(hex=pl.col("a").bin.encode("hex"))
+            """
+        )
+        result = check_source(source)[0]
+        assert result.passed is False
+        assert any("PLY012" in str(e) for e in result.errors), result.errors
+
+    def test_bin_encode_on_binary_declared_str_passes(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            class In(pa.DataFrameModel):
+                payload: pl.Binary
+
+            class Out(pa.DataFrameModel):
+                hex: str
+
+            def f(df: DataFrame[In]) -> DataFrame[Out]:
+                return df.select(hex=pl.col("payload").bin.encode("hex"))
+            """
+        )
+        result = check_source(source)[0]
+        assert result.passed is True, result.errors
+
+    def test_bin_roundtrip_decode_declared_bytes_passes(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            class In(pa.DataFrameModel):
+                hex: str
+
+            class Out(pa.DataFrameModel):
+                payload: bytes
+
+            def f(df: DataFrame[In]) -> DataFrame[Out]:
+                return df.select(payload=pl.col("hex").cast(pl.Binary).bin.decode("hex"))
+            """
+        )
+        result = check_source(source)[0]
+        assert result.passed is True, result.errors

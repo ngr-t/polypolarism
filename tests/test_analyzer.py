@@ -9001,3 +9001,137 @@ class TestTzAwareDtypeOutputs:
             "out = pl.DataFrame({'ts': pl.datetime_range(a, b, eager=True)})",
         )
         assert analyzer.var_types["out"].columns["ts"].dtype == Datetime()
+
+
+class TestBinNamespace:
+    """Issue #51: the ``.bin`` expression namespace.
+
+    Probed (polars 1.41.2):
+    - ``.bin`` on a non-Binary receiver raises SchemaError ("expected
+      `Binary`") for Int64 AND String alike -> PLY012; only Binary passes.
+    - Return dtypes: ``encode("hex"/"base64")`` -> String, ``decode`` ->
+      Binary, ``size()`` -> UInt32, ``contains`` / ``starts_with`` /
+      ``ends_with`` -> Boolean.
+    """
+
+    def _frame(self) -> FrameType:
+        from polypolarism.types import Binary
+
+        return FrameType(
+            {
+                "b": Binary(),
+                "nb": Nullable(Binary()),
+                "i": Int64(),
+                "s": Utf8(),
+                "u": Unknown(),
+            }
+        )
+
+    @pytest.mark.parametrize("col", ["i", "s"])
+    def test_bin_on_non_binary_flags_ply012(self, col: str) -> None:
+        analyzer = _run_body(self._frame(), f"out = df.select(r=pl.col('{col}').bin.size())")
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY012" in analyzer.errors[0]
+        assert "Binary" in analyzer.errors[0]
+        assert analyzer.var_types["out"].columns["r"].dtype == Unknown()
+
+    def test_bin_on_unknown_receiver_stays_silent(self) -> None:
+        analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('u').bin.size())")
+        assert analyzer.errors == [], analyzer.errors
+
+    @pytest.mark.parametrize(
+        ("expr", "expected"),
+        [
+            ("pl.col('b').bin.encode('hex')", Utf8()),
+            ("pl.col('b').bin.encode('base64')", Utf8()),
+            ("pl.col('b').bin.decode('hex')", None),  # placeholder, fixed below
+            ("pl.col('b').bin.size()", UInt32()),
+            ("pl.col('b').bin.contains(b'a')", Boolean()),
+            ("pl.col('b').bin.starts_with(b'a')", Boolean()),
+            ("pl.col('b').bin.ends_with(b'a')", Boolean()),
+        ],
+    )
+    def test_bin_return_dtypes(self, expr: str, expected) -> None:
+        from polypolarism.types import Binary
+
+        if expected is None:
+            expected = Binary()
+        analyzer = _run_body(self._frame(), f"out = df.select(r={expr})")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["r"].dtype == expected
+
+    def test_nullable_receiver_keeps_wrapper(self) -> None:
+        analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('nb').bin.size())")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["r"].dtype == Nullable(UInt32())
+
+    def test_unlisted_method_degrades_to_unknown(self) -> None:
+        # ``bin.reinterpret`` returns an argument-dependent dtype — not
+        # modeled, falls through to Unknown without errors.
+        analyzer = _run_body(
+            self._frame(), "out = df.select(r=pl.col('b').bin.reinterpret(dtype=pl.Int64))"
+        )
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["r"].dtype == Unknown()
+
+    # -- PLY013 cast layer: Binary is outside the understood set — silent ------
+
+    @pytest.mark.parametrize(
+        ("expr", "expected"),
+        [
+            # Probed-valid casts resolve precisely.
+            ("pl.col('s').cast(pl.Binary)", None),  # Utf8 -> Binary, fixed below
+            ("pl.col('i').cast(pl.Binary)", None),
+            ("pl.col('b').cast(pl.String)", Utf8()),
+            # Binary -> Int64 is a probed runtime error in both strict
+            # modes, but Binary is outside the PLY013 category set — it
+            # must stay SILENT (false positives are worse), and the cast
+            # pins the target dtype as usual.
+            ("pl.col('b').cast(pl.Int64)", Int64()),
+            ("pl.col('b').cast(pl.Boolean)", Boolean()),
+        ],
+    )
+    def test_binary_casts_stay_silent(self, expr: str, expected) -> None:
+        from polypolarism.types import Binary
+
+        if expected is None:
+            expected = Binary()
+        analyzer = _run_body(self._frame(), f"out = df.select(r={expr})")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["r"].dtype == expected
+
+
+class TestBytesLiterals:
+    """bytes literals infer Binary (probed: ``pl.lit(b"x")``, frame-literal
+    dict values and ``select`` kwarg broadcasts are all Binary on polars
+    1.41.2)."""
+
+    def test_select_kwarg_bytes_constant(self) -> None:
+        from polypolarism.types import Binary
+
+        analyzer = _run_body(FrameType({"i": Int64()}), "out = df.select(x=b'abc')")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["x"].dtype == Binary()
+
+    def test_pl_lit_bytes(self) -> None:
+        from polypolarism.types import Binary
+
+        analyzer = _run_body(FrameType({"i": Int64()}), "out = df.select(x=pl.lit(b'abc'))")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["x"].dtype == Binary()
+
+    def test_frame_literal_bytes_list(self) -> None:
+        from polypolarism.types import Binary
+
+        analyzer = _run_body(FrameType({}), "out = pl.DataFrame({'b': [b'x', b'y']})")
+        assert analyzer.var_types["out"].columns["b"].dtype == Binary()
+
+    def test_frame_literal_bytes_with_none_is_nullable(self) -> None:
+        from polypolarism.types import Binary
+
+        analyzer = _run_body(FrameType({}), "out = pl.DataFrame({'b': [b'x', None]})")
+        assert analyzer.var_types["out"].columns["b"].dtype == Nullable(Binary())
+
+    def test_frame_literal_bytes_mixed_with_str_is_unknown(self) -> None:
+        analyzer = _run_body(FrameType({}), "out = pl.DataFrame({'b': [b'x', 'y']})")
+        assert analyzer.var_types["out"].columns["b"].dtype == Unknown()

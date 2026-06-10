@@ -10,6 +10,7 @@ from pathlib import Path
 
 from polypolarism.compat.polars_api import (
     AGG_SHORTHAND_NAMES,
+    BIN_NAMESPACE_RETURN,
     DT_NAMESPACE_PRESERVING,
     DT_NAMESPACE_RETURN,
     DTYPE_NAME_MAP,
@@ -94,6 +95,7 @@ from polypolarism.pandera_schema import (
 )
 from polypolarism.types import (
     NUMERIC_DTYPES,
+    Binary,
     Boolean,
     Categorical,
     ColumnSpec,
@@ -241,7 +243,7 @@ def _unify_literal_values(values: list[object]) -> DataType:
         return Unknown()
     unified: DataType | None = None
     for value in values:
-        if value is not None and not isinstance(value, (bool, int, float, str)):
+        if value is not None and not isinstance(value, (bool, int, float, str, bytes)):
             return Unknown()
         elem = infer_lit(value)
         if unified is None:
@@ -310,7 +312,7 @@ def _frame_literal_value_dtype(
             return range_dtype
 
     if isinstance(node, ast.Constant) and (
-        node.value is None or isinstance(node.value, (bool, int, float, str))
+        node.value is None or isinstance(node.value, (bool, int, float, str, bytes))
     ):
         return infer_lit(node.value)
 
@@ -854,6 +856,8 @@ def _nonboolean_predicate_error(
 #   statically indistinguishable here, so ``.arr`` on a true List column
 #   (a runtime error) is deliberately not flagged: false positives are
 #   worse than false negatives.
+# - ``.bin`` rejects every non-Binary dtype (issue #51) — probed: Int64
+#   and String receivers both raise "SchemaError: expected `Binary`".
 # Unknown / unresolved receivers are exempted by the caller.
 _NAMESPACE_VALID_DTYPES: dict[str, tuple[type[DataType], ...]] = {
     "str": (Utf8,),
@@ -861,6 +865,7 @@ _NAMESPACE_VALID_DTYPES: dict[str, tuple[type[DataType], ...]] = {
     "list": (ListT,),
     "arr": (ListT,),
     "struct": (Struct,),
+    "bin": (Binary,),
 }
 
 _NAMESPACE_EXPECTED_DESC: dict[str, str] = {
@@ -869,6 +874,7 @@ _NAMESPACE_EXPECTED_DESC: dict[str, str] = {
     "list": "a List or Array column",
     "arr": "a List or Array column",
     "struct": "a Struct column",
+    "bin": "a Binary column",
 }
 
 
@@ -1699,7 +1705,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
     )
 
     # ---- sub-namespace return type tables ----------------------------------
-    # All five tables are re-exports from compat.polars_api so the polars
+    # All six tables are re-exports from compat.polars_api so the polars
     # surface knowledge stays in one place.
 
     _STR_RETURN = STR_NAMESPACE_RETURN
@@ -1707,6 +1713,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
     _DT_PRESERVING = DT_NAMESPACE_PRESERVING
     _LIST_PRESERVING = LIST_NAMESPACE_PRESERVING
     _LIST_ELEMENT_RETURN = LIST_NAMESPACE_ELEMENT_RETURN
+    _BIN_RETURN = BIN_NAMESPACE_RETURN
 
     def analyze_select_expr(self, node: ast.expr) -> tuple[str | None, DataType | None]:
         """Analyze a select expression, return (output_name, type)."""
@@ -1730,7 +1737,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         # the callers (``_str_constant``) before this method ever sees them.
         # ``infer_lit`` checks bool before int (bool subclasses int).
         if isinstance(inner_node, ast.Constant) and (
-            inner_node.value is None or isinstance(inner_node.value, (bool, int, float, str))
+            inner_node.value is None or isinstance(inner_node.value, (bool, int, float, str, bytes))
         ):
             return alias, infer_lit(inner_node.value)
 
@@ -2069,7 +2076,9 @@ class ExpressionAnalyzer(ast.NodeVisitor):
 
         result: DataType | None = None
 
-        if namespace == "str":
+        if namespace == "bin":
+            result = self._BIN_RETURN.get(method)
+        elif namespace == "str":
             if method == "to_datetime":
                 # The output tz depends on the arguments (issue #50
                 # collateral): default naive, ``time_zone=`` literal sets
@@ -2474,14 +2483,10 @@ class ExpressionAnalyzer(ast.NodeVisitor):
 
         # Sub-namespace: ``pl.col("x").str.contains(...)``,
         # ``pl.col("ts").dt.year()``, ``pl.col("xs").list.get(0)``,
-        # ``pl.col("s").struct.field("name")`` etc.
-        if isinstance(receiver, ast.Attribute) and receiver.attr in (
-            "str",
-            "dt",
-            "list",
-            "arr",
-            "struct",
-        ):
+        # ``pl.col("s").struct.field("name")``, ``pl.col("b").bin.size()``
+        # etc. — the recognised accessor names are exactly the keys of the
+        # receiver-validity table.
+        if isinstance(receiver, ast.Attribute) and receiver.attr in _NAMESPACE_VALID_DTYPES:
             ns = receiver.attr
             col_name, col_type = self.analyze_select_expr(receiver.value)
             # Receiver-dtype validation (issue #31): a known dtype outside
@@ -2830,24 +2835,14 @@ class ExpressionAnalyzer(ast.NodeVisitor):
 
     def _extract_lit_type(self, node: ast.expr) -> DataType | None:
         """Extract type from pl.lit(value) expression."""
-        from polypolarism.types import Boolean, Float64, Int64, Null, Utf8
-
         if isinstance(node, ast.Call):
             if isinstance(node.func, ast.Attribute):
                 if node.func.attr == "lit":
                     if isinstance(node.func.value, ast.Name) and node.func.value.id == "pl":
                         if node.args and isinstance(node.args[0], ast.Constant):
                             value = node.args[0].value
-                            if value is None:
-                                return Null()
-                            elif isinstance(value, bool):
-                                return Boolean()
-                            elif isinstance(value, int):
-                                return Int64()
-                            elif isinstance(value, float):
-                                return Float64()
-                            elif isinstance(value, str):
-                                return Utf8()
+                            if value is None or isinstance(value, (bool, int, float, str, bytes)):
+                                return infer_lit(value)
         return None
 
 

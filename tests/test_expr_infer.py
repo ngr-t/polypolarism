@@ -114,6 +114,13 @@ class TestInferLit:
         result = infer_lit("hello")
         assert result == Utf8()
 
+    def test_lit_bytes_returns_binary(self) -> None:
+        """Probed (polars 1.41.2): ``pl.lit(b"x")`` is a Binary literal."""
+        from polypolarism.types import Binary
+
+        result = infer_lit(b"x")
+        assert result == Binary()
+
     def test_lit_bool_returns_boolean(self) -> None:
         """pl.lit(True) should infer Boolean."""
         result = infer_lit(True)
