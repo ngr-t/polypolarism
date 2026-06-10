@@ -14,6 +14,7 @@ from polypolarism.types import (
     Boolean,
     Date,
     Datetime,
+    Decimal,
     Float64,
     FrameType,
     Int8,
@@ -23,6 +24,7 @@ from polypolarism.types import (
     Null,
     Nullable,
     RowVar,
+    Time,
     UInt32,
     Unknown,
     Utf8,
@@ -1305,6 +1307,11 @@ class TestM3StrNamespace:
             ('pl.col("name").str.split(",")', ListT(Utf8())),
             ('pl.col("name").str.to_date()', Date()),
             ('pl.col("name").str.to_datetime()', Datetime()),
+            # Issue #19 — parse helpers
+            ('pl.col("name").str.to_integer()', Int64()),
+            ('pl.col("name").str.to_integer(base=10)', Int64()),
+            ('pl.col("name").str.to_decimal()', Decimal(38, 0)),
+            ('pl.col("name").str.to_time()', Time()),
         ],
     )
     def test_str_method_return_type(self, expr: str, expected_type):
@@ -1323,6 +1330,24 @@ class TestM3StrNamespace:
         ft = results[0].inferred_return_type
         assert ft is not None
         assert ft.columns["out"].dtype == expected_type, expr
+
+    def test_str_to_integer_wraps_nullable_receiver(self):
+        """Issue #19 — a Nullable receiver wraps the parse result in Nullable."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                name: str = pa.Field(nullable=True)
+
+            def f(data: DataFrame[S]):
+                return data.select(pl.col("name").str.to_integer().alias("out"))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["out"].dtype == Nullable(Int64())
 
     def test_str_method_on_missing_column_errors(self):
         source = textwrap.dedent(

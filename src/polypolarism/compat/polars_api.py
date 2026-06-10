@@ -50,6 +50,7 @@ from polypolarism.types import (
     Int64,
     Int128,
     Null,
+    Time,
     UInt8,
     UInt16,
     UInt32,
@@ -119,6 +120,7 @@ DTYPE_NAME_MAP: dict[str, DataType] = {
     "String": Utf8(),
     "Boolean": Boolean(),
     "Date": Date(),
+    "Time": Time(),
     "Datetime": Datetime(),
     "Duration": Duration(),
     "Categorical": Categorical(),
@@ -246,6 +248,10 @@ STR_NAMESPACE_RETURN: dict[str, DataType] = {
     # Parsing into temporal types
     "to_date": Date(),
     "to_datetime": Datetime(),
+    "to_time": Time(),
+    # Parsing into numeric types (issue #19)
+    "to_integer": Int64(),
+    "to_decimal": DECIMAL_DEFAULT,
 }
 
 

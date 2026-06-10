@@ -761,6 +761,50 @@ class TestIssue18NullabilityEndToEnd:
         assert result.passed is True, result.errors
 
 
+class TestIssue19StrToIntegerEndToEnd:
+    """Issue #19: ``str.to_integer()`` infers Int64, not Unknown.
+
+    The Unknown fallback used to mask real dtype mismatches — declaring
+    the parsed column ``str`` was silently accepted. With the precise
+    inference it must now be a TypeDifference (no ``coerce`` here).
+    """
+
+    SOURCE_TEMPLATE = """
+        import polars as pl
+        import pandera.polars as pa
+        from pandera.typing.polars import DataFrame
+
+        class In(pa.DataFrameModel):
+            s: str
+
+        class Out(pa.DataFrameModel):
+            n: {declared}
+
+        def f(df: DataFrame[In]) -> DataFrame[Out]:
+            return df.select(n=pl.col("s").str.to_integer())
+    """
+
+    def _check(self, declared: str):
+        source = textwrap.dedent(self.SOURCE_TEMPLATE.format(declared=declared))
+        return check_source(source)[0]
+
+    def test_to_integer_declared_int_passes(self):
+        result = self._check("int")
+        assert result.passed is True, result.errors
+
+    def test_to_integer_declared_str_fails(self):
+        """The killed false negative: Unknown used to accept any declaration."""
+        result = self._check("str")
+        assert result.passed is False
+        assert any(
+            isinstance(e, TypeDifference)
+            and e.column == "n"
+            and e.declared == Utf8()
+            and e.inferred == Int64()
+            for e in result.errors
+        )
+
+
 class TestSemiAntiGatherEndToEnd:
     """Issue #15 repro: semi/anti joins and gather_every are schema-preserving."""
 
