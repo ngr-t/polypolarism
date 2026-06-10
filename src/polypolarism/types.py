@@ -205,6 +205,31 @@ class Float64(DataType):
         return "Float64"
 
 
+# Complete set of numeric dtype classes: every signed/unsigned integer
+# width plus the float widths. Pandera ``coerce=True`` can cast any of
+# these into any other at validation time, so the coercion-compatibility
+# check (``checker._is_coercible_difference``) treats differences within
+# this set as non-errors. Membership is checked via ``type(dtype)`` —
+# these classes are leaf dataclasses with no subclasses.
+NUMERIC_DTYPES: frozenset[type[DataType]] = frozenset(
+    {
+        Int8,
+        Int16,
+        Int32,
+        Int64,
+        Int128,
+        UInt8,
+        UInt16,
+        UInt32,
+        UInt64,
+        UInt128,
+        Float16,
+        Float32,
+        Float64,
+    }
+)
+
+
 @dataclass(frozen=True)
 class Utf8(DataType):
     """UTF-8 string."""
@@ -447,12 +472,20 @@ class FrameType:
     keep working — laziness is enforced explicitly in the function-call
     argument check, the declared-vs-inferred return-type check, and the
     eager-only / lazy-only method dispatch.
+
+    ``coerce`` mirrors Pandera's ``class Config: coerce = True``: at
+    validation time pandera casts coercible dtypes instead of rejecting
+    them. Like ``is_lazy`` it is excluded from ``__eq__`` for the same
+    reason — coercion is consulted explicitly in the declared-vs-inferred
+    dtype check (``checker.py``) and the function-argument check
+    (``analyzer._is_frame_subtype``).
     """
 
     columns: dict[str, ColumnSpec]
     strict: bool
     rest: RowVar | None  # For future row polymorphism extension
     is_lazy: bool
+    coerce: bool
 
     def __init__(
         self,
@@ -460,6 +493,7 @@ class FrameType:
         strict: bool = False,
         rest: RowVar | None = None,
         is_lazy: bool = False,
+        coerce: bool = False,
     ) -> None:
         normalized: dict[str, ColumnSpec] = {}
         if columns:
@@ -477,6 +511,7 @@ class FrameType:
         self.strict = strict
         self.rest = rest
         self.is_lazy = is_lazy
+        self.coerce = coerce
 
     def has_column(self, name: str) -> bool:
         """Check if a column exists."""

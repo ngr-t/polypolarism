@@ -68,6 +68,7 @@ def extract_dataframe_annotation(
         strict=base.strict,
         rest=base.rest,
         is_lazy=(head_name == "LazyFrame"),
+        coerce=base.coerce,
     )
 
 

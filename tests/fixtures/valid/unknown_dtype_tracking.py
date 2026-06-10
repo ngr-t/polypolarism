@@ -36,7 +36,10 @@ def interpolate_with_cast(df: DataFrame[In]) -> DataFrame[WithFlags]:
 
 class Monthly(pa.DataFrameModel):
     ym: str
-    n: int
+    n: int  # pl.len() yields UInt32; coerce casts it to Int64 at runtime
+
+    class Config:
+        coerce = True
 
 
 def monthly_counts(df: DataFrame[In]) -> DataFrame[Monthly]:

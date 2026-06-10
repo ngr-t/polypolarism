@@ -84,3 +84,6 @@ Thumbs.db
 
 # Claude Code local settings — user/machine-specific, never commit
 .claude/settings.local.json
+
+# Claude Code agent worktrees — transient, never commit
+.claude/worktrees/

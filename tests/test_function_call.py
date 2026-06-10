@@ -4,7 +4,13 @@ import ast
 import textwrap
 from typing import cast
 
-from polypolarism.analyzer import FunctionInfo, FunctionRegistry, analyze_source
+from polypolarism.analyzer import (
+    FunctionInfo,
+    FunctionRegistry,
+    _is_frame_subtype,
+    analyze_source,
+)
+from polypolarism.types import FrameType, Int64, Nullable, UInt32, Utf8
 
 _DUMMY_FUNCTION_NODE = cast(ast.FunctionDef, None)
 
@@ -272,6 +278,86 @@ class TestArgumentTypeCheck:
         assert caller_analysis.has_errors
         assert any("name" in err.lower() for err in caller_analysis.errors)
 
+    def test_coercible_mismatch_tolerated_when_callee_coerces(self):
+        """UInt32 arg satisfies an Int64 parameter when the schema coerces.
+
+        ``pa.check_types`` coerces input frames at call time, so the same
+        relaxation as the return-type check applies in argument position.
+        """
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class UIntSchema(pa.DataFrameModel):
+                n: pl.UInt32
+
+            class IntSchema(pa.DataFrameModel):
+                n: int
+
+                class Config:
+                    coerce = True
+
+            def expects_int(df: DataFrame[IntSchema]) -> DataFrame[IntSchema]:
+                return df
+
+            def caller(data: DataFrame[UIntSchema]) -> DataFrame[IntSchema]:
+                return expects_int(data)
+        """
+        )
+        results = analyze_source(source)
+
+        caller_analysis = next(r for r in results if r.name == "caller")
+        assert not caller_analysis.has_errors
+
+    def test_coercible_mismatch_errors_without_coerce(self):
+        """Without coerce, UInt32 vs Int64 in argument position still errors."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class UIntSchema(pa.DataFrameModel):
+                n: pl.UInt32
+
+            class IntSchema(pa.DataFrameModel):
+                n: int
+
+            def expects_int(df: DataFrame[IntSchema]) -> DataFrame[IntSchema]:
+                return df
+
+            def caller(data: DataFrame[UIntSchema]) -> DataFrame[IntSchema]:
+                return expects_int(data)
+        """
+        )
+        results = analyze_source(source)
+
+        caller_analysis = next(r for r in results if r.name == "caller")
+        assert caller_analysis.has_errors
+        assert any("n" in err and "type" in err.lower() for err in caller_analysis.errors)
+
+    def test_nullable_mismatch_errors_even_with_coerce(self):
+        """Coercion does not remove nulls — nullable arg still errors."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class WithNull(pa.DataFrameModel):
+                n: pl.UInt32 = pa.Field(nullable=True)
+
+            class IntSchema(pa.DataFrameModel):
+                n: int
+
+                class Config:
+                    coerce = True
+
+            def expects_int(df: DataFrame[IntSchema]) -> DataFrame[IntSchema]:
+                return df
+
+            def caller(data: DataFrame[WithNull]) -> DataFrame[IntSchema]:
+                return expects_int(data)
+        """
+        )
+        results = analyze_source(source)
+
+        caller_analysis = next(r for r in results if r.name == "caller")
+        assert caller_analysis.has_errors
+
     def test_type_mismatch_error(self):
         """Error when argument column has wrong type."""
         source = textwrap.dedent(
@@ -318,3 +404,32 @@ class TestArgumentTypeCheck:
 
         caller_analysis = next(r for r in results if r.name == "caller")
         assert caller_analysis.has_errors
+
+
+class TestFrameSubtypeCoerce:
+    """Direct tests of _is_frame_subtype's coercion relaxation."""
+
+    def test_coercible_difference_passes_when_expected_coerces(self):
+        actual = FrameType({"n": UInt32()})
+        expected = FrameType({"n": Int64()}, coerce=True)
+        assert _is_frame_subtype(actual, expected) is True
+
+    def test_coercible_difference_fails_without_coerce(self):
+        actual = FrameType({"n": UInt32()})
+        expected = FrameType({"n": Int64()})
+        assert _is_frame_subtype(actual, expected) is False
+
+    def test_non_numeric_difference_fails_even_with_coerce(self):
+        actual = FrameType({"n": Utf8()})
+        expected = FrameType({"n": Int64()}, coerce=True)
+        assert _is_frame_subtype(actual, expected) is False
+
+    def test_nullable_actual_fails_even_with_coerce(self):
+        actual = FrameType({"n": Nullable(UInt32())})
+        expected = FrameType({"n": Int64()}, coerce=True)
+        assert _is_frame_subtype(actual, expected) is False
+
+    def test_coerce_does_not_excuse_missing_column(self):
+        actual = FrameType({})
+        expected = FrameType({"n": Int64()}, coerce=True)
+        assert _is_frame_subtype(actual, expected) is False

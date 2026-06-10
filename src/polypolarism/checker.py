@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from polypolarism.analyzer import FunctionAnalysis, analyze_source
-from polypolarism.types import DataType, Nullable, Unknown
+from polypolarism.types import NUMERIC_DTYPES, DataType, Nullable, Unknown
 
 
 class TypeMismatch:
@@ -121,6 +121,24 @@ def _is_subtype(inferred: DataType, declared: DataType) -> bool:
     return False
 
 
+def _is_coercible_difference(inferred: DataType, declared: DataType) -> bool:
+    """True when Pandera ``coerce=True`` would resolve this dtype difference.
+
+    Coercion casts values between numeric dtypes, so both bases must be
+    numeric — non-numeric mismatches (e.g. Utf8 vs Int64) still error
+    under coerce. It does not remove nulls: a ``Nullable`` inferred side
+    can only coerce into a ``Nullable`` declared side.
+
+    Reused by ``analyzer._is_frame_subtype`` for the function-argument
+    position (``pa.check_types`` coerces input frames too).
+    """
+    if isinstance(inferred, Nullable) and not isinstance(declared, Nullable):
+        return False
+    inferred_base = _get_base_type(inferred)
+    declared_base = _get_base_type(declared)
+    return type(inferred_base) in NUMERIC_DTYPES and type(declared_base) in NUMERIC_DTYPES
+
+
 def check_function(analysis: FunctionAnalysis) -> CheckResult:
     """
     Check a single function's declared return type against its inferred return type.
@@ -184,6 +202,12 @@ def check_function(analysis: FunctionAnalysis) -> CheckResult:
             errors.append(MissingColumn(col_name, declared_spec.dtype))
             continue
         if not _is_subtype(inferred_spec.dtype, declared_spec.dtype):
+            # Pandera ``Config.coerce`` casts coercible dtypes at
+            # validation time — those differences are not errors.
+            if declared.coerce and _is_coercible_difference(
+                inferred_spec.dtype, declared_spec.dtype
+            ):
+                continue
             errors.append(TypeDifference(col_name, declared_spec.dtype, inferred_spec.dtype))
 
     # Extra columns (only flagged for strict declared schemas)

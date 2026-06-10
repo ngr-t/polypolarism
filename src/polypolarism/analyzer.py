@@ -523,8 +523,15 @@ def _is_frame_subtype(actual: FrameType, expected: FrameType) -> bool:
       extra columns may satisfy the requirement
     - For columns present on both sides, the actual dtype must be a subtype
       and an actual optional column cannot satisfy a required expected column
+    - When ``expected.coerce`` is True (Pandera ``Config.coerce``),
+      coercible numeric dtype differences are tolerated — ``pa.check_types``
+      coerces input frames at call time
     - actual may have extra columns unless ``expected.strict`` is True
     """
+    # Deferred import: checker imports analyzer at module level, so a
+    # top-level import here would create a cycle.
+    from polypolarism.checker import _is_coercible_difference
+
     for col_name, expected_spec in expected.columns.items():
         actual_spec = actual.columns.get(col_name)
         if actual_spec is None:
@@ -534,6 +541,8 @@ def _is_frame_subtype(actual: FrameType, expected: FrameType) -> bool:
         if expected_spec.required and not actual_spec.required:
             return False
         if not _is_column_subtype(actual_spec.dtype, expected_spec.dtype):
+            if expected.coerce and _is_coercible_difference(actual_spec.dtype, expected_spec.dtype):
+                continue
             return False
     if expected.strict:
         for col_name in actual.columns:
@@ -630,6 +639,26 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 ):
                     alias = node.args[0].value
                     agg_node = node.func.value
+
+        # Zero-arg ``pl.len()`` / ``pl.count()`` — group-size aggregations
+        # that take no input column. polars returns its IDX dtype (UInt32)
+        # and defaults the output column name to the function name. Uses
+        # the pre-resolved-dtype AggExpr form; the kwarg path in
+        # ``_infer_agg_call`` overwrites ``alias`` with the kwarg name.
+        if (
+            isinstance(agg_node, ast.Call)
+            and isinstance(agg_node.func, ast.Attribute)
+            and agg_node.func.attr in ("len", "count")
+            and isinstance(agg_node.func.value, ast.Name)
+            and agg_node.func.value.id == "pl"
+            and not agg_node.args
+        ):
+            return AggExpr(
+                column=alias or agg_node.func.attr,
+                function=None,
+                alias=alias,
+                dtype=UInt32(),
+            )
 
         # Now look for the aggregation function call
         if isinstance(agg_node, ast.Call):
@@ -883,6 +912,11 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             return None
         name = node.func.attr
 
+        # Zero-arg ``pl.len()`` — row count, polars' IDX dtype (UInt32).
+        # The default output column name is "len".
+        if name == "len" and not node.args:
+            return "len", UInt32()
+
         if name == "concat_str" or name == "format":
             for arg in node.args:
                 self._validate_subexpr(arg)
@@ -1097,6 +1131,27 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             if isinstance(receiver_type, Nullable):
                 return receiver_name, Nullable(Float64())
             return receiver_name, Float64()
+
+        # ``rank(method=...)`` — the ranking method decides the dtype: the
+        # default "average" returns Float64; the count-based methods return
+        # polars' IDX dtype (UInt32). The receiver's Nullable wrapper is
+        # preserved on the result.
+        if method == "rank" and receiver_type is not None:
+            rank_method = "average"
+            if node.args:
+                cand = _str_constant(node.args[0])
+                if cand is not None:
+                    rank_method = cand
+            for kw in node.keywords:
+                if kw.arg == "method":
+                    cand = _str_constant(kw.value)
+                    if cand is not None:
+                        rank_method = cand
+            if rank_method == "average":
+                return receiver_name, _wrap_like(receiver_type, Float64())
+            if rank_method in ("min", "max", "dense", "ordinal", "random"):
+                return receiver_name, _wrap_like(receiver_type, UInt32())
+            return None
 
         # ``pl.col("x").map_elements(fn, return_dtype=pl.Float64)`` /
         # ``map_batches(fn, return_dtype=...)``. The return type is what the
@@ -1801,6 +1856,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                         )
                     )
                 if not _is_frame_subtype(arg_type, expected_type):
+                    # Deferred import — see _is_frame_subtype.
+                    from polypolarism.checker import _is_coercible_difference
+
                     # Generate detailed error
                     for col_name, expected_col_spec in expected_type.columns.items():
                         if col_name not in arg_type.columns:
@@ -1810,11 +1868,18 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                         else:
                             actual_col_dtype = arg_type.columns[col_name].dtype
                             expected_col_dtype = expected_col_spec.dtype
-                            if not _is_column_subtype(actual_col_dtype, expected_col_dtype):
-                                self.errors.append(
-                                    f"Argument '{param_name}' column '{col_name}' has type "
-                                    f"{actual_col_dtype} but expected {expected_col_dtype}"
-                                )
+                            if _is_column_subtype(actual_col_dtype, expected_col_dtype):
+                                continue
+                            # Mirror _is_frame_subtype: coercible dtype
+                            # differences are not errors under coerce.
+                            if expected_type.coerce and _is_coercible_difference(
+                                actual_col_dtype, expected_col_dtype
+                            ):
+                                continue
+                            self.errors.append(
+                                f"Argument '{param_name}' column '{col_name}' has type "
+                                f"{actual_col_dtype} but expected {expected_col_dtype}"
+                            )
             return sig.return_type
 
         # Untyped function - analyze body with propagated argument types

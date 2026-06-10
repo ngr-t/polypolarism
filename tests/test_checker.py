@@ -7,6 +7,7 @@ from polypolarism.checker import (
     ExtraColumn,
     MissingColumn,
     TypeDifference,
+    _is_coercible_difference,
     check_function,
     check_source,
 )
@@ -16,6 +17,7 @@ from polypolarism.types import (
     Int64,
     Nullable,
     RowVar,
+    UInt32,
     Unknown,
     Utf8,
 )
@@ -315,6 +317,86 @@ class TestOpenFrameChecking:
         assert any(isinstance(e, TypeDifference) for e in result.errors)
 
 
+class TestIsCoercibleDifference:
+    """Unit tests for the coercion-compatibility helper."""
+
+    def test_numeric_to_numeric_is_coercible(self):
+        assert _is_coercible_difference(UInt32(), Int64()) is True
+
+    def test_float_to_int_is_coercible(self):
+        assert _is_coercible_difference(Float64(), Int64()) is True
+
+    def test_non_numeric_is_not_coercible(self):
+        assert _is_coercible_difference(Utf8(), Int64()) is False
+        assert _is_coercible_difference(Int64(), Utf8()) is False
+
+    def test_nullable_inferred_to_non_nullable_declared_is_not_coercible(self):
+        # Coercion casts values; it does not remove nulls.
+        assert _is_coercible_difference(Nullable(UInt32()), Int64()) is False
+
+    def test_nullable_inferred_to_nullable_declared_is_coercible(self):
+        assert _is_coercible_difference(Nullable(UInt32()), Nullable(Int64())) is True
+
+    def test_non_nullable_inferred_to_nullable_declared_is_coercible(self):
+        assert _is_coercible_difference(UInt32(), Nullable(Int64())) is True
+
+
+class TestCheckCoerce:
+    """Config.coerce relaxes coercible dtype differences (issue #9)."""
+
+    @staticmethod
+    def _analysis(inferred_dtype, declared_dtype, coerce: bool) -> FunctionAnalysis:
+        return FunctionAnalysis(
+            name="process",
+            lineno=1,
+            end_lineno=1,
+            input_types={},
+            declared_return_type=FrameType({"n": declared_dtype}, coerce=coerce),
+            inferred_return_type=FrameType({"n": inferred_dtype}),
+            errors=[],
+        )
+
+    def test_uint32_vs_int64_passes_with_coerce(self):
+        result = check_function(self._analysis(UInt32(), Int64(), coerce=True))
+        assert result.passed is True
+        assert result.errors == []
+
+    def test_uint32_vs_int64_fails_without_coerce(self):
+        result = check_function(self._analysis(UInt32(), Int64(), coerce=False))
+        assert result.passed is False
+        assert any(isinstance(e, TypeDifference) for e in result.errors)
+
+    def test_nullable_mismatch_still_fails_with_coerce(self):
+        # Coercion does not remove nulls — Nullable inferred vs required
+        # non-nullable declared must still error.
+        result = check_function(self._analysis(Nullable(UInt32()), Int64(), coerce=True))
+        assert result.passed is False
+        assert any(isinstance(e, TypeDifference) for e in result.errors)
+
+    def test_nullable_both_sides_passes_with_coerce(self):
+        result = check_function(self._analysis(Nullable(UInt32()), Nullable(Int64()), coerce=True))
+        assert result.passed is True
+
+    def test_non_numeric_mismatch_still_fails_with_coerce(self):
+        result = check_function(self._analysis(Utf8(), Int64(), coerce=True))
+        assert result.passed is False
+        assert any(isinstance(e, TypeDifference) for e in result.errors)
+
+    def test_coerce_does_not_excuse_missing_column(self):
+        analysis = FunctionAnalysis(
+            name="process",
+            lineno=1,
+            end_lineno=1,
+            input_types={},
+            declared_return_type=FrameType({"n": Int64()}, coerce=True),
+            inferred_return_type=FrameType({}),
+            errors=[],
+        )
+        result = check_function(analysis)
+        assert result.passed is False
+        assert any(isinstance(e, MissingColumn) for e in result.errors)
+
+
 class TestCheckSource:
     """Test source code checking."""
 
@@ -390,6 +472,93 @@ class TestCheckSource:
             ) -> DataFrame[Out]:
                 return left.join(right, on="id", how="inner")
         """)
+
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is True
+
+
+class TestCoerceEndToEnd:
+    """Issue #9 repro: pl.len() (UInt32) vs declared int under Config.coerce."""
+
+    REPRO_TEMPLATE = """
+        import polars as pl
+        import pandera.polars as pa
+        from pandera.typing.polars import DataFrame
+
+        class In(pa.DataFrameModel):
+            g: str
+            v: int
+        {in_config}
+
+        class Out(pa.DataFrameModel):
+            g: str
+            n: int
+        {out_config}
+
+        def agg(df: DataFrame[In]) -> DataFrame[Out]:
+            return df.group_by("g").agg(n=pl.len())
+    """
+
+    COERCE_CONFIG = """
+            class Config:
+                coerce = True
+    """
+
+    def test_pl_len_vs_declared_int_passes_with_coerce(self):
+        """The issue #9 repro validates fine at runtime — and now statically."""
+        source = textwrap.dedent(
+            self.REPRO_TEMPLATE.format(in_config=self.COERCE_CONFIG, out_config=self.COERCE_CONFIG)
+        )
+
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is True
+        assert results[0].errors == []
+
+    def test_pl_len_vs_declared_int_is_type_difference_without_coerce(self):
+        """Regression: a present-but-mismatched column must be reported as a
+        TypeDifference, not the misleading "Missing column"."""
+        source = textwrap.dedent(self.REPRO_TEMPLATE.format(in_config="", out_config=""))
+
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is False
+        assert any(
+            isinstance(e, TypeDifference)
+            and e.column == "n"
+            and e.inferred == UInt32()
+            and e.declared == Int64()
+            for e in results[0].errors
+        )
+        assert not any(isinstance(e, MissingColumn) for e in results[0].errors)
+
+    def test_n_unique_vs_declared_int_passes_with_coerce(self):
+        """Issue #9 sub-bug 2: an inferred UInt32 column under coerce."""
+        source = textwrap.dedent(
+            """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+
+            class In(pa.DataFrameModel):
+                g: str
+                v: int
+
+            class Out(pa.DataFrameModel):
+                g: str
+                n: int
+
+                class Config:
+                    coerce = True
+
+            def agg(df: DataFrame[In]) -> DataFrame[Out]:
+                return df.group_by("g").agg(n=pl.col("v").n_unique())
+        """
+        )
 
         results = check_source(source)
 
