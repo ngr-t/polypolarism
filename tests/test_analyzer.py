@@ -6084,6 +6084,7 @@ class TestFrameLiteralInference:
 
     def test_int_list_literal(self):
         ft = self._infer('pl.DataFrame({"a": [1, 2, 3]})')
+        assert ft is not None
         assert ft == FrameType({"a": Int64()})
         assert ft.is_lazy is False
 
@@ -6164,11 +6165,13 @@ class TestFrameLiteralInference:
 
     def test_lazyframe_literal_is_lazy(self):
         ft = self._infer('pl.LazyFrame({"a": [1]})')
+        assert ft is not None
         assert ft == FrameType({"a": Int64()})
         assert ft.is_lazy is True
 
     def test_literal_frame_is_closed_and_non_strict(self):
         ft = self._infer('pl.DataFrame({"a": [1]})')
+        assert ft is not None
         assert ft.rest is None
         assert ft.strict is False
 
@@ -6178,6 +6181,7 @@ class TestFrameLiteralInference:
 
     def test_lazy_literal_collect_is_eager(self):
         ft = self._infer('pl.LazyFrame({"a": [1]}).collect()')
+        assert ft is not None
         assert ft == FrameType({"a": Int64()})
         assert ft.is_lazy is False
 
