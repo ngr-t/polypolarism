@@ -9,6 +9,7 @@ from polypolarism.expr_infer import (
     infer_cast,
     infer_col,
     infer_lit,
+    infer_shift_fill,
     promote_types,
     supertype,
     unify_types,
@@ -513,3 +514,107 @@ class TestSupertype:
         assert supertype(Datetime("UTC"), Datetime("UTC")) == Datetime("UTC")
         assert supertype(Decimal(10, 2), Decimal(10, 2)) == Decimal(10, 2)
         assert supertype(Struct({"f": Int64()}), Struct({"f": Int64()})) == Struct({"f": Int64()})
+
+
+class TestInferShiftFill:
+    """Probed dtype rules for ``Expr.shift(n, fill_value=...)`` (issue #43).
+
+    Ground truth (polars 1.41.2): with a fill the shifted-in slots are
+    plugged, so a non-nullable receiver stays non-nullable while original
+    nulls keep flowing (``[1, None, 3].shift(1, fill_value=0)`` ->
+    ``[0, 1, None]``). Expression fills follow the supertype matrix exactly
+    (probed via ``fill_value=pl.col(...).first()``); *literal* fills are
+    lenient — polars casts the literal INTO the receiver dtype whenever it
+    can hold it::
+
+        shift(Int64,   fill=0)      -> Int64      shift(Date,  fill=5)   -> Date
+        shift(Float32, fill=5)      -> Float32    shift(Time,  fill=7)   -> Time
+        shift(Int64,   fill="x")    -> String     shift(Date,  fill="x") -> String
+        shift(Int32,   fill=5.5)    -> Float64    shift(Date,  fill=5.5) -> Date
+        shift(Int64,   fill=True)   -> Int64      shift(Utf8,  fill=5)   -> String
+        shift(Bool,    fill=5)      -> Int32      shift(Categorical, fill="z") -> Categorical
+    """
+
+    # ---- literal fills -------------------------------------------------------
+
+    @pytest.mark.parametrize(
+        ("receiver", "fill", "expected"),
+        [
+            # int literal coerces into the receiver
+            (Int64(), Int64(), Int64()),
+            (Int32(), Int64(), Int32()),
+            (Float32(), Int64(), Float32()),
+            (Date(), Int64(), Date()),
+            (Datetime(), Int64(), Datetime()),
+            (Time(), Int64(), Time()),
+            (Duration(), Int64(), Duration()),
+            (Utf8(), Int64(), Utf8()),
+            # ... except a Boolean receiver, which widens (probed Int32 at
+            # runtime; polypolarism models int literals as Int64 throughout)
+            (Boolean(), Int64(), Int64()),
+            # bool literal coerces into the receiver (probed: Int64 receiver
+            # gives [1, ...], Utf8 receiver gives ['true', ...])
+            (Boolean(), Boolean(), Boolean()),
+            (Int64(), Boolean(), Int64()),
+            (Utf8(), Boolean(), Utf8()),
+            # float literal: ints/Decimal promote to Float64 (probed); float
+            # and lenient receivers keep their dtype
+            (Float32(), Float64(), Float32()),
+            (Float64(), Float64(), Float64()),
+            (Int32(), Float64(), Float64()),
+            (Int64(), Float64(), Float64()),
+            (Decimal(10, 2), Float64(), Float64()),
+            (Date(), Float64(), Date()),
+            (Utf8(), Float64(), Utf8()),
+            # str literal: string-family receivers absorb it; everything else
+            # follows the supertype matrix (Int64 -> String, Date -> String)
+            (Utf8(), Utf8(), Utf8()),
+            (Categorical(), Utf8(), Categorical()),
+            (Enum(), Utf8(), Enum()),
+            (Int64(), Utf8(), Utf8()),
+            (Date(), Utf8(), Utf8()),
+            # ... and where even the matrix has no supertype, keep the
+            # receiver dtype (silent; polars errors at runtime)
+            (Duration(), Utf8(), Duration()),
+        ],
+    )
+    def test_literal_fill_dtypes(
+        self, receiver: DataType, fill: DataType, expected: DataType
+    ) -> None:
+        assert infer_shift_fill(receiver, fill, fill_is_literal=True) == expected
+
+    # ---- expression fills follow the supertype matrix ------------------------
+
+    def test_expression_fill_follows_supertype(self) -> None:
+        assert infer_shift_fill(Int64(), Utf8(), fill_is_literal=False) == Utf8()
+        assert infer_shift_fill(Date(), Int64(), fill_is_literal=False) == Int64()
+        assert infer_shift_fill(Boolean(), Int64(), fill_is_literal=False) == Int64()
+
+    def test_expression_fill_without_supertype_keeps_receiver(self) -> None:
+        assert infer_shift_fill(Int64(), List(Int64()), fill_is_literal=False) == Int64()
+
+    def test_expression_fill_unknown_supertype_stays_unknown(self) -> None:
+        # Struct mixes are deliberately Unknown in the supertype relation.
+        assert infer_shift_fill(Struct({"f": Int64()}), Int64(), fill_is_literal=False) == Unknown()
+
+    # ---- nullability ----------------------------------------------------------
+
+    def test_nullable_receiver_stays_nullable(self) -> None:
+        # Probed: [1, None, 3].shift(1, fill_value=0) -> [0, 1, None].
+        assert infer_shift_fill(Nullable(Int64()), Int64(), fill_is_literal=True) == Nullable(
+            Int64()
+        )
+
+    def test_non_nullable_receiver_stays_non_nullable(self) -> None:
+        assert infer_shift_fill(Int64(), Int64(), fill_is_literal=True) == Int64()
+
+    def test_nullable_expression_fill_makes_result_nullable(self) -> None:
+        # A Nullable fill expression can plug null values into the
+        # shifted-in slots.
+        assert infer_shift_fill(Int64(), Nullable(Float64()), fill_is_literal=False) == Nullable(
+            Float64()
+        )
+
+    def test_unknown_receiver_stays_unknown(self) -> None:
+        assert infer_shift_fill(Unknown(), Int64(), fill_is_literal=True) == Unknown()
+        assert infer_shift_fill(Nullable(Unknown()), Utf8(), fill_is_literal=False) == Unknown()

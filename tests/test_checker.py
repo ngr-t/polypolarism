@@ -1749,3 +1749,67 @@ class TestUnpivotSupertypeEndToEnd:
         assert len(results) == 1
         assert results[0].passed is False
         assert any(isinstance(e, TypeDifference) for e in results[0].errors)
+
+
+class TestShiftFillValueEndToEnd:
+    """Issue #43 repro: ``shift(1, fill_value=0)`` is non-null at runtime, so
+    a non-nullable declaration must pass; bare ``shift(1)`` stays Nullable.
+
+    Probed (polars 1.41.2): ``[1, 2, 3].shift(1, fill_value=0)`` ->
+    ``[0, 1, 2]`` with null_count 0 and dtype Int64.
+    """
+
+    HEADER = textwrap.dedent("""
+        import polars as pl
+        import pandera.polars as pa
+        from pandera.typing.polars import DataFrame
+
+        class In(pa.DataFrameModel):
+            a: int
+    """)
+
+    def test_fill_value_passes_non_nullable_declaration(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            @pa.check_types
+            def shifted(df: DataFrame[In]) -> DataFrame[In]:
+                return df.with_columns(pl.col("a").shift(1, fill_value=0))
+        """
+        )
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is True, results[0].errors
+
+    def test_no_fill_value_still_fails_non_nullable_declaration(self):
+        # Regression guard: without a fill the head slot is null, so the
+        # non-nullable declaration must keep failing.
+        source = self.HEADER + textwrap.dedent(
+            """
+            @pa.check_types
+            def shifted(df: DataFrame[In]) -> DataFrame[In]:
+                return df.with_columns(pl.col("a").shift(1))
+        """
+        )
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is False
+        assert any(isinstance(e, TypeDifference) for e in results[0].errors)
+
+    def test_cross_dtype_fill_supertype_checks(self):
+        # shift(1, fill_value="x") on Int64 -> String (probed).
+        source = self.HEADER + textwrap.dedent(
+            """
+            class Out(pa.DataFrameModel):
+                a: str
+
+            @pa.check_types
+            def shifted(df: DataFrame[In]) -> DataFrame[Out]:
+                return df.with_columns(pl.col("a").shift(1, fill_value="x"))
+        """
+        )
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is True, results[0].errors

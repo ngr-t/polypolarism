@@ -507,3 +507,94 @@ def supertype(left: DataType, right: DataType) -> DataType | None:
     if left_nullable or right_nullable:
         return result if isinstance(result, Nullable) else Nullable(result)
     return result
+
+
+# ---------------------------------------------------------------------------
+# Expr.shift(n, fill_value=...) dtype rules (issue #43)
+#
+# Probed on polars 1.41.2. Expression fills (``fill_value=pl.col(...)...``)
+# follow the supertype matrix exactly. *Literal* fills (bare constants and
+# ``pl.lit(<const>)``) are lenient — polars casts the literal INTO the
+# receiver dtype whenever the receiver can hold it:
+#
+#     shift(Int64,   fill=0)    -> Int64       shift(Date, fill=5)    -> Date
+#     shift(Float32, fill=5)    -> Float32     shift(Time, fill=7)    -> Time
+#     shift(Int8,    fill=5)    -> Int8        shift(Duration, fill=5)-> Duration
+#     shift(Int64,   fill=True) -> Int64       shift(Utf8, fill=5)    -> String
+#     shift(Bool,    fill=5)    -> Int32       shift(Categorical, fill="z") -> Categorical
+#     shift(Int32,   fill=5.5)  -> Float64     shift(Date, fill=5.5)  -> Date
+#     shift(Decimal(10,2), fill=5.5) -> Float64
+#     shift(Int64,   fill="x")  -> String      shift(Date, fill="x")  -> String
+# ---------------------------------------------------------------------------
+
+
+def _shift_literal_fill_base(receiver: DataType, lit: DataType) -> DataType:
+    """Result dtype of a *literal* fill against a bare receiver dtype."""
+    if isinstance(lit, Boolean):
+        # Probed: bool literals coerce into Boolean, numeric and Utf8
+        # receivers alike.
+        return receiver
+    if isinstance(lit, Int64):
+        if isinstance(receiver, Boolean):
+            # Probed: the only receiver that widens instead of absorbing
+            # (Int32 at runtime; polypolarism models int literals as Int64).
+            return Int64()
+        return receiver
+    if isinstance(lit, Float64):
+        if (
+            type(receiver) in _SIGNED_INT_WIDTH
+            or type(receiver) in _UNSIGNED_INT_WIDTH
+            or isinstance(receiver, (Decimal, Boolean))
+        ):
+            # Probed: ints and Decimal promote to Float64 (a float doesn't
+            # fit); Boolean is a runtime ComputeError, modelled silently.
+            return Float64()
+        return receiver
+    if isinstance(lit, Utf8):
+        if isinstance(receiver, (Utf8, Categorical, Enum)):
+            # Probed: the string family absorbs string literals.
+            return receiver
+        merged = supertype(receiver, Utf8())
+        if merged is None or isinstance(merged, Unknown):
+            # No supertype (Duration, List, ...): a probed runtime error —
+            # but claiming one is out of scope here; keep the receiver.
+            return receiver
+        return merged
+    return receiver
+
+
+def infer_shift_fill(receiver: DataType, fill: DataType, *, fill_is_literal: bool) -> DataType:
+    """Result dtype of ``Expr.shift(n, fill_value=...)`` (issue #43).
+
+    With a fill the shifted-in slots are plugged, so the receiver's own
+    nullability is preserved instead of forcing ``Nullable`` — probed:
+    ``[1, None, 3].shift(1, fill_value=0)`` -> ``[0, 1, None]`` (original
+    nulls keep flowing, no new ones). A ``Nullable`` *expression* fill can
+    plug nulls back in, so it re-adds the wrapper.
+
+    ``fill_is_literal`` selects the probed literal-leniency rules
+    (bare constants / ``pl.lit(<const>)``) over the plain supertype matrix.
+    The caller is responsible for treating a null fill (``fill_value=None``)
+    as "no fill" before calling this.
+    """
+    receiver_inner, receiver_nullable = _unwrap_nullable(receiver)
+    fill_inner, fill_nullable = _unwrap_nullable(fill)
+    if isinstance(receiver_inner, Unknown) or isinstance(fill_inner, Unknown):
+        return Unknown()
+
+    result_nullable = receiver_nullable
+    if fill_is_literal:
+        result = _shift_literal_fill_base(receiver_inner, fill_inner)
+    else:
+        merged = supertype(receiver_inner, fill_inner)
+        # No supertype: a probed runtime error, but flagging it is out of
+        # scope — fall back to the receiver dtype, silently.
+        result = receiver_inner if merged is None else merged
+        result_nullable = receiver_nullable or fill_nullable
+
+    if isinstance(result, Unknown):
+        return Unknown()
+    result_inner, result_already_nullable = _unwrap_nullable(result)
+    if result_nullable or result_already_nullable:
+        return Nullable(result_inner)
+    return result_inner

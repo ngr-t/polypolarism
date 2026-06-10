@@ -54,6 +54,7 @@ from polypolarism.expr_infer import (
     TypeUnificationError,
     infer_col,
     infer_lit,
+    infer_shift_fill,
     promote_types,
     supertype,
     unify_types,
@@ -2026,6 +2027,43 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             folded = Nullable(folded)
         return None, folded
 
+    def _shift_fill_dtype(self, receiver_type: DataType, fill_node: ast.expr) -> DataType | None:
+        """Result dtype of ``shift(n, fill_value=<fill_node>)`` (issue #43).
+
+        Returns ``None`` when the fill is a null literal (``fill_value=None``
+        / ``pl.lit(None)``) — probed to behave exactly like no fill, so the
+        caller falls back to the Nullable wrap. Bare constants and
+        ``pl.lit(<const>)`` take the probed literal-leniency rules; any other
+        expression resolves through the analyzer and follows the supertype
+        matrix (see ``infer_shift_fill``). An unresolved fill keeps the
+        receiver dtype: the slots are filled with *something*, so no
+        Nullable wrap, and claiming any other dtype would be a guess.
+        """
+        lit_dtype: DataType | None = None
+        if isinstance(fill_node, ast.Constant) and (
+            fill_node.value is None or isinstance(fill_node.value, (bool, int, float, str))
+        ):
+            lit_dtype = infer_lit(fill_node.value)
+        else:
+            lit_dtype = self._extract_lit_type(fill_node)
+
+        if lit_dtype is not None:
+            if isinstance(lit_dtype, Null):
+                return None
+            return infer_shift_fill(receiver_type, lit_dtype, fill_is_literal=True)
+
+        _, fill_dtype = self.analyze_select_expr(fill_node)
+        if fill_dtype is None:
+            inner, nullable = (
+                (receiver_type.inner, True)
+                if isinstance(receiver_type, Nullable)
+                else (receiver_type, False)
+            )
+            return Nullable(inner) if nullable else inner
+        if isinstance(fill_dtype, Null):
+            return None
+        return infer_shift_fill(receiver_type, fill_dtype, fill_is_literal=False)
+
     def _analyze_method_chain(self, node: ast.expr) -> tuple[str | None, DataType | None] | None:
         """Analyze ``pl.col("x").<method>(...)`` style chains.
 
@@ -2185,8 +2223,20 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         if method == "cum_count":
             return receiver_name, UInt32()
 
-        # Shift-like: head positions become NULL → wrap in Nullable.
+        # Shift-like: head positions become NULL → wrap in Nullable. Only
+        # ``shift`` takes a fill (``shift(n, *, fill_value=...)`` — keyword
+        # only, probed): a non-null fill plugs the shifted-in slots, so the
+        # receiver's own nullability is preserved instead (issue #43);
+        # ``diff`` / ``pct_change`` have no fill_value parameter.
         if method in self._SHIFT_LIKE_METHODS and receiver_type is not None:
+            if method == "shift":
+                fill_node = next((kw.value for kw in node.keywords if kw.arg == "fill_value"), None)
+                if fill_node is not None:
+                    fill_result = self._shift_fill_dtype(receiver_type, fill_node)
+                    if fill_result is not None:
+                        return receiver_name, fill_result
+                    # A null fill (fill_value=None / pl.lit(None)) behaves
+                    # like no fill (probed) — fall through to the wrap.
             inner = receiver_type.inner if isinstance(receiver_type, Nullable) else receiver_type
             return receiver_name, Nullable(inner)
 

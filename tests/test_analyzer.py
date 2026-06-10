@@ -7559,3 +7559,96 @@ class TestWhenThenOtherwiseInference:
             'df.group_by("s").agg(x=pl.when(pl.col("a") > 0).then(1).otherwise(0).sum())'
         )
         assert ft.columns["x"].dtype == Int64()
+
+
+class TestShiftFillValue:
+    """Issue #43: ``shift(n, fill_value=...)`` plugs the shifted-in slots, so
+    the result is NOT wrapped Nullable; the dtype follows the probed
+    fill rules (see TestInferShiftFill in test_expr_infer for the matrix).
+
+    Probed (polars 1.41.2):
+      - ``[1, 2, 3].shift(1, fill_value=0)`` -> ``[0, 1, 2]``, null_count 0,
+        dtype Int64
+      - ``[1, None, 3].shift(1, fill_value=0)`` -> ``[0, 1, None]`` (original
+        nulls keep flowing)
+      - ``shift(1, fill_value="x")`` on Int64 -> String
+      - ``fill_value`` is keyword-only (``shift(1, 0)`` is a TypeError), and
+        ``fill_value=None`` behaves like no fill
+    """
+
+    HEADER = textwrap.dedent(
+        PANDERA_HEADER
+        + """
+            class In(pa.DataFrameModel):
+                a: int
+                s: str
+                d: pl.Date
+                v: pl.Float64 = pa.Field(nullable=True)
+                xs: pl.List(pl.Int64) = pa.Field()
+        """
+    )
+
+    def _infer(self, body: str):
+        source = self.HEADER + textwrap.dedent(
+            f"""
+            def f(df: DataFrame[In]):
+                return {body}
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == [], results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        return ft
+
+    def test_same_dtype_fill_is_non_nullable(self):
+        # The #43 repro: pl.col("a").shift(1, fill_value=0) is non-null Int64.
+        ft = self._infer('df.select(pl.col("a").shift(1, fill_value=0))')
+        assert ft.columns["a"].dtype == Int64()
+
+    def test_cross_dtype_string_fill_supertypes(self):
+        ft = self._infer('df.select(pl.col("a").shift(1, fill_value="x"))')
+        assert ft.columns["a"].dtype == Utf8()
+
+    def test_cross_dtype_float_fill_supertypes(self):
+        ft = self._infer('df.select(pl.col("a").shift(1, fill_value=0.5))')
+        assert ft.columns["a"].dtype == Float64()
+
+    def test_int_literal_fill_on_date_keeps_date(self):
+        # Probed leniency: shift(Date, fill_value=5) -> Date (1970-01-06).
+        ft = self._infer('df.select(pl.col("d").shift(1, fill_value=5))')
+        assert ft.columns["d"].dtype == Date()
+
+    def test_pl_lit_fill_counts_as_literal(self):
+        # Probed: shift(Date, fill_value=pl.lit(5)) -> Date as well.
+        ft = self._infer('df.select(pl.col("d").shift(1, fill_value=pl.lit(5)))')
+        assert ft.columns["d"].dtype == Date()
+
+    def test_nullable_receiver_stays_nullable(self):
+        # Original nulls keep flowing; only shifted-in slots are filled.
+        ft = self._infer('df.select(pl.col("v").shift(1, fill_value=0.0))')
+        assert ft.columns["v"].dtype == Nullable(Float64())
+
+    def test_fill_value_none_behaves_like_no_fill(self):
+        ft = self._infer('df.select(pl.col("a").shift(1, fill_value=None))')
+        assert ft.columns["a"].dtype == Nullable(Int64())
+
+    def test_no_fill_value_stays_nullable_regression(self):
+        ft = self._infer('df.select(pl.col("a").shift(1))')
+        assert ft.columns["a"].dtype == Nullable(Int64())
+
+    def test_expression_fill_follows_supertype(self):
+        # Probed via fill_value=pl.col(...).first(): expression fills follow
+        # the supertype matrix (Int64 + String -> String).
+        ft = self._infer('df.select(pl.col("a").shift(1, fill_value=pl.col("s").first()))')
+        assert ft.columns["a"].dtype == Utf8()
+
+    def test_expression_fill_without_supertype_keeps_receiver(self):
+        ft = self._infer('df.select(pl.col("a").shift(1, fill_value=pl.col("xs").first()))')
+        assert ft.columns["a"].dtype == Int64()
+
+    def test_unresolved_fill_keeps_receiver_dtype(self):
+        # The fill expression is not modelled — fall back to the receiver
+        # dtype (slots are filled with *something*, so no Nullable wrap).
+        ft = self._infer('df.select(pl.col("a").shift(1, fill_value=pl.col("a").interpolate()))')
+        assert ft.columns["a"].dtype == Int64()
