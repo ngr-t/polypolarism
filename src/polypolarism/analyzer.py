@@ -92,6 +92,7 @@ from polypolarism.types import (
     Int64,
     Int128,
     Nullable,
+    RowVar,
     Struct,
     UInt8,
     UInt16,
@@ -2059,6 +2060,11 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 for c in plural:
                     spec = input_frame.columns.get(c)
                     if spec is None:
+                        # On an open frame the column may exist among the
+                        # unknown extras — select it as Unknown.
+                        if input_frame.rest is not None:
+                            result_columns[c] = Unknown()
+                            continue
                         self.errors.append(
                             tag(
                                 PLY001,
@@ -2106,9 +2112,10 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             plural = self._resolve_plural_col(arg)
             if plural is not None:
                 # ``with_columns(pl.col("a", "b"))`` is equivalent to keeping
-                # the existing columns; nothing to add.
+                # the existing columns; nothing to add. On an open frame a
+                # missing name may exist among the unknown extras — no error.
                 for c in plural:
-                    if c not in input_frame.columns:
+                    if c not in input_frame.columns and input_frame.rest is None:
                         self.errors.append(
                             tag(
                                 PLY001,
@@ -2132,7 +2139,11 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
 
         self.errors.extend(expr_analyzer.errors)
 
-        return FrameType(columns=result_columns)
+        return FrameType(
+            columns=result_columns,
+            strict=input_frame.strict,
+            rest=input_frame.rest,
+        )
 
     # -- frame methods --------------------------------------------------
 
@@ -2166,7 +2177,10 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         result_columns = dict(input_frame.columns)
         for name in targets:
             if name not in result_columns:
-                self.errors.append(tag(PLY002, f"drop: column '{name}' not found"))
+                # On an open frame the column may exist among the unknown
+                # extras — dropping it is a no-op for the tracked schema.
+                if input_frame.rest is None:
+                    self.errors.append(tag(PLY002, f"drop: column '{name}' not found"))
                 continue
             del result_columns[name]
         return FrameType(columns=result_columns, strict=input_frame.strict, rest=input_frame.rest)
@@ -2333,12 +2347,25 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         for col in targets:
             spec = result_columns.get(col)
             if spec is None:
+                # On an open frame the column may exist among the unknown
+                # extras — treat it as present, exploding to Unknown.
+                if input_frame.rest is not None:
+                    result_columns[col] = ColumnSpec(dtype=Unknown())
+                    continue
                 self.errors.append(tag(PLY021, f"explode: column '{col}' not found"))
                 continue
             inner = spec.dtype
             outer_nullable = isinstance(inner, Nullable)
             if outer_nullable:
                 inner = inner.inner  # type: ignore[union-attr]
+            if isinstance(inner, Unknown):
+                # An Unknown column might hold lists — exploding it yields
+                # elements of an unknown dtype, never an error.
+                unknown_elem: DataType = Unknown()
+                if outer_nullable:
+                    unknown_elem = Nullable(unknown_elem)
+                result_columns[col] = ColumnSpec(dtype=unknown_elem, required=spec.required)
+                continue
             if not isinstance(inner, ListT):
                 self.errors.append(
                     tag(PLY021, f"explode: column '{col}' is {spec.dtype}, not List[T]")
@@ -2465,15 +2492,26 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             return input_frame
 
         result_columns: dict[str, ColumnSpec] = dict(input_frame.columns)
+        result_rest = input_frame.rest
         for col in targets:
             spec = result_columns.get(col)
             if spec is None:
-                self.errors.append(tag(PLY021, f"unnest: column '{col}' not found"))
+                # On an open frame the column may exist among the unknown
+                # extras — its fields stay unknown, the frame stays open.
+                if input_frame.rest is None:
+                    self.errors.append(tag(PLY021, f"unnest: column '{col}' not found"))
                 continue
             inner = spec.dtype
             outer_nullable = isinstance(inner, Nullable)
             if outer_nullable:
                 inner = inner.inner  # type: ignore[union-attr]
+            if isinstance(inner, Unknown):
+                # Unnesting a struct whose fields we can't see: the column
+                # disappears and an unknown set of field columns appears —
+                # the result is an open frame.
+                del result_columns[col]
+                result_rest = RowVar("unnest")
+                continue
             if not isinstance(inner, Struct):
                 self.errors.append(
                     tag(PLY021, f"unnest: column '{col}' is {spec.dtype}, not Struct{{...}}")
@@ -2485,7 +2523,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 if outer_nullable and not isinstance(wrapped, Nullable):
                     wrapped = Nullable(wrapped)
                 result_columns[field_name] = ColumnSpec(dtype=wrapped, required=spec.required)
-        return FrameType(columns=result_columns, strict=input_frame.strict, rest=input_frame.rest)
+        return FrameType(columns=result_columns, strict=input_frame.strict, rest=result_rest)
 
     def _infer_filter_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
         """Identity-typed, but walk every predicate sub-expression to validate columns."""

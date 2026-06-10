@@ -5,6 +5,7 @@ import textwrap
 import pytest
 
 from polypolarism.analyzer import (
+    FunctionBodyAnalyzer,
     _is_column_subtype,
     _is_frame_subtype,
     analyze_source,
@@ -3010,3 +3011,80 @@ class TestOpenFrameSubtype:
         actual = FrameType({"id": Utf8()}, rest=RowVar("r"))
         expected = FrameType({"id": Int64()})
         assert not _is_frame_subtype(actual, expected)
+
+
+def _run_body(frame: FrameType, body: str):
+    """Drive FunctionBodyAnalyzer directly with a pre-built input frame.
+
+    Open frames cannot yet be written down in a Pandera schema, so these
+    tests inject them as the type of ``df`` and analyze a small body.
+    """
+    import ast
+
+    errors: list[str] = []
+    analyzer = FunctionBodyAnalyzer({"df": frame}, errors)
+    tree = ast.parse(textwrap.dedent(body))
+    for stmt in tree.body:
+        analyzer.visit(stmt)
+    return analyzer
+
+
+class TestOpenFrameMethodCalls:
+    """Column references that are missing on an open frame are not errors."""
+
+    def _open_frame(self) -> FrameType:
+        return FrameType({"id": Int64()}, rest=RowVar("r"))
+
+    def test_drop_missing_column_on_open_frame_no_error(self):
+        analyzer = _run_body(self._open_frame(), "out = df.drop('ghost')")
+        assert analyzer.errors == []
+        assert "ghost" not in analyzer.var_types["out"].columns
+
+    def test_drop_missing_column_on_closed_frame_still_errors(self):
+        analyzer = _run_body(FrameType({"id": Int64()}), "out = df.drop('ghost')")
+        assert any("ghost" in e for e in analyzer.errors)
+
+    def test_explode_missing_column_on_open_frame_becomes_unknown(self):
+        analyzer = _run_body(self._open_frame(), "out = df.explode('items')")
+        assert analyzer.errors == []
+        assert analyzer.var_types["out"].columns["items"].dtype == Unknown()
+
+    def test_unnest_missing_column_on_open_frame_no_error(self):
+        analyzer = _run_body(self._open_frame(), "out = df.unnest('s')")
+        assert analyzer.errors == []
+        out = analyzer.var_types["out"]
+        assert out.rest is not None
+        assert "s" not in out.columns
+
+    def test_select_col_expr_missing_on_open_frame_registers_unknown(self):
+        analyzer = _run_body(self._open_frame(), "out = df.select(pl.col('ghost'))")
+        assert analyzer.errors == []
+        assert analyzer.var_types["out"].columns["ghost"].dtype == Unknown()
+
+    def test_select_plural_col_missing_on_open_frame_registers_unknown(self):
+        analyzer = _run_body(self._open_frame(), "out = df.select(pl.col('a', 'b'))")
+        assert analyzer.errors == []
+        out = analyzer.var_types["out"]
+        assert out.columns["a"].dtype == Unknown()
+        assert out.columns["b"].dtype == Unknown()
+
+    def test_with_columns_plural_col_missing_on_open_frame_no_error(self):
+        analyzer = _run_body(self._open_frame(), "out = df.with_columns(pl.col('a', 'b'))")
+        assert analyzer.errors == []
+
+    def test_select_result_is_closed_even_from_open_input(self):
+        """A projection enumerates its output — openness does not survive."""
+        analyzer = _run_body(self._open_frame(), "out = df.select(pl.col('id'))")
+        assert analyzer.var_types["out"].rest is None
+
+
+class TestRestPropagation:
+    """rest / strict survive shape-preserving operations."""
+
+    def test_with_columns_propagates_rest_and_strict(self):
+        frame = FrameType({"id": Int64()}, strict=True, rest=RowVar("r"))
+        analyzer = _run_body(frame, "out = df.with_columns(doubled=pl.col('id') * 2)")
+        out = analyzer.var_types["out"]
+        assert out.rest is not None
+        assert out.strict is True
+        assert out.columns["doubled"].dtype == Int64()
