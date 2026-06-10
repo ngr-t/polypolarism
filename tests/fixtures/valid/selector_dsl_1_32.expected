@@ -1,0 +1,5 @@
+select_chained_agg: OK
+select_with_arithmetic: OK
+with_columns_selector_fill_null: OK
+select_by_dtype: OK
+drop_via_exclude: OK

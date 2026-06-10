@@ -1,0 +1,6 @@
+pure_literal: OK
+build_calendar: OK
+mixed_literal: OK
+explicit_schema: OK
+lazy_literal_collected: OK
+skeleton_join: OK

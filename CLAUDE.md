@@ -79,10 +79,46 @@ This project follows TDD (t-wada style):
 
 ### Testing
 
-- Test fixtures in `tests/fixtures/valid/` and `tests/fixtures/invalid/`
-- Valid fixtures should pass type checking
-- Invalid fixtures should fail with specific errors
-- 265 tests total after Pandera migration
+The suite combines unit tests with two compiler-style layers
+(see `docs/adr/0002-compiler-style-test-harness.md` for the full rationale):
+
+**Golden-file fixtures** (`tests/test_fixtures.py`, rustc-UI-test style):
+
+- Fixtures live in `tests/fixtures/{valid,invalid,warning}/` and are
+  auto-discovered — adding a `.py` fixture file IS adding a test.
+- Each fixture has a `<name>.expected` golden file next to it with the full
+  diagnostic report; the test compares byte-for-byte.
+- Category invariants are enforced independently of the goldens:
+  `valid/` passes cleanly, `invalid/` has ≥1 error, `warning/` passes with
+  ≥1 warning.
+- After intentionally changing diagnostics, regenerate and **review the
+  golden diff in git** — never regenerate to silence a failure you don't
+  understand:
+
+  ```bash
+  POLYPOLARISM_UPDATE_EXPECTED=1 uv run pytest tests/test_fixtures.py
+  ```
+
+- Every `PLY###`/`PLW###` code in `diagnostics.py` must appear in at least
+  one golden file (coverage gate). When adding a new diagnostic code, add a
+  minimal fixture demonstrating it; only codes that cannot fire from a
+  self-contained file go in `FIXTURE_EXEMPT_CODES` with a pointer to their
+  unit test.
+
+**Property-based type-algebra tests** (`tests/test_properties.py`, hypothesis):
+
+- Random (nested) dtypes verify the laws the inference engine relies on:
+  `_is_subtype` partial order + one-way `T <: Nullable[T]` widening;
+  commutativity of `promote_types` / `unify_types` / `supertype`;
+  idempotence; `infer_cast` nullability preservation; row-polymorphic
+  width subtyping of `_is_frame_subtype`.
+- `Unknown` is excluded from the order laws by design (gradual-typing
+  consistency is not transitive). When extending the type system, add the
+  new dtype to the strategies here and check which laws it must satisfy.
+
+Hand-written fixture assertions in `test_cli.py` encode *intent* (e.g.
+"covers issue #28"); goldens pin *behavior*. New fixtures normally don't
+need a `test_cli.py` entry.
 
 ## Git Conventions
 

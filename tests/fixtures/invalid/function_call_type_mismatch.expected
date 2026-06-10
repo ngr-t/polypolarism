@@ -1,0 +1,3 @@
+expects_int_id: OK
+caller: FAIL
+  error: Argument 'df' column 'id' has type Utf8 but expected Int64

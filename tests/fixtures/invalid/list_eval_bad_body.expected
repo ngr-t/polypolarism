@@ -1,0 +1,2 @@
+bump: FAIL
+  error: [PLY009] arithmetic 'Int64 + Utf8' is not supported — polars raises InvalidOperationError at runtime; cast an operand first

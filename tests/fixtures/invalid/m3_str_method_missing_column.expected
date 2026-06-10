@@ -1,0 +1,2 @@
+f: FAIL
+  error: [PLY001] Column 'missing' not found. Available columns: ['name']

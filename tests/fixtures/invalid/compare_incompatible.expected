@@ -1,0 +1,4 @@
+bug_str_eq_int: FAIL
+  error: [PLY009] comparison 'Utf8 == Int64' is not supported — polars rejects comparing these dtypes at runtime; cast an operand first
+bug_is_in_type_mismatch: FAIL
+  error: [PLY009] is_in: cannot check for List(Utf8) values in Int64 data — polars raises InvalidOperationError at runtime; cast an operand first

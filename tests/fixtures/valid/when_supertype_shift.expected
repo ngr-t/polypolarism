@@ -1,0 +1,4 @@
+when_mixed_branches: OK
+unpivot_mixed_values: OK
+shift_with_fill_stays_nonnull: OK
+shift_without_fill_is_nullable: OK
