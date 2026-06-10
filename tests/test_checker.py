@@ -390,6 +390,93 @@ class TestCheckSource:
         assert results[0].passed is True
 
 
+class TestCoerceEndToEnd:
+    """Issue #9 repro: pl.len() (UInt32) vs declared int under Config.coerce."""
+
+    REPRO_TEMPLATE = """
+        import polars as pl
+        import pandera.polars as pa
+        from pandera.typing.polars import DataFrame
+
+        class In(pa.DataFrameModel):
+            g: str
+            v: int
+        {in_config}
+
+        class Out(pa.DataFrameModel):
+            g: str
+            n: int
+        {out_config}
+
+        def agg(df: DataFrame[In]) -> DataFrame[Out]:
+            return df.group_by("g").agg(n=pl.len())
+    """
+
+    COERCE_CONFIG = """
+            class Config:
+                coerce = True
+    """
+
+    def test_pl_len_vs_declared_int_passes_with_coerce(self):
+        """The issue #9 repro validates fine at runtime — and now statically."""
+        source = textwrap.dedent(
+            self.REPRO_TEMPLATE.format(in_config=self.COERCE_CONFIG, out_config=self.COERCE_CONFIG)
+        )
+
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is True
+        assert results[0].errors == []
+
+    def test_pl_len_vs_declared_int_is_type_difference_without_coerce(self):
+        """Regression: a present-but-mismatched column must be reported as a
+        TypeDifference, not the misleading "Missing column"."""
+        source = textwrap.dedent(self.REPRO_TEMPLATE.format(in_config="", out_config=""))
+
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is False
+        assert any(
+            isinstance(e, TypeDifference)
+            and e.column == "n"
+            and e.inferred == UInt32()
+            and e.declared == Int64()
+            for e in results[0].errors
+        )
+        assert not any(isinstance(e, MissingColumn) for e in results[0].errors)
+
+    def test_n_unique_vs_declared_int_passes_with_coerce(self):
+        """Issue #9 sub-bug 2: an inferred UInt32 column under coerce."""
+        source = textwrap.dedent(
+            """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+
+            class In(pa.DataFrameModel):
+                g: str
+                v: int
+
+            class Out(pa.DataFrameModel):
+                g: str
+                n: int
+
+                class Config:
+                    coerce = True
+
+            def agg(df: DataFrame[In]) -> DataFrame[Out]:
+                return df.group_by("g").agg(n=pl.col("v").n_unique())
+        """
+        )
+
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is True
+
+
 class TestCheckResult:
     """Test CheckResult data class."""
 
