@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from polypolarism.analyzer import FunctionAnalysis, analyze_source
-from polypolarism.types import NUMERIC_DTYPES, DataType, Nullable, Unknown
+from polypolarism.types import NUMERIC_DTYPES, DataType, List, Nullable, Unknown
 
 
 class TypeMismatch:
@@ -102,7 +102,10 @@ def _is_subtype(inferred: DataType, declared: DataType) -> bool:
     - Nullable[T] is NOT a subtype of T (nullable cannot be used where non-nullable is expected)
     - Unknown is compatible with everything in both directions (gradual
       typing: uncertainty must not error), even ``Nullable[Unknown]`` vs a
-      non-nullable declared type.
+      non-nullable declared type. The rule recurses into ``List`` so that
+      ``List[Unknown]`` (e.g. an un-inferable ``list.eval`` body) satisfies
+      a declared ``List[T]`` — but the column's own nullability is still
+      enforced.
     """
     # Unknown on either side (after Nullable unwrap) always passes.
     if isinstance(_get_base_type(inferred), Unknown) or isinstance(
@@ -114,9 +117,21 @@ def _is_subtype(inferred: DataType, declared: DataType) -> bool:
     if inferred == declared:
         return True
 
+    # Nullable inferred cannot fill a non-nullable declared slot.
+    if isinstance(inferred, Nullable) and not isinstance(declared, Nullable):
+        return False
+
+    inferred_base = _get_base_type(inferred)
+    declared_base = _get_base_type(declared)
+
+    # List containers: compare element types with the same rules so the
+    # Unknown leniency reaches nested dtypes.
+    if isinstance(inferred_base, List) and isinstance(declared_base, List):
+        return _is_subtype(inferred_base.inner, declared_base.inner)
+
     # Non-nullable is subtype of nullable with same base type
     if isinstance(declared, Nullable) and not isinstance(inferred, Nullable):
-        return _get_base_type(inferred) == _get_base_type(declared)
+        return inferred_base == declared_base
 
     return False
 

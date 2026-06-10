@@ -21,6 +21,9 @@ from polypolarism.types import (
     Unknown,
     Utf8,
 )
+from polypolarism.types import (
+    List as ListType,
+)
 
 
 class TestCheckFunctionBasic:
@@ -271,6 +274,47 @@ class TestUnknownCompatibility:
             )
         )
         assert result.passed is True
+
+    def test_list_of_unknown_passes_declared_list_of_int(self):
+        """Unknown compatibility recurses into containers: an un-inferable
+        ``list.eval`` body yields ``List[Unknown]``, which must satisfy a
+        declared ``List[Int64]``."""
+        result = check_function(
+            self._analysis(
+                declared=FrameType({"a": ListType(Int64())}),
+                inferred=FrameType({"a": ListType(Unknown())}),
+            )
+        )
+        assert result.passed is True
+
+    def test_declared_list_of_unknown_passes_inferred_list_of_utf8(self):
+        result = check_function(
+            self._analysis(
+                declared=FrameType({"a": ListType(Unknown())}),
+                inferred=FrameType({"a": ListType(Utf8())}),
+            )
+        )
+        assert result.passed is True
+
+    def test_list_inner_mismatch_still_fails(self):
+        result = check_function(
+            self._analysis(
+                declared=FrameType({"a": ListType(Utf8())}),
+                inferred=FrameType({"a": ListType(Int64())}),
+            )
+        )
+        assert result.passed is False
+
+    def test_nullable_list_of_unknown_vs_non_nullable_declared_fails(self):
+        """The Unknown leniency is about the dtype, not the column's own
+        nullability — a Nullable list cannot fill a non-nullable slot."""
+        result = check_function(
+            self._analysis(
+                declared=FrameType({"a": ListType(Int64())}),
+                inferred=FrameType({"a": Nullable(ListType(Unknown()))}),
+            )
+        )
+        assert result.passed is False
 
 
 class TestOpenFrameChecking:

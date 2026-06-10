@@ -1172,9 +1172,19 @@ def _is_column_subtype(actual: DataType, expected: DataType) -> bool:
     if actual == expected:
         return True
 
+    # Nullable actual cannot fill a non-nullable expected slot.
+    if isinstance(actual, Nullable) and not isinstance(expected, Nullable):
+        return False
+
+    # List containers: compare element types with the same rules so the
+    # Unknown leniency reaches nested dtypes (e.g. List[Unknown] from an
+    # un-inferable ``list.eval`` body vs a declared List[T]).
+    if isinstance(actual_base, ListT) and isinstance(expected_base, ListT):
+        return _is_column_subtype(actual_base.inner, expected_base.inner)
+
     # Non-nullable is subtype of nullable with same base
     if isinstance(expected, Nullable) and not isinstance(actual, Nullable):
-        return actual == expected.inner
+        return actual_base == expected_base
 
     return False
 
