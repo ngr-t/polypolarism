@@ -45,8 +45,11 @@ from polypolarism.diagnostics import (
 )
 from polypolarism.expr_infer import (
     ColumnNotFoundError,
+    TypePromotionError,
     TypeUnificationError,
     infer_col,
+    infer_lit,
+    promote_types,
     unify_types,
 )
 from polypolarism.ops.groupby import (
@@ -91,6 +94,7 @@ from polypolarism.types import (
     Int32,
     Int64,
     Int128,
+    Null,
     Nullable,
     RowVar,
     Struct,
@@ -163,6 +167,26 @@ def _resolve_pl_dtype(node: ast.expr) -> DataType | None:
                 return Datetime(tz=tz)
             return base
     return None
+
+
+def _base_is_unknown(dtype: DataType) -> bool:
+    """True when the dtype (after Nullable unwrap) is Unknown."""
+    inner = dtype.inner if isinstance(dtype, Nullable) else dtype
+    return isinstance(inner, Unknown)
+
+
+def _wrap_nullable_if_any(result: DataType, operands: list[DataType]) -> DataType:
+    """Wrap ``result`` in Nullable when any operand is Nullable (or Null).
+
+    Elementwise operations propagate nulls: if any input value can be
+    null, the output value can be null (``null > 0`` is null, ``1 + null``
+    is null, ...). Already-Nullable results are returned unchanged.
+    """
+    if isinstance(result, Nullable):
+        return result
+    if any(isinstance(t, (Nullable, Null)) for t in operands):
+        return Nullable(result)
+    return result
 
 
 def _wrap_like(receiver: DataType, new_inner: DataType) -> DataType:
@@ -839,33 +863,72 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                     alias = node.args[0].value
                     inner_node = node.func.value
 
-        # Comparison expressions (==, !=, <, <=, >, >=) -> Boolean
-        if isinstance(inner_node, ast.Compare):
-            self._validate_subexpr(inner_node.left)
-            for cmp in inner_node.comparators:
-                self._validate_subexpr(cmp)
-            return alias, Boolean()
+        # Bare Python constants are literal columns (``df.select(x=1)`` is
+        # ``pl.lit(1).alias("x")`` in polars). Bare *positional* strings in
+        # select/with_columns are column names — but those are consumed by
+        # the callers (``_str_constant``) before this method ever sees them.
+        # ``infer_lit`` checks bool before int (bool subclasses int).
+        if isinstance(inner_node, ast.Constant) and (
+            inner_node.value is None or isinstance(inner_node.value, (bool, int, float, str))
+        ):
+            return alias, infer_lit(inner_node.value)
 
-        # Logical operators expressed as bitwise: a & b, a | b, a ^ b -> Boolean
+        # Comparison expressions (==, !=, <, <=, >, >=) -> Boolean.
+        # A Nullable operand makes the result Nullable (``null > 0`` is null).
+        if isinstance(inner_node, ast.Compare):
+            operand_types = [self.analyze_select_expr(inner_node.left)[1]]
+            for cmp in inner_node.comparators:
+                operand_types.append(self.analyze_select_expr(cmp)[1])
+            resolved = [t for t in operand_types if t is not None]
+            return alias, _wrap_nullable_if_any(Boolean(), resolved)
+
+        # Logical operators expressed as bitwise: a & b, a | b, a ^ b -> Boolean.
+        # Nullability propagates from either operand (``null & true`` is null).
         if isinstance(inner_node, ast.BinOp) and isinstance(
             inner_node.op, (ast.BitAnd, ast.BitOr, ast.BitXor)
         ):
-            self._validate_subexpr(inner_node.left)
-            self._validate_subexpr(inner_node.right)
-            return alias, Boolean()
+            _, left_type = self.analyze_select_expr(inner_node.left)
+            _, right_type = self.analyze_select_expr(inner_node.right)
+            resolved = [t for t in (left_type, right_type) if t is not None]
+            return alias, _wrap_nullable_if_any(Boolean(), resolved)
 
-        # Logical NOT: ~expr or `not expr` -> Boolean (when receiver is boolean-like)
+        # Logical NOT: ~expr or `not expr` -> Boolean (when receiver is
+        # boolean-like). ``~null`` is null, so nullability carries through.
         if isinstance(inner_node, ast.UnaryOp) and isinstance(inner_node.op, (ast.Invert, ast.Not)):
-            self._validate_subexpr(inner_node.operand)
-            return alias, Boolean()
+            _, operand_type = self.analyze_select_expr(inner_node.operand)
+            resolved = [operand_type] if operand_type is not None else []
+            return alias, _wrap_nullable_if_any(Boolean(), resolved)
 
-        # Arithmetic binary operations like pl.col("x") * 2
+        # Arithmetic binary operations like pl.col("x") * 2. Both operands
+        # are resolved (keeping the missing-column error side-effects) and
+        # combined with polars' promotion rules.
         if isinstance(inner_node, ast.BinOp):
-            # For binary ops, try to infer the type from the left operand
             left_name, left_type = self.analyze_select_expr(inner_node.left)
-            if left_type:
-                output_name = alias if alias else left_name
-                return output_name, left_type
+            _, right_type = self.analyze_select_expr(inner_node.right)
+            output_name = alias if alias else left_name
+            resolved = [t for t in (left_type, right_type) if t is not None]
+
+            if isinstance(inner_node.op, ast.Div):
+                # polars true division always yields Float64, even for
+                # int/int (issue #14) — ``//`` is the dtype-preserving one.
+                if any(_base_is_unknown(t) for t in resolved):
+                    return output_name, Unknown()
+                if resolved:
+                    return output_name, _wrap_nullable_if_any(Float64(), resolved)
+                # Neither operand resolved — fall through so the output is
+                # registered as Unknown downstream.
+            elif left_type is not None and right_type is not None:
+                try:
+                    return output_name, promote_types(left_type, right_type)
+                except TypePromotionError:
+                    # Non-numeric arithmetic (e.g. Utf8 + Utf8 concat):
+                    # keep the left operand's dtype, but nullability from
+                    # either side still propagates.
+                    return output_name, _wrap_nullable_if_any(left_type, resolved)
+            elif resolved:
+                # Only one operand resolved — use its type (the historical
+                # take-left behaviour, generalised to either side).
+                return output_name, resolved[0]
 
         # Method-chain on a column expression (is_null, fill_null, std, abs, ...)
         chain_result = self._analyze_method_chain(inner_node)

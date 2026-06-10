@@ -162,6 +162,11 @@ def promote_types(left: DataType, right: DataType) -> DataType:
     right_inner, right_nullable = _unwrap_nullable(right)
     result_nullable = left_nullable or right_nullable
 
+    # Unknown absorbs everything — uncertainty propagates, never errors.
+    # Mirrors ``unify_types``.
+    if isinstance(left_inner, Unknown) or isinstance(right_inner, Unknown):
+        return Unknown()
+
     # Check if both are numeric
     if not _is_numeric(left_inner) or not _is_numeric(right_inner):
         raise TypePromotionError(
