@@ -707,6 +707,18 @@ def _cast_invalid(source_inner: DataType, target_inner: DataType) -> bool:
     return (scat, tcat) in _CAST_INVALID_PAIRS
 
 
+# ``Expr.diff`` on an unsigned-int receiver widens to the signed dtype of
+# the next width so negative differences are representable (probed polars
+# 1.41.2; issue #46). UInt128 is absent: it has no wider signed dtype and
+# polars keeps UInt128.
+_DIFF_UNSIGNED_WIDENING: dict[type[DataType], DataType] = {
+    UInt8: Int16(),
+    UInt16: Int32(),
+    UInt32: Int64(),
+    UInt64: Int64(),
+}
+
+
 def _wrap_like(receiver: DataType, new_inner: DataType) -> DataType:
     """Preserve the receiver's outer ``Nullable`` wrapper around a new inner dtype."""
     if isinstance(receiver, Nullable):
@@ -1481,12 +1493,13 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             "neg",
             "shrink_dtype",
             "rechunk",
-            # Cumulative / window — preserve receiver dtype.
+            # Cumulative / window — preserve receiver dtype. (``over`` is
+            # absent: its dtype depends on ``mapping_strategy`` and is
+            # handled by a dedicated branch — issues #32/#45.)
             "cum_sum",
             "cum_max",
             "cum_min",
             "cum_prod",
-            "over",
             "rolling_sum",
             "rolling_min",
             "rolling_max",
@@ -1497,6 +1510,61 @@ class ExpressionAnalyzer(ast.NodeVisitor):
 
     # Shift-like methods: receiver dtype, but head positions become NULL.
     _SHIFT_LIKE_METHODS = frozenset({"shift", "diff", "pct_change"})
+
+    # ---- over(mapping_strategy="join") cardinality classification ----------
+    # Probed (polars 1.41.2; issue #45): "join" only gathers the windowed
+    # expression into a List when it is multi-valued per group. A
+    # scalar-per-group expression (aggregation — arithmetic on one
+    # included, e.g. ``sum() + 1``) broadcasts WITHOUT a List wrapper
+    # under every strategy. Methods that reduce a group to one value:
+    _OVER_SCALAR_METHODS = frozenset(
+        {
+            "sum",
+            "mean",
+            "count",
+            "len",
+            "n_unique",
+            "first",
+            "last",
+            "min",
+            "max",
+            "std",
+            "var",
+            "median",
+            "quantile",
+            "product",
+            "implode",
+            "entropy",
+        }
+    )
+
+    # Length-changing but multi-valued-per-group methods: their output is
+    # not a broadcastable scalar, so "join" gathers it into a List
+    # (probed: ``head(1)`` / ``unique()`` / ``drop_nulls()`` -> List).
+    _OVER_VECTOR_METHODS = frozenset(
+        {
+            "head",
+            "tail",
+            "limit",
+            "slice",
+            "sample",
+            "gather",
+            "gather_every",
+            "unique",
+            "filter",
+            "drop_nulls",
+            "drop_nans",
+            "sort",
+            "sort_by",
+            "top_k",
+            "bottom_k",
+            "explode",
+            "flatten",
+        }
+    )
+
+    # Methods whose output cardinality is decided by an opaque callable.
+    _OVER_OPAQUE_CARDINALITY_METHODS = frozenset({"map_batches", "pipe"})
 
     # Rolling reductions to Float64.
     _ROLLING_FLOAT_METHODS = frozenset(
@@ -1961,6 +2029,66 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             return
         self._validate_subexpr(node)
 
+    def _over_receiver_cardinality(self, node: ast.expr) -> str:
+        """Per-group cardinality of a windowed expression (issue #45).
+
+        Returns ``"scalar"`` (one value per group — ``over`` broadcasts it
+        under every mapping strategy), ``"vector"`` (length-preserving or
+        multi-valued — ``mapping_strategy="join"`` gathers it into a List
+        per row), or ``"unknown"`` (never guess; the caller degrades the
+        dtype to Unknown). Probed against polars 1.41.2 — see
+        ``_OVER_SCALAR_METHODS`` / ``_OVER_VECTOR_METHODS``.
+        """
+        # Bare literal: broadcastable scalar.
+        if isinstance(node, ast.Constant):
+            return "scalar"
+        # Elementwise operators preserve cardinality; an expression is
+        # vector as soon as one operand is (``col - col.mean()`` is
+        # elementwise even though one side aggregates — probed).
+        if isinstance(node, ast.UnaryOp):
+            return self._over_receiver_cardinality(node.operand)
+        if isinstance(node, (ast.BinOp, ast.Compare)):
+            if isinstance(node, ast.BinOp):
+                parts = [node.left, node.right]
+            else:
+                parts = [node.left, *node.comparators]
+            kinds = {self._over_receiver_cardinality(part) for part in parts}
+            if "unknown" in kinds:
+                return "unknown"
+            return "vector" if "vector" in kinds else "scalar"
+        # Sub-namespace accessor (``.str`` / ``.dt`` / ...): the namespace
+        # methods are elementwise — cardinality comes from the receiver.
+        if isinstance(node, ast.Attribute) and node.attr in _NAMESPACE_VALID_DTYPES:
+            return self._over_receiver_cardinality(node.value)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            func = node.func
+            if isinstance(func.value, ast.Name) and func.value.id == "pl":
+                if func.attr in ("col", "nth", "element"):
+                    return "vector"
+                if func.attr == "lit":
+                    return "scalar"
+                # ``pl.sum("a")`` shorthands and zero-arg ``pl.len()`` /
+                # ``pl.count()`` reduce the group to one value (probed).
+                if func.attr in ("len", "count") or func.attr in AGG_SHORTHAND_NAMES:
+                    return "scalar"
+                # ``pl.when(...)`` roots and anything else: branch values
+                # decide the cardinality — not inspected here.
+                return "unknown"
+            method = canonicalize_method(func.attr)
+            if method in self._OVER_SCALAR_METHODS:
+                return "scalar"
+            if method in self._OVER_VECTOR_METHODS:
+                return "vector"
+            if method in self._OVER_OPAQUE_CARDINALITY_METHODS:
+                return "unknown"
+            # Every other recognised expression method is elementwise —
+            # cardinality passes through to its own receiver. (A chain
+            # containing a method dtype inference does not understand
+            # already resolves to a None dtype, so a misjudged tail here
+            # cannot fabricate a dtype.)
+            return self._over_receiver_cardinality(func.value)
+        return "unknown"
+
     def _is_in_element_dtype(self, arg: ast.expr) -> DataType | None:
         """Element dtype of an ``is_in`` argument, or ``None`` when not understood.
 
@@ -2296,20 +2424,38 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 result = Nullable(Float64())
             return receiver_name, result
 
-        # ``Expr.over(...)`` — windowed expression: dtype-preserving, but
-        # every partition / order key must exist on the frame (issue #32;
-        # same gap class as sort #29). Keys come from the positional args
-        # plus the ``partition_by=`` / ``order_by=`` kwargs — polars
-        # resolves string kwargs as column names too (verified 1.41.2).
-        # ``mapping_strategy=`` and the other modifier kwargs are not keys.
+        # ``Expr.over(...)`` — windowed expression. Every partition / order
+        # key must exist on the frame (issue #32; same gap class as sort
+        # #29). Keys come from the positional args plus the
+        # ``partition_by=`` / ``order_by=`` kwargs — polars resolves string
+        # kwargs as column names too (verified 1.41.2).
+        #
+        # The result dtype depends on ``mapping_strategy=`` (issue #45;
+        # probed): the default "group_to_rows" and "explode" preserve the
+        # dtype; "join" gathers a multi-valued expression into a
+        # ``List(<element dtype>)`` per row (inner nullability kept inside
+        # the list) but broadcasts a scalar-per-group expression unchanged.
+        # An unknown / non-literal strategy degrades to Unknown.
         if method == "over":
             key_nodes: list[ast.expr] = list(node.args)
+            strategy: str | None = "group_to_rows"
             for kw in node.keywords:
                 if kw.arg in ("partition_by", "order_by"):
                     key_nodes.append(kw.value)
+                elif kw.arg == "mapping_strategy":
+                    strategy = _str_constant(kw.value)
             for key_node in key_nodes:
                 self._check_over_key(key_node)
-            return receiver_name, receiver_type
+            if strategy in ("group_to_rows", "explode"):
+                return receiver_name, receiver_type
+            if strategy == "join":
+                cardinality = self._over_receiver_cardinality(receiver)
+                if cardinality == "scalar":
+                    return receiver_name, receiver_type
+                if cardinality == "vector" and receiver_type is not None:
+                    return receiver_name, ListT(receiver_type)
+                return receiver_name, None
+            return receiver_name, None
 
         # Dtype-preserving methods.
         if method in self._DTYPE_PRESERVING_METHODS and receiver_type is not None:
@@ -2334,6 +2480,20 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                     # A null fill (fill_value=None / pl.lit(None)) behaves
                     # like no fill (probed) — fall through to the wrap.
             inner = receiver_type.inner if isinstance(receiver_type, Nullable) else receiver_type
+            if method == "diff":
+                # ``diff`` is a subtraction, not a dtype-preserving window
+                # (issue #46). Probed (polars 1.41.2): a temporal receiver
+                # (Date / Datetime — any tz — / Time / Duration) yields
+                # Duration; an unsigned-int receiver widens to the signed
+                # dtype of the next width (UInt8 -> Int16, UInt16 -> Int32,
+                # UInt32 -> Int64, UInt64 -> Int64; UInt128 has no wider
+                # signed dtype and stays UInt128). Signed ints and floats
+                # keep their dtype — the generic wrap below.
+                if isinstance(inner, (Date, Datetime, Time, Duration)):
+                    return receiver_name, Nullable(Duration())
+                widened = _DIFF_UNSIGNED_WIDENING.get(type(inner))
+                if widened is not None:
+                    return receiver_name, Nullable(widened)
             return receiver_name, Nullable(inner)
 
         # Rolling reductions returning Float64.

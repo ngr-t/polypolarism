@@ -18,6 +18,7 @@ from polypolarism.types import (
     Decimal,
     Duration,
     Enum,
+    Float32,
     Float64,
     FrameType,
     Int8,
@@ -28,7 +29,11 @@ from polypolarism.types import (
     Nullable,
     RowVar,
     Time,
+    UInt8,
+    UInt16,
     UInt32,
+    UInt64,
+    UInt128,
     Unknown,
     Utf8,
 )
@@ -2196,6 +2201,85 @@ class TestM5ShiftDiff:
         ft = results[0].inferred_return_type
         assert ft is not None
         assert ft.columns["v"].dtype == Nullable(Float64())
+
+
+class TestDiffTemporalAndUnsigned:
+    """Issue #46: ``diff()`` on temporal columns yields Duration; unsigned
+    int receivers widen to a signed dtype.
+
+    Probed (polars 1.41.2):
+    - Date.diff / Datetime.diff (any tz) / Time.diff / Duration.diff
+      -> Duration (nullable: head slot is null)
+    - UInt8.diff -> Int16, UInt16.diff -> Int32, UInt32.diff -> Int64,
+      UInt64.diff -> Int64; UInt128.diff stays UInt128
+    - signed ints / floats keep their dtype (Int8 -> Int8, Float32 -> Float32)
+    """
+
+    @pytest.mark.parametrize(
+        "receiver",
+        [Date(), Datetime(), Datetime(tz="UTC"), Time(), Duration()],
+        ids=["date", "datetime", "datetime_tz", "time", "duration"],
+    )
+    def test_temporal_diff_is_nullable_duration(self, receiver):
+        frame = FrameType({"t": receiver})
+        analyzer = _run_body(frame, 'out = df.select(d=pl.col("t").diff())')
+        assert analyzer.errors == []
+        assert analyzer.var_types["out"].columns["d"].dtype == Nullable(Duration())
+
+    def test_nullable_temporal_diff_is_nullable_duration(self):
+        frame = FrameType({"t": Nullable(Date())})
+        analyzer = _run_body(frame, 'out = df.select(d=pl.col("t").diff())')
+        assert analyzer.errors == []
+        assert analyzer.var_types["out"].columns["d"].dtype == Nullable(Duration())
+
+    @pytest.mark.parametrize(
+        ("receiver", "expected_inner"),
+        [
+            (UInt8(), Int16()),
+            (UInt16(), Int32()),
+            (UInt32(), Int64()),
+            (UInt64(), Int64()),
+        ],
+        ids=["u8", "u16", "u32", "u64"],
+    )
+    def test_unsigned_diff_widens_to_signed(self, receiver, expected_inner):
+        frame = FrameType({"v": receiver})
+        analyzer = _run_body(frame, 'out = df.select(d=pl.col("v").diff())')
+        assert analyzer.errors == []
+        assert analyzer.var_types["out"].columns["d"].dtype == Nullable(expected_inner)
+
+    @pytest.mark.parametrize(
+        "receiver",
+        [UInt128(), Int8(), Int64(), Float32(), Float64()],
+        ids=["u128", "i8", "i64", "f32", "f64"],
+    )
+    def test_other_numeric_diff_keeps_dtype(self, receiver):
+        # UInt128 has no wider signed dtype — polars keeps it (probed).
+        frame = FrameType({"v": receiver})
+        analyzer = _run_body(frame, 'out = df.select(d=pl.col("v").diff())')
+        assert analyzer.errors == []
+        assert analyzer.var_types["out"].columns["d"].dtype == Nullable(receiver)
+
+    def test_unknown_receiver_diff_stays_unknown(self):
+        frame = FrameType({"v": Unknown()})
+        analyzer = _run_body(frame, 'out = df.select(d=pl.col("v").diff())')
+        assert analyzer.errors == []
+        assert analyzer.var_types["out"].columns["d"].dtype == Nullable(Unknown())
+
+    def test_shift_on_temporal_is_untouched(self):
+        # Regression guard: only ``diff`` maps to Duration — ``shift``
+        # keeps the receiver dtype.
+        frame = FrameType({"t": Date()})
+        analyzer = _run_body(frame, 'out = df.select(d=pl.col("t").shift(1))')
+        assert analyzer.errors == []
+        assert analyzer.var_types["out"].columns["d"].dtype == Nullable(Date())
+
+    def test_pct_change_on_unsigned_is_untouched(self):
+        # ``pct_change`` keeps the generic shift-like behaviour.
+        frame = FrameType({"v": UInt32()})
+        analyzer = _run_body(frame, 'out = df.select(d=pl.col("v").pct_change())')
+        assert analyzer.errors == []
+        assert analyzer.var_types["out"].columns["d"].dtype == Nullable(UInt32())
 
 
 class TestM5Over:
@@ -6799,6 +6883,154 @@ class TestOverKeyValidation:
     def test_with_columns_over_missing_flags_ply001(self):
         """Issue #32 repro shape: with_columns(g=...over("ghost"))."""
         results = self._analyze('df.with_columns(g=pl.col("v").sum().over("ghost"))')
+        assert any("PLY001" in e and "ghost" in e for e in results[0].errors)
+
+
+class TestOverMappingStrategy:
+    """Issue #45: ``over(mapping_strategy=...)`` result dtype.
+
+    Probed (polars 1.41.2) over the strategy x expression product:
+
+    - ``"join"`` gathers a *length-preserving / multi-valued* expression
+      into ``List(<element dtype>)`` per row (inner nullability preserved:
+      a nullable receiver yields lists with null elements); but a
+      *scalar-per-group* expression (an aggregation, including arithmetic
+      on one, e.g. ``sum() + 1``) broadcasts WITHOUT a List wrapper.
+    - ``"explode"`` and ``"group_to_rows"`` (the default) preserve the
+      dtype for every expression shape.
+    - An unknown / non-literal strategy value degrades to Unknown.
+    """
+
+    HEADER = textwrap.dedent(
+        PANDERA_HEADER
+        + """
+            class In(pa.DataFrameModel):
+                a: int
+                g: str
+                n: float = pa.Field(nullable=True)
+        """
+    )
+
+    def _dtype(self, expr: str):
+        source = self.HEADER + textwrap.dedent(
+            f"""
+            def f(df: DataFrame[In]):
+                return df.select(o={expr})
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == [], results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        return ft.columns["o"].dtype
+
+    # -- "join" on length-preserving expressions -> List ----------------------
+
+    def test_join_bare_col_is_list(self):
+        dtype = self._dtype('pl.col("a").over("g", mapping_strategy="join")')
+        assert dtype == ListT(Int64())
+
+    def test_join_nullable_receiver_keeps_inner_nullable(self):
+        dtype = self._dtype('pl.col("n").over("g", mapping_strategy="join")')
+        assert dtype == ListT(Nullable(Float64()))
+
+    def test_join_shift_receiver_is_list_of_nullable(self):
+        dtype = self._dtype('pl.col("a").shift().over("g", mapping_strategy="join")')
+        assert dtype == ListT(Nullable(Int64()))
+
+    def test_join_elementwise_arithmetic_is_list(self):
+        dtype = self._dtype('(pl.col("a") * 2).over("g", mapping_strategy="join")')
+        assert dtype == ListT(Int64())
+
+    def test_join_rank_receiver_is_list(self):
+        dtype = self._dtype('pl.col("a").rank().over("g", mapping_strategy="join")')
+        assert dtype == ListT(Float64())
+
+    def test_join_boolean_predicate_is_list(self):
+        dtype = self._dtype('pl.col("a").is_null().over("g", mapping_strategy="join")')
+        assert dtype == ListT(Boolean())
+
+    def test_join_drop_nulls_receiver_is_list(self):
+        # drop_nulls is multi-valued per group (length-changing) -> List;
+        # the stripped nullability stays stripped inside the list (probed).
+        dtype = self._dtype('pl.col("n").drop_nulls().over("g", mapping_strategy="join")')
+        assert dtype == ListT(Float64())
+
+    # -- "join" on scalar-per-group expressions -> broadcast (no List) --------
+
+    def test_join_sum_broadcasts_scalar(self):
+        dtype = self._dtype('pl.col("a").sum().over("g", mapping_strategy="join")')
+        assert dtype == Int64()
+
+    def test_join_mean_broadcasts_scalar(self):
+        dtype = self._dtype('pl.col("a").mean().over("g", mapping_strategy="join")')
+        assert dtype == Float64()
+
+    def test_join_agg_arithmetic_broadcasts_scalar(self):
+        dtype = self._dtype('(pl.col("a").sum() + 1).over("g", mapping_strategy="join")')
+        assert dtype == Int64()
+
+    def test_join_entropy_broadcasts_scalar(self):
+        # entropy is the one reduction in the Float64-return set.
+        dtype = self._dtype('pl.col("a").entropy().over("g", mapping_strategy="join")')
+        assert dtype == Float64()
+
+    # -- "explode" / "group_to_rows" preserve the dtype ------------------------
+
+    def test_explode_preserves_dtype(self):
+        dtype = self._dtype('pl.col("a").over("g", mapping_strategy="explode")')
+        assert dtype == Int64()
+
+    def test_explode_agg_receiver_preserves_dtype(self):
+        dtype = self._dtype('pl.col("a").sum().over("g", mapping_strategy="explode")')
+        assert dtype == Int64()
+
+    def test_explicit_group_to_rows_preserves_dtype(self):
+        dtype = self._dtype('pl.col("a").over("g", mapping_strategy="group_to_rows")')
+        assert dtype == Int64()
+
+    def test_default_strategy_preserves_dtype(self):
+        dtype = self._dtype('pl.col("a").over("g")')
+        assert dtype == Int64()
+
+    # -- degrade to Unknown instead of guessing --------------------------------
+
+    def test_unknown_strategy_literal_degrades_to_unknown(self):
+        dtype = self._dtype('pl.col("a").over("g", mapping_strategy="bogus")')
+        assert dtype == Unknown()
+
+    def test_non_literal_strategy_degrades_to_unknown(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In], strat: str):
+                return df.select(o=pl.col("a").over("g", mapping_strategy=strat))
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == [], results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["o"].dtype == Unknown()
+
+    def test_join_unknown_cardinality_receiver_degrades_to_unknown(self):
+        # when/then/otherwise cardinality is decided by the branch values,
+        # which the classifier does not inspect — never guess.
+        dtype = self._dtype(
+            'pl.when(pl.col("a") > 0).then(pl.col("a")).otherwise(None)'
+            '.over("g", mapping_strategy="join")'
+        )
+        assert dtype == Unknown()
+
+    # -- key validation is unchanged -------------------------------------------
+
+    def test_join_keys_still_validated(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]):
+                return df.select(o=pl.col("a").over("ghost", mapping_strategy="join"))
+            """
+        )
+        results = analyze_source(source)
         assert any("PLY001" in e and "ghost" in e for e in results[0].errors)
 
 
