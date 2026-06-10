@@ -28,6 +28,7 @@ from polypolarism.types import (
     Null,
     Nullable,
     RowVar,
+    Struct,
     Time,
     UInt8,
     UInt16,
@@ -3381,6 +3382,75 @@ class TestM9StructAccess:
         results = analyze_source(source)
         assert results[0].has_errors is True
         assert any("missing" in e for e in results[0].errors)
+
+
+class TestStructRenameFields:
+    """Issue #48: ``struct.rename_fields([...])`` retypes the Struct.
+
+    Probed (polars 1.41.2): the new names are applied positionally to the
+    existing fields, and length mismatches do NOT raise — fewer names
+    truncate the struct to the renamed prefix, surplus names are ignored
+    (plain ``zip`` semantics). Non-literal names degrade to Unknown:
+    keeping the original field names was the false positive being fixed.
+    """
+
+    def _frame(self) -> FrameType:
+        return FrameType({"s": Struct({"x": Int64(), "y": Utf8()})})
+
+    def test_rename_fields_applies_names_in_order(self):
+        analyzer = _run_body(
+            self._frame(), 'out = df.select(pl.col("s").struct.rename_fields(["p", "q"]))'
+        )
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["s"].dtype == Struct({"p": Int64(), "q": Utf8()})
+
+    def test_rename_fields_tuple_form(self):
+        analyzer = _run_body(
+            self._frame(), 'out = df.select(pl.col("s").struct.rename_fields(("p", "q")))'
+        )
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["s"].dtype == Struct({"p": Int64(), "q": Utf8()})
+
+    def test_rename_fields_fewer_names_truncates(self):
+        # Probed: polars drops the un-named trailing fields without error.
+        analyzer = _run_body(
+            self._frame(), 'out = df.select(pl.col("s").struct.rename_fields(["p"]))'
+        )
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["s"].dtype == Struct({"p": Int64()})
+
+    def test_rename_fields_more_names_ignores_extras(self):
+        # Probed: surplus names are silently ignored.
+        analyzer = _run_body(
+            self._frame(), 'out = df.select(pl.col("s").struct.rename_fields(["p", "q", "r"]))'
+        )
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["s"].dtype == Struct({"p": Int64(), "q": Utf8()})
+
+    def test_rename_fields_non_literal_names_degrade_to_unknown(self):
+        # A variable name list is unresolvable — the column must degrade to
+        # Unknown, NOT keep the stale field names (issue #48).
+        analyzer = _run_body(
+            self._frame(), 'out = df.select(pl.col("s").struct.rename_fields(names))'
+        )
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["s"].dtype == Unknown()
+
+    def test_rename_fields_unknown_receiver_stays_silent(self):
+        analyzer = _run_body(
+            FrameType({"s": Unknown()}),
+            'out = df.select(pl.col("s").struct.rename_fields(["p", "q"]))',
+        )
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["s"].dtype == Unknown()
+
+    def test_rename_fields_nullable_receiver_preserves_wrapper(self):
+        analyzer = _run_body(
+            FrameType({"s": Nullable(Struct({"x": Int64()}))}),
+            'out = df.select(pl.col("s").struct.rename_fields(["p"]))',
+        )
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["s"].dtype == Nullable(Struct({"p": Int64()}))
 
 
 class TestM9Unnest:

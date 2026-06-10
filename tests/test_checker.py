@@ -2241,3 +2241,39 @@ class TestUnknownJoinKeyEndToEnd:
         assert len(results) == 1
         assert results[0].passed is False
         assert any("PLY010" in str(e) for e in results[0].errors)
+
+
+class TestIssue48StructRenameFieldsEndToEnd:
+    """Issue #48 repro: ``struct.rename_fields`` + ``unnest`` must satisfy a
+    strict declared schema with the new field names."""
+
+    SOURCE = textwrap.dedent(
+        """
+        import polars as pl
+        import pandera.polars as pa
+        from pandera.typing.polars import DataFrame
+
+        class SX(pa.DataFrameModel):
+            s: pl.Struct({"x": pl.Int64, "y": pl.Int64})
+
+            class Config:
+                coerce = True
+
+        class PQ(pa.DataFrameModel):
+            p: int
+            q: int
+
+            class Config:
+                strict = True
+                coerce = True
+
+        @pa.check_types
+        def ok_struct_rename_fields(df: DataFrame[SX]) -> DataFrame[PQ]:
+            return df.select(pl.col("s").struct.rename_fields(["p", "q"])).unnest("s")
+    """
+    )
+
+    def test_repro_passes(self):
+        results = check_source(self.SOURCE)
+        assert len(results) == 1
+        assert results[0].passed is True, results[0].errors

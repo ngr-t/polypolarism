@@ -1996,13 +1996,28 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                         )
                         return None
                     result = field_dtype
-            elif method == "rename_fields" and isinstance(receiver_inner, Struct):
-                # Returns a Struct with same dtypes but renamed; we keep dtypes.
-                result = receiver_inner
+            elif method == "rename_fields":
+                # Probed (polars 1.41.2; issue #48): the new names are
+                # applied positionally to the existing fields. Length
+                # mismatches do NOT raise — fewer names truncate the struct
+                # to the renamed prefix, surplus names are ignored — exactly
+                # ``zip`` semantics. Non-literal names or an unresolved
+                # receiver degrade to Unknown: keeping the original field
+                # names was issue #48's false positive.
+                new_names: list[str] | None = None
+                if call_node is not None and call_node.args:
+                    new_names = _str_list_or_tuple(call_node.args[0])
+                if new_names is not None and isinstance(receiver_inner, Struct):
+                    # strict=False: zip-truncation IS the probed semantics.
+                    result = Struct(
+                        dict(zip(new_names, receiver_inner.fields.values(), strict=False))
+                    )
+                else:
+                    result = Unknown()
 
         if result is None:
             return None
-        if receiver_is_nullable and not isinstance(result, Nullable):
+        if receiver_is_nullable and not isinstance(result, (Nullable, Unknown)):
             return Nullable(result)
         return result
 
