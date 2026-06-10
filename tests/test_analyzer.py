@@ -3303,3 +3303,59 @@ class TestUnknownColumnRegistration:
         inferred = results[0].inferred_return_type
         assert inferred is not None
         assert inferred.columns["a"].dtype == Unknown()
+
+
+class TestContainerFieldAnalysis:
+    """Issue #10: container-typed schema fields work with explode/unnest/.arr."""
+
+    HEADER = textwrap.dedent(
+        PANDERA_HEADER
+        + """
+            class In(pa.DataFrameModel):
+                id: int
+                vals: pl.List(pl.Int64) = pa.Field()
+                items: pl.List(pl.Struct) = pa.Field()
+                q: pl.Array(pl.Int64, 4) = pa.Field()
+"""
+    )
+
+    def test_explode_list_field_yields_element_type(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]) -> DataFrame[In]:
+                return df.explode("vals")
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        inferred = results[0].inferred_return_type
+        assert inferred is not None
+        assert inferred.columns["vals"].dtype == Int64()
+
+    def test_explode_then_unnest_unknown_struct_opens_frame(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]) -> DataFrame[In]:
+                return df.explode("items").unnest("items")
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        inferred = results[0].inferred_return_type
+        assert inferred is not None
+        assert "items" not in inferred.columns
+        assert inferred.rest is not None
+
+    def test_arr_sum_on_array_field_infers_element_type(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]) -> DataFrame[In]:
+                return df.select("id", total=pl.col("q").arr.sum())
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        inferred = results[0].inferred_return_type
+        assert inferred is not None
+        assert inferred.columns["id"].dtype == Int64()
+        assert inferred.columns["total"].dtype == Int64()
