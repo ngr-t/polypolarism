@@ -761,6 +761,111 @@ class TestIssue18NullabilityEndToEnd:
         assert result.passed is True, result.errors
 
 
+class TestIssue30IncompatibleArithmeticEndToEnd:
+    """Issue #30 repro: ``String + Int64`` arithmetic is flagged with PLY009.
+
+    polars raises InvalidOperationError at runtime for such pairs; the
+    output column registers as Unknown so the PLY009 is the only error.
+    Combinations polars permits (concat, temporal arithmetic, numeric
+    promotion) must keep passing.
+    """
+
+    HEADER = textwrap.dedent(
+        """
+        import polars as pl
+        import pandera.polars as pa
+        from datetime import date, timedelta
+        from pandera.typing.polars import DataFrame
+        """
+    )
+
+    def test_string_plus_int_fails_with_exactly_one_ply009(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            class In(pa.DataFrameModel):
+                s: str
+                n: int
+
+            class Out(pa.DataFrameModel):
+                r: int
+
+            def f(df: DataFrame[In]) -> DataFrame[Out]:
+                return df.select(r=pl.col("s") + pl.col("n"))
+            """
+        )
+        result = check_source(source)[0]
+        assert result.passed is False
+        assert len(result.errors) == 1, result.errors
+        assert "PLY009" in str(result.errors[0])
+
+    def test_string_concat_declared_str_passes(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            class In(pa.DataFrameModel):
+                a: str
+                b: str
+
+            class Out(pa.DataFrameModel):
+                r: str
+
+            def f(df: DataFrame[In]) -> DataFrame[Out]:
+                return df.select(r=pl.col("a") + pl.col("b"))
+            """
+        )
+        result = check_source(source)[0]
+        assert result.passed is True, result.errors
+
+    def test_date_difference_declared_duration_passes(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            class In(pa.DataFrameModel):
+                start: date
+                end: date
+
+            class Out(pa.DataFrameModel):
+                span: timedelta
+
+            def f(df: DataFrame[In]) -> DataFrame[Out]:
+                return df.select(span=pl.col("end") - pl.col("start"))
+            """
+        )
+        result = check_source(source)[0]
+        assert result.passed is True, result.errors
+
+    def test_duration_scaled_by_int_declared_duration_passes(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            class In(pa.DataFrameModel):
+                gap: timedelta
+
+            class Out(pa.DataFrameModel):
+                doubled: pl.Duration
+
+            def f(df: DataFrame[In]) -> DataFrame[Out]:
+                return df.select(doubled=pl.col("gap") * 2)
+            """
+        )
+        result = check_source(source)[0]
+        assert result.passed is True, result.errors
+
+    def test_int_plus_float_declared_float_passes(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            class In(pa.DataFrameModel):
+                n: int
+                x: float
+
+            class Out(pa.DataFrameModel):
+                r: float
+
+            def f(df: DataFrame[In]) -> DataFrame[Out]:
+                return df.select(r=pl.col("n") + pl.col("x"))
+            """
+        )
+        result = check_source(source)[0]
+        assert result.passed is True, result.errors
+
+
 class TestIssue19StrToIntegerEndToEnd:
     """Issue #19: ``str.to_integer()`` infers Int64, not Unknown.
 

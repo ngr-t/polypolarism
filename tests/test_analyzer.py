@@ -15,6 +15,7 @@ from polypolarism.types import (
     Date,
     Datetime,
     Decimal,
+    Duration,
     Float64,
     FrameType,
     Int8,
@@ -4919,6 +4920,235 @@ class TestArithmeticBinOpInference:
 
     def test_utf8_concat_with_nullable_operand_is_nullable_utf8(self):
         analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('s') + pl.col('t'))")
+        assert analyzer.var_types["out"].columns["r"].dtype == Nullable(Utf8())
+
+
+class TestArithmeticIncompatibleDtypes:
+    """Issue #30: arithmetic between incompatible dtypes flags PLY009.
+
+    Ground truth verified against polars 1.41.2 by driving the full
+    8-dtype x {+, -, *, /, //, %, **} product through ``df.select``
+    (probe script output in the implementing commit message). Allowed
+    cells — every other pairing within the closed set
+    {numeric, Utf8, Boolean, Date, Datetime, Time, Duration} raises
+    InvalidOperationError / SchemaError at runtime:
+
+    ``+``  num+num -> promoted; bool acts as int with num; bool+bool -> UInt32;
+           str+str / str+bool / bool+str -> String (bool casts to string);
+           Date+Duration -> Date; Datetime+Duration -> Datetime (tz kept);
+           Duration+Duration -> Duration. NOT Time+Duration.
+    ``-``  num/bool as ``+`` except bool-bool errors;
+           {Date,Datetime} - {Date,Datetime} -> Duration; Time-Time -> Duration;
+           Date-Duration -> Date; Datetime-Duration -> Datetime;
+           Duration-Duration -> Duration. NOT Duration-Date/Datetime/Time,
+           Time-Duration.
+    ``*``  num/bool as ``-`` (bool*bool errors); Duration*num and
+           num*Duration -> Duration. NOT Duration*bool, Duration*Duration.
+    ``/``  any num/bool mix -> Float64; Duration/num -> Duration;
+           Duration/Duration -> Float64. NOT Duration/bool, num/Duration,
+           and no str or Date/Datetime/Time operand anywhere.
+    ``//`` and ``%``  num mixes only (bool acts as int with num,
+           bool-bool errors); every str/temporal operand errors
+           (even Duration // int).
+    ``**`` plain numerics only — bool, str and temporal operands all error.
+
+    Operands outside the closed set (Unknown, unresolved, Decimal, List,
+    ...) and Null literals keep the legacy silent fallback — false
+    positives are worse than false negatives here.
+    """
+
+    def _frame(self) -> FrameType:
+        return FrameType(
+            {
+                "i": Int64(),
+                "f": Float64(),
+                "s": Utf8(),
+                "b": Boolean(),
+                "d": Date(),
+                "dt": Datetime(),
+                "tz": Datetime(tz="UTC"),
+                "t": Time(),
+                "du": Duration(),
+                "ni": Nullable(Int64()),
+                "nd": Nullable(Date()),
+                "ns": Nullable(Utf8()),
+                "u": Unknown(),
+                "dec": Decimal(10, 2),
+            }
+        )
+
+    # -- allowed combinations -------------------------------------------------
+
+    @pytest.mark.parametrize(
+        ("expr", "expected"),
+        [
+            # string concat (+ only); a Boolean operand casts to its string repr
+            ("pl.col('s') + pl.col('s')", Utf8()),
+            ("pl.col('s') + pl.col('b')", Utf8()),
+            ("pl.col('b') + pl.col('s')", Utf8()),
+            # boolean acts numeric when mixed with numerics
+            ("pl.col('b') + pl.col('i')", Int64()),
+            ("pl.col('i') + pl.col('b')", Int64()),
+            ("pl.col('b') + pl.col('f')", Float64()),
+            ("pl.col('b') + pl.col('b')", UInt32()),
+            ("pl.col('b') / pl.col('b')", Float64()),
+            ("pl.col('i') / pl.col('b')", Float64()),
+            ("pl.col('b') // pl.col('i')", Int64()),
+            ("pl.col('b') % pl.col('i')", Int64()),
+            # temporal differences -> Duration
+            ("pl.col('d') - pl.col('d')", Duration()),
+            ("pl.col('d') - pl.col('dt')", Duration()),
+            ("pl.col('dt') - pl.col('d')", Duration()),
+            ("pl.col('dt') - pl.col('dt')", Duration()),
+            ("pl.col('tz') - pl.col('tz')", Duration()),
+            ("pl.col('t') - pl.col('t')", Duration()),
+            # date/datetime shifted by a duration
+            ("pl.col('d') + pl.col('du')", Date()),
+            ("pl.col('du') + pl.col('d')", Date()),
+            ("pl.col('d') - pl.col('du')", Date()),
+            ("pl.col('dt') + pl.col('du')", Datetime()),
+            ("pl.col('du') + pl.col('dt')", Datetime()),
+            ("pl.col('dt') - pl.col('du')", Datetime()),
+            ("pl.col('tz') + pl.col('du')", Datetime(tz="UTC")),
+            ("pl.col('du') + pl.col('tz')", Datetime(tz="UTC")),
+            ("pl.col('tz') - pl.col('du')", Datetime(tz="UTC")),
+            # duration arithmetic
+            ("pl.col('du') + pl.col('du')", Duration()),
+            ("pl.col('du') - pl.col('du')", Duration()),
+            ("pl.col('du') * 2", Duration()),
+            ("2 * pl.col('du')", Duration()),
+            ("pl.col('du') * pl.col('f')", Duration()),
+            ("pl.col('du') / 2", Duration()),
+            ("pl.col('du') / pl.col('f')", Duration()),
+            ("pl.col('du') / pl.col('du')", Float64()),
+            # pow is numeric-only
+            ("pl.col('i') ** pl.col('i')", Int64()),
+            ("pl.col('i') ** pl.col('f')", Float64()),
+        ],
+    )
+    def test_allowed_combination_infers_dtype(self, expr: str, expected) -> None:
+        analyzer = _run_body(self._frame(), f"out = df.select(r={expr})")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["r"].dtype == expected
+
+    # -- known-invalid combinations -------------------------------------------
+
+    @pytest.mark.parametrize(
+        "expr",
+        [
+            # string with numeric / string non-concat ops
+            "pl.col('s') + pl.col('i')",
+            "pl.col('i') + pl.col('s')",
+            "pl.col('s') + 1",
+            "pl.col('s') - pl.col('s')",
+            "pl.col('s') * pl.col('i')",
+            "pl.col('s') / pl.col('s')",
+            "pl.col('s') // pl.col('i')",
+            "pl.col('s') % pl.col('s')",
+            "pl.col('s') ** pl.col('s')",
+            "pl.col('s') + pl.col('d')",
+            # boolean-only arithmetic beyond + and /
+            "pl.col('b') - pl.col('b')",
+            "pl.col('b') * pl.col('b')",
+            "pl.col('b') // pl.col('b')",
+            "pl.col('b') % pl.col('b')",
+            "pl.col('b') ** pl.col('i')",
+            "pl.col('i') ** pl.col('b')",
+            # temporal combinations polars rejects
+            "pl.col('d') + pl.col('d')",
+            "pl.col('d') + 1",
+            "pl.col('dt') + pl.col('dt')",
+            "pl.col('d') + pl.col('dt')",
+            "pl.col('t') + pl.col('t')",
+            "pl.col('t') + pl.col('du')",
+            "pl.col('du') + pl.col('t')",
+            "pl.col('t') - pl.col('du')",
+            "pl.col('du') - pl.col('d')",
+            "pl.col('du') - pl.col('dt')",
+            "pl.col('d') - pl.col('t')",
+            "pl.col('d') - 1",
+            "pl.col('i') + pl.col('d')",
+            "pl.col('i') - pl.col('du')",
+            "pl.col('b') + pl.col('d')",
+            "pl.col('du') * pl.col('du')",
+            "pl.col('du') * pl.col('b')",
+            "pl.col('d') * 2",
+            "pl.col('d') / pl.col('d')",
+            "pl.col('dt') / 2",
+            "pl.col('t') / 2",
+            "pl.col('i') / pl.col('du')",
+            "pl.col('du') / pl.col('b')",
+            "pl.col('du') // 2",
+            "pl.col('du') % pl.col('du')",
+            "pl.col('d') % pl.col('d')",
+            "pl.col('du') ** pl.col('i')",
+        ],
+    )
+    def test_invalid_combination_flags_ply009(self, expr: str) -> None:
+        analyzer = _run_body(self._frame(), f"out = df.select(r={expr})")
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY009" in analyzer.errors[0]
+        # The error is the signal — the output registers as Unknown.
+        assert analyzer.var_types["out"].columns["r"].dtype == Unknown()
+
+    def test_error_message_names_dtypes_and_op(self):
+        analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('s') + pl.col('i'))")
+        assert "Utf8 + Int64" in analyzer.errors[0]
+
+    # -- nullability propagation on allowed temporal/concat results -----------
+
+    def test_nullable_date_difference_is_nullable_duration(self):
+        analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('nd') - pl.col('d'))")
+        assert analyzer.errors == []
+        assert analyzer.var_types["out"].columns["r"].dtype == Nullable(Duration())
+
+    def test_duration_times_nullable_int_is_nullable_duration(self):
+        analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('du') * pl.col('ni'))")
+        assert analyzer.errors == []
+        assert analyzer.var_types["out"].columns["r"].dtype == Nullable(Duration())
+
+    def test_nullable_string_concat_with_bool_is_nullable_utf8(self):
+        analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('ns') + pl.col('b'))")
+        assert analyzer.errors == []
+        assert analyzer.var_types["out"].columns["r"].dtype == Nullable(Utf8())
+
+    def test_invalid_pair_detected_under_nullable_wrappers(self):
+        """Classification unwraps Nullable: Nullable[Utf8] + Nullable[Int64] errors."""
+        analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('ns') + pl.col('ni'))")
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY009" in analyzer.errors[0]
+        assert "Utf8 + Int64" in analyzer.errors[0]
+
+    # -- silent fallback: not fully understood => no error ---------------------
+
+    def test_unknown_operand_is_silent(self):
+        analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('u') + pl.col('s'))")
+        assert analyzer.errors == []
+        assert analyzer.var_types["out"].columns["r"].dtype == Unknown()
+
+    def test_unresolved_operand_is_silent(self):
+        analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('s') + helper())")
+        assert analyzer.errors == []
+        assert analyzer.var_types["out"].columns["r"].dtype == Utf8()
+
+    def test_decimal_operand_is_silent(self):
+        """Decimal is outside the fully-understood set — no PLY009."""
+        analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('dec') + pl.col('i'))")
+        assert analyzer.errors == []
+
+    def test_list_operand_is_silent(self):
+        frame = FrameType({"xs": ListT(Int64()), "i": Int64()})
+        analyzer = _run_body(frame, "out = df.select(r=pl.col('xs') + pl.col('i'))")
+        assert analyzer.errors == []
+
+    def test_null_literal_keeps_promote_path(self):
+        analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('i') + None)")
+        assert analyzer.errors == []
+        assert analyzer.var_types["out"].columns["r"].dtype == Nullable(Int64())
+
+    def test_null_literal_with_string_keeps_promote_path(self):
+        analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('s') + None)")
+        assert analyzer.errors == []
         assert analyzer.var_types["out"].columns["r"].dtype == Nullable(Utf8())
 
 

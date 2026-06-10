@@ -33,6 +33,7 @@ from polypolarism.diagnostics import (
     PLY004,
     PLY005,
     PLY006,
+    PLY009,
     PLY010,
     PLY011,
     PLY020,
@@ -79,6 +80,7 @@ from polypolarism.pandera_schema import (
     collect_schemas_with_imports,
 )
 from polypolarism.types import (
+    NUMERIC_DTYPES,
     Boolean,
     ColumnSpec,
     DataType,
@@ -276,6 +278,161 @@ def _wrap_nullable_if_any(result: DataType, operands: list[DataType]) -> DataTyp
     if any(isinstance(t, (Nullable, Null)) for t in operands):
         return Nullable(result)
     return result
+
+
+# ---- binary-arithmetic dtype rules (issue #30) ------------------------------
+#
+# Classification of ``left <op> right`` over the dtypes whose arithmetic we
+# fully understand: numeric ∪ {Utf8, Boolean, Date, Datetime, Time, Duration}.
+# Verified against polars 1.41.2 by driving the full dtype x op product
+# through ``df.select`` (table in TestArithmeticIncompatibleDtypes). Anything
+# outside this set keeps the legacy silent fallback — false positives are
+# worse than false negatives here.
+
+# Sentinel: both operand bases are understood and polars rejects the pair+op
+# at runtime (InvalidOperationError) — report PLY009.
+_ARITH_INVALID = object()
+
+_OP_SYMBOLS: dict[type[ast.operator], str] = {
+    ast.Add: "+",
+    ast.Sub: "-",
+    ast.Mult: "*",
+    ast.Div: "/",
+    ast.FloorDiv: "//",
+    ast.Mod: "%",
+    ast.Pow: "**",
+}
+
+
+def _arith_category(dtype: DataType) -> str | None:
+    """Category of a (Nullable-unwrapped) dtype for arithmetic classification.
+
+    ``None`` means the dtype is outside the fully-understood set (Unknown,
+    Decimal, Categorical, List, ...) and the caller must stay silent.
+    """
+    if type(dtype) in NUMERIC_DTYPES:
+        return "num"
+    if isinstance(dtype, Utf8):
+        return "str"
+    if isinstance(dtype, Boolean):
+        return "bool"
+    if isinstance(dtype, Date):
+        return "date"
+    if isinstance(dtype, Datetime):
+        return "datetime"
+    if isinstance(dtype, Time):
+        return "time"
+    if isinstance(dtype, Duration):
+        return "dur"
+    return None
+
+
+def _promote_or_none(left: DataType, right: DataType) -> DataType | None:
+    """``promote_types`` that degrades to the legacy fallback instead of raising.
+
+    ``expr_infer.promote_types`` only knows Int32/Int64/Float32/Float64;
+    exotic numerics (Int8, UInt*, Float16, ...) raise TypePromotionError.
+    Those are still *valid* polars arithmetic, so return ``None`` to let the
+    caller keep the historical keep-left-dtype behaviour.
+    """
+    try:
+        return promote_types(left, right)
+    except TypePromotionError:
+        return None
+
+
+def _numeric_arith(
+    op: ast.operator, left: DataType, lcat: str, right: DataType, rcat: str
+) -> DataType | object | None:
+    """Arithmetic where both operands are numeric or Boolean."""
+    if isinstance(op, ast.Div):
+        # True division always yields Float64, bool operands included.
+        return Float64()
+    if isinstance(op, ast.Pow):
+        # ``**`` rejects bool as base or exponent.
+        if "bool" in (lcat, rcat):
+            return _ARITH_INVALID
+        return _promote_or_none(left, right)
+    if not isinstance(op, (ast.Add, ast.Sub, ast.Mult, ast.FloorDiv, ast.Mod)):
+        return None  # << >> @ ... — not polars expression arithmetic.
+    if lcat == "bool" and rcat == "bool":
+        # Only ``+`` is defined on a pair of Booleans (count of trues).
+        return UInt32() if isinstance(op, ast.Add) else _ARITH_INVALID
+    if lcat == "bool":
+        return right  # bool acts as an int — numeric operand's dtype wins
+    if rcat == "bool":
+        return left
+    return _promote_or_none(left, right)
+
+
+def _temporal_arith(
+    op: ast.operator, left: DataType, lcat: str, right: DataType, rcat: str
+) -> DataType | object | None:
+    """Arithmetic where at least one operand is Date/Datetime/Time/Duration.
+
+    The non-temporal side can only be numeric or Boolean here (string pairs
+    are resolved before this is called).
+    """
+    if isinstance(op, ast.Add):
+        if lcat == "date" and rcat == "dur" or lcat == "dur" and rcat == "date":
+            return Date()
+        if lcat == "datetime" and rcat == "dur":
+            return left  # keep the operand instance — tz is preserved
+        if lcat == "dur" and rcat == "datetime":
+            return right
+        if lcat == "dur" and rcat == "dur":
+            return Duration()
+        return _ARITH_INVALID  # Time+Duration errors too (verified)
+    if isinstance(op, ast.Sub):
+        if lcat in ("date", "datetime") and rcat in ("date", "datetime"):
+            return Duration()
+        if lcat == "time" and rcat == "time":
+            return Duration()
+        if lcat == "date" and rcat == "dur":
+            return Date()
+        if lcat == "datetime" and rcat == "dur":
+            return left  # tz preserved
+        if lcat == "dur" and rcat == "dur":
+            return Duration()
+        return _ARITH_INVALID  # Duration-Date, Time-Duration, ... all error
+    if isinstance(op, ast.Mult):
+        if (lcat, rcat) in (("dur", "num"), ("num", "dur")):
+            return Duration()
+        return _ARITH_INVALID  # Duration*bool and Duration*Duration error
+    if isinstance(op, ast.Div):
+        if lcat == "dur" and rcat == "num":
+            return Duration()
+        if lcat == "dur" and rcat == "dur":
+            return Float64()
+        return _ARITH_INVALID  # num/Duration, Duration/bool, Date/... error
+    if isinstance(op, (ast.FloorDiv, ast.Mod, ast.Pow)):
+        # No temporal operand supports // % ** — even Duration // int errors.
+        return _ARITH_INVALID
+    return None
+
+
+def _arith_verdict(
+    op: ast.operator, left_inner: DataType, right_inner: DataType
+) -> DataType | object | None:
+    """Three-way outcome for binary arithmetic on Nullable-unwrapped bases.
+
+    Returns the result ``DataType`` when polars allows the combination,
+    ``_ARITH_INVALID`` when polars provably rejects it, or ``None`` when an
+    operand is outside the fully-understood set (silent legacy fallback).
+    """
+    lcat = _arith_category(left_inner)
+    rcat = _arith_category(right_inner)
+    if lcat is None or rcat is None:
+        return None
+    if lcat in ("num", "bool") and rcat in ("num", "bool"):
+        return _numeric_arith(op, left_inner, lcat, right_inner, rcat)
+    if "str" in (lcat, rcat):
+        # Concat: ``+`` over str/str or str/bool (Boolean casts to its
+        # string repr). Every other op or partner dtype errors at runtime.
+        if isinstance(op, ast.Add) and {lcat, rcat} <= {"str", "bool"}:
+            return Utf8()
+        return _ARITH_INVALID
+    return _temporal_arith(op, left_inner, lcat, right_inner, rcat)
 
 
 def _wrap_like(receiver: DataType, new_inner: DataType) -> DataType:
@@ -1055,12 +1212,42 @@ class ExpressionAnalyzer(ast.NodeVisitor):
 
         # Arithmetic binary operations like pl.col("x") * 2. Both operands
         # are resolved (keeping the missing-column error side-effects) and
-        # combined with polars' promotion rules.
+        # classified three ways (issue #30): allowed -> result dtype,
+        # known-invalid -> PLY009 + Unknown output, otherwise the legacy
+        # promote-or-keep-left fallback.
         if isinstance(inner_node, ast.BinOp):
             left_name, left_type = self.analyze_select_expr(inner_node.left)
             _, right_type = self.analyze_select_expr(inner_node.right)
             output_name = alias if alias else left_name
             resolved = [t for t in (left_type, right_type) if t is not None]
+
+            if (
+                left_type is not None
+                and right_type is not None
+                # Null literals keep promote_types' Null -> Nullable[T] rules.
+                and not isinstance(left_type, Null)
+                and not isinstance(right_type, Null)
+            ):
+                left_inner = left_type.inner if isinstance(left_type, Nullable) else left_type
+                right_inner = right_type.inner if isinstance(right_type, Nullable) else right_type
+                verdict = _arith_verdict(inner_node.op, left_inner, right_inner)
+                if verdict is _ARITH_INVALID:
+                    op_sym = _OP_SYMBOLS.get(type(inner_node.op), "?")
+                    self.errors.append(
+                        tag(
+                            PLY009,
+                            f"arithmetic '{left_inner} {op_sym} {right_inner}' is not "
+                            f"supported — polars raises InvalidOperationError at "
+                            f"runtime; cast an operand first",
+                        )
+                    )
+                    # The error is the signal; don't fabricate a dtype — the
+                    # named output registers as Unknown downstream.
+                    return output_name, None
+                if isinstance(verdict, DataType):
+                    return output_name, _wrap_nullable_if_any(verdict, resolved)
+                # verdict is None — operand outside the understood set;
+                # fall through to the legacy behaviour below.
 
             if isinstance(inner_node.op, ast.Div):
                 # polars true division always yields Float64, even for
@@ -1075,9 +1262,10 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 try:
                     return output_name, promote_types(left_type, right_type)
                 except TypePromotionError:
-                    # Non-numeric arithmetic (e.g. Utf8 + Utf8 concat):
-                    # keep the left operand's dtype, but nullability from
-                    # either side still propagates.
+                    # Arithmetic outside the understood set (Decimal,
+                    # List, exotic ints, ...): keep the left operand's
+                    # dtype, but nullability from either side still
+                    # propagates.
                     return output_name, _wrap_nullable_if_any(left_type, resolved)
             elif resolved:
                 # Only one operand resolved — use its type (the historical
