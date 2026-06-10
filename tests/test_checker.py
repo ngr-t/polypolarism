@@ -861,3 +861,49 @@ class TestIssue21SeqVariantsEndToEnd:
         by_name = {r.function_name: r for r in results}
         for name in ("ok_seq_strings", "ok_seq_exprs"):
             assert by_name[name].passed is True, (name, by_name[name].errors)
+
+
+class TestIssue20PlAllExcludeEndToEnd:
+    """Issue #20 repro: pl.all() / pl.exclude(...) inside select(), with
+    the already-working cs.* / with_columns forms as regression guards."""
+
+    ISSUE_SOURCE = textwrap.dedent("""
+        import polars as pl
+        import polars.selectors as cs
+        import pandera.polars as pa
+        from pandera.typing.polars import DataFrame
+
+        class TC(pa.DataFrameModel):
+            a: int
+            b: int
+            name: str
+            class Config:
+                coerce = True
+
+        class AB(pa.DataFrameModel):
+            a: int
+            b: int
+            class Config:
+                strict = True
+                coerce = True
+
+        def sel_all(df: DataFrame[TC]) -> DataFrame[TC]:
+            return df.select(pl.all())
+
+        def sel_exclude(df: DataFrame[TC]) -> DataFrame[AB]:
+            return df.select(pl.exclude("name"))
+
+        def sel_cs(df: DataFrame[TC]) -> DataFrame[AB]:
+            return df.select(cs.numeric())
+
+        def with_cols_all(df: DataFrame[TC]) -> DataFrame[TC]:
+            return df.with_columns(pl.all())
+    """)
+
+    def test_issue_20_repro_functions_pass(self):
+        results = check_source(self.ISSUE_SOURCE)
+
+        assert len(results) == 4
+        by_name = {r.function_name: r for r in results}
+        for name in ("sel_all", "sel_exclude", "sel_cs", "with_cols_all"):
+            assert by_name[name].passed is True, (name, by_name[name].errors)

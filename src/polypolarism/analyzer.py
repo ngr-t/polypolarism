@@ -368,7 +368,38 @@ def _resolve_selector(node: ast.expr, frame: FrameType) -> list[str] | None:
         return None
     if not isinstance(node.func, ast.Attribute):
         return None
-    if not (isinstance(node.func.value, ast.Name) and node.func.value.id == "cs"):
+    if not isinstance(node.func.value, ast.Name):
+        return None
+
+    # ``pl.all()`` / ``pl.exclude(...)`` are selector-flavored top-level
+    # expressions with the same column-set semantics as ``cs.all()`` /
+    # ``cs.exclude(...)`` (issue #20).
+    if node.func.value.id == "pl":
+        if node.func.attr == "all":
+            # Only the no-arg form selects columns; ``pl.all("col")`` is the
+            # "all values truthy" boolean aggregation — leave it to
+            # expression analysis.
+            if node.args:
+                return None
+            return list(frame.columns.keys())
+        if node.func.attr == "exclude":
+            # String constants and list/tuple-of-string args only; anything
+            # else (variables, dtypes, nested selectors) is unresolvable
+            # here and falls through to expression analysis.
+            excluded: set[str] = set()
+            for arg in node.args:
+                single = _str_constant(arg)
+                multi = _str_list_or_tuple(arg)
+                if single is not None:
+                    excluded.add(single)
+                elif multi is not None:
+                    excluded.update(multi)
+                else:
+                    return None
+            return [c for c in frame.columns if c not in excluded]
+        return None
+
+    if node.func.value.id != "cs":
         return None
     name = node.func.attr
 

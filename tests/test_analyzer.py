@@ -4915,3 +4915,66 @@ class TestSeqVariants:
         frame = FrameType({"a": Int64()})
         analyzer = _run_body(frame, 'out = df.select_seq("ghost")')
         assert any("ghost" in e for e in analyzer.errors)
+
+
+class TestPlAllExcludeSelectors:
+    """#20: pl.all() / pl.exclude(...) resolve like cs.* selectors."""
+
+    @staticmethod
+    def _resolve(expr: str, frame: FrameType):
+        import ast
+
+        from polypolarism.analyzer import _resolve_selector
+
+        return _resolve_selector(ast.parse(expr, mode="eval").body, frame)
+
+    def _frame(self) -> FrameType:
+        return FrameType({"a": Int64(), "b": Int64(), "name": Utf8()})
+
+    def test_pl_all_no_args_resolves_to_all_columns(self):
+        assert self._resolve("pl.all()", self._frame()) == ["a", "b", "name"]
+
+    def test_pl_all_with_arg_is_not_a_selector(self):
+        # ``pl.all("x")`` is the boolean "all values truthy" aggregation,
+        # not a selector — it must fall through to expression analysis.
+        assert self._resolve('pl.all("a")', self._frame()) is None
+
+    def test_pl_exclude_string_arg(self):
+        assert self._resolve('pl.exclude("name")', self._frame()) == ["a", "b"]
+
+    def test_pl_exclude_varargs(self):
+        assert self._resolve('pl.exclude("a", "name")', self._frame()) == ["b"]
+
+    def test_pl_exclude_list_arg(self):
+        assert self._resolve('pl.exclude(["a", "b"])', self._frame()) == ["name"]
+
+    def test_pl_exclude_non_literal_arg_is_not_resolved(self):
+        assert self._resolve("pl.exclude(some_var)", self._frame()) is None
+
+    def test_pl_all_on_open_frame_returns_known_columns(self):
+        frame = FrameType({"id": Int64()}, rest=RowVar("r"))
+        assert self._resolve("pl.all()", frame) == ["id"]
+
+    def test_select_pl_all(self):
+        frame = FrameType({"a": Int64(), "name": Utf8()})
+        analyzer = _run_body(frame, "out = df.select(pl.all())")
+        assert analyzer.errors == []
+        assert analyzer.var_types["out"] == FrameType({"a": Int64(), "name": Utf8()})
+
+    def test_select_pl_exclude(self):
+        frame = FrameType({"a": Int64(), "b": Int64(), "name": Utf8()})
+        analyzer = _run_body(frame, "out = df.select(pl.exclude('name'))")
+        assert analyzer.errors == []
+        assert analyzer.var_types["out"] == FrameType({"a": Int64(), "b": Int64()})
+
+    def test_with_columns_pl_exclude_keeps_schema(self):
+        frame = FrameType({"a": Int64(), "name": Utf8()})
+        analyzer = _run_body(frame, "out = df.with_columns(pl.exclude('name'))")
+        assert analyzer.errors == []
+        assert analyzer.var_types["out"] == FrameType({"a": Int64(), "name": Utf8()})
+
+    def test_drop_pl_exclude(self):
+        frame = FrameType({"id": Int64(), "a": Int64(), "b": Int64()})
+        analyzer = _run_body(frame, "out = df.drop(pl.exclude('id'))")
+        assert analyzer.errors == []
+        assert analyzer.var_types["out"] == FrameType({"id": Int64()})
