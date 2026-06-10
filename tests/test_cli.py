@@ -167,6 +167,13 @@ class TestCheckDirectory:
         assert len(results) == 1
         assert results[0].passed is True, results[0].errors
 
+    def test_over_join_diff_fixture_passes(self):
+        """Issues #45/#46 fixture: over(mapping_strategy=...) and temporal diff."""
+        results = check_file(FIXTURES_DIR / "valid" / "over_join_diff.py")
+
+        assert len(results) == 4
+        assert all(r.passed for r in results), [r.errors for r in results]
+
 
 class TestCheckWarningFixtures:
     """Files in fixtures/warning produce warnings but still pass type-check."""

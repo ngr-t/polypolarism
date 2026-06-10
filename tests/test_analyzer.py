@@ -6886,6 +6886,154 @@ class TestOverKeyValidation:
         assert any("PLY001" in e and "ghost" in e for e in results[0].errors)
 
 
+class TestOverMappingStrategy:
+    """Issue #45: ``over(mapping_strategy=...)`` result dtype.
+
+    Probed (polars 1.41.2) over the strategy x expression product:
+
+    - ``"join"`` gathers a *length-preserving / multi-valued* expression
+      into ``List(<element dtype>)`` per row (inner nullability preserved:
+      a nullable receiver yields lists with null elements); but a
+      *scalar-per-group* expression (an aggregation, including arithmetic
+      on one, e.g. ``sum() + 1``) broadcasts WITHOUT a List wrapper.
+    - ``"explode"`` and ``"group_to_rows"`` (the default) preserve the
+      dtype for every expression shape.
+    - An unknown / non-literal strategy value degrades to Unknown.
+    """
+
+    HEADER = textwrap.dedent(
+        PANDERA_HEADER
+        + """
+            class In(pa.DataFrameModel):
+                a: int
+                g: str
+                n: float = pa.Field(nullable=True)
+        """
+    )
+
+    def _dtype(self, expr: str):
+        source = self.HEADER + textwrap.dedent(
+            f"""
+            def f(df: DataFrame[In]):
+                return df.select(o={expr})
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == [], results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        return ft.columns["o"].dtype
+
+    # -- "join" on length-preserving expressions -> List ----------------------
+
+    def test_join_bare_col_is_list(self):
+        dtype = self._dtype('pl.col("a").over("g", mapping_strategy="join")')
+        assert dtype == ListT(Int64())
+
+    def test_join_nullable_receiver_keeps_inner_nullable(self):
+        dtype = self._dtype('pl.col("n").over("g", mapping_strategy="join")')
+        assert dtype == ListT(Nullable(Float64()))
+
+    def test_join_shift_receiver_is_list_of_nullable(self):
+        dtype = self._dtype('pl.col("a").shift().over("g", mapping_strategy="join")')
+        assert dtype == ListT(Nullable(Int64()))
+
+    def test_join_elementwise_arithmetic_is_list(self):
+        dtype = self._dtype('(pl.col("a") * 2).over("g", mapping_strategy="join")')
+        assert dtype == ListT(Int64())
+
+    def test_join_rank_receiver_is_list(self):
+        dtype = self._dtype('pl.col("a").rank().over("g", mapping_strategy="join")')
+        assert dtype == ListT(Float64())
+
+    def test_join_boolean_predicate_is_list(self):
+        dtype = self._dtype('pl.col("a").is_null().over("g", mapping_strategy="join")')
+        assert dtype == ListT(Boolean())
+
+    def test_join_drop_nulls_receiver_is_list(self):
+        # drop_nulls is multi-valued per group (length-changing) -> List;
+        # the stripped nullability stays stripped inside the list (probed).
+        dtype = self._dtype('pl.col("n").drop_nulls().over("g", mapping_strategy="join")')
+        assert dtype == ListT(Float64())
+
+    # -- "join" on scalar-per-group expressions -> broadcast (no List) --------
+
+    def test_join_sum_broadcasts_scalar(self):
+        dtype = self._dtype('pl.col("a").sum().over("g", mapping_strategy="join")')
+        assert dtype == Int64()
+
+    def test_join_mean_broadcasts_scalar(self):
+        dtype = self._dtype('pl.col("a").mean().over("g", mapping_strategy="join")')
+        assert dtype == Float64()
+
+    def test_join_agg_arithmetic_broadcasts_scalar(self):
+        dtype = self._dtype('(pl.col("a").sum() + 1).over("g", mapping_strategy="join")')
+        assert dtype == Int64()
+
+    def test_join_entropy_broadcasts_scalar(self):
+        # entropy is the one reduction in the Float64-return set.
+        dtype = self._dtype('pl.col("a").entropy().over("g", mapping_strategy="join")')
+        assert dtype == Float64()
+
+    # -- "explode" / "group_to_rows" preserve the dtype ------------------------
+
+    def test_explode_preserves_dtype(self):
+        dtype = self._dtype('pl.col("a").over("g", mapping_strategy="explode")')
+        assert dtype == Int64()
+
+    def test_explode_agg_receiver_preserves_dtype(self):
+        dtype = self._dtype('pl.col("a").sum().over("g", mapping_strategy="explode")')
+        assert dtype == Int64()
+
+    def test_explicit_group_to_rows_preserves_dtype(self):
+        dtype = self._dtype('pl.col("a").over("g", mapping_strategy="group_to_rows")')
+        assert dtype == Int64()
+
+    def test_default_strategy_preserves_dtype(self):
+        dtype = self._dtype('pl.col("a").over("g")')
+        assert dtype == Int64()
+
+    # -- degrade to Unknown instead of guessing --------------------------------
+
+    def test_unknown_strategy_literal_degrades_to_unknown(self):
+        dtype = self._dtype('pl.col("a").over("g", mapping_strategy="bogus")')
+        assert dtype == Unknown()
+
+    def test_non_literal_strategy_degrades_to_unknown(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In], strat: str):
+                return df.select(o=pl.col("a").over("g", mapping_strategy=strat))
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == [], results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["o"].dtype == Unknown()
+
+    def test_join_unknown_cardinality_receiver_degrades_to_unknown(self):
+        # when/then/otherwise cardinality is decided by the branch values,
+        # which the classifier does not inspect — never guess.
+        dtype = self._dtype(
+            'pl.when(pl.col("a") > 0).then(pl.col("a")).otherwise(None)'
+            '.over("g", mapping_strategy="join")'
+        )
+        assert dtype == Unknown()
+
+    # -- key validation is unchanged -------------------------------------------
+
+    def test_join_keys_still_validated(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]):
+                return df.select(o=pl.col("a").over("ghost", mapping_strategy="join"))
+            """
+        )
+        results = analyze_source(source)
+        assert any("PLY001" in e and "ghost" in e for e in results[0].errors)
+
+
 class TestComparisonIncompatibleDtypes:
     """Issue #33: comparisons between incompatible dtypes flag PLY009.
 

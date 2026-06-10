@@ -1859,6 +1859,91 @@ class TestShiftFillValueEndToEnd:
         assert results[0].passed is True, results[0].errors
 
 
+class TestOverMappingStrategyEndToEnd:
+    """Issue #45 repro: ``over(..., mapping_strategy="join")`` is List.
+
+    Probed (polars 1.41.2): a length-preserving expression under "join"
+    gathers each partition's values into a List per row; an aggregation
+    broadcasts its scalar unchanged.
+    """
+
+    HEADER = textwrap.dedent("""
+        import polars as pl
+        import pandera.polars as pa
+        from pandera.typing.polars import DataFrame
+
+        class AG(pa.DataFrameModel):
+            a: int
+            g: str
+
+            class Config:
+                coerce = True
+    """)
+
+    def test_join_strategy_passes_list_declaration(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            class OverJoinOut(pa.DataFrameModel):
+                o: pl.List(pl.Int64)
+
+                class Config:
+                    strict = True
+                    coerce = True
+
+            @pa.check_types
+            def ok_over_join(df: DataFrame[AG]) -> DataFrame[OverJoinOut]:
+                return df.select(o=pl.col("a").over("g", mapping_strategy="join"))
+        """
+        )
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is True, results[0].errors
+
+    def test_default_strategy_still_fails_list_declaration(self):
+        # Regression guard: the default group_to_rows stays scalar, so the
+        # List declaration must keep failing.
+        source = self.HEADER + textwrap.dedent(
+            """
+            class OverJoinOut(pa.DataFrameModel):
+                o: pl.List(pl.Int64)
+
+                class Config:
+                    strict = True
+                    coerce = True
+
+            @pa.check_types
+            def over_default(df: DataFrame[AG]) -> DataFrame[OverJoinOut]:
+                return df.select(o=pl.col("a").over("g"))
+        """
+        )
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is False
+        assert any(isinstance(e, TypeDifference) for e in results[0].errors)
+
+    def test_join_aggregation_passes_scalar_declaration(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            class ScalarOut(pa.DataFrameModel):
+                o: int
+
+                class Config:
+                    strict = True
+                    coerce = True
+
+            @pa.check_types
+            def over_join_sum(df: DataFrame[AG]) -> DataFrame[ScalarOut]:
+                return df.select(o=pl.col("a").sum().over("g", mapping_strategy="join"))
+        """
+        )
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is True, results[0].errors
+
+
 class TestDiffTemporalEndToEnd:
     """Issue #46 repro: ``diff()`` on a Date column yields Duration.
 
