@@ -665,3 +665,64 @@ class TestNoReturnTypeInferred:
 
         assert result.passed is False
         assert any("infer" in str(e).lower() for e in result.errors)
+
+
+class TestSemiAntiGatherEndToEnd:
+    """Issue #15 repro: semi/anti joins and gather_every are schema-preserving."""
+
+    ISSUE_SOURCE = textwrap.dedent("""
+        import polars as pl
+        import pandera.polars as pa
+        from pandera.typing.polars import DataFrame
+
+        class L(pa.DataFrameModel):
+            id: int
+            v: int
+            class Config:
+                coerce = True
+
+        class R(pa.DataFrameModel):
+            id: int
+            class Config:
+                coerce = True
+
+        def ok_semi(left: DataFrame[L], right: DataFrame[R]) -> DataFrame[L]:
+            return left.join(right, on="id", how="semi")
+
+        def ok_anti(left: DataFrame[L], right: DataFrame[R]) -> DataFrame[L]:
+            return left.join(right, on="id", how="anti")
+
+        def ok_gather_every(left: DataFrame[L]) -> DataFrame[L]:
+            return left.gather_every(2)
+    """)
+
+    def test_issue_15_repro_functions_pass(self):
+        results = check_source(self.ISSUE_SOURCE)
+
+        assert len(results) == 3
+        by_name = {r.function_name: r for r in results}
+        for name in ("ok_semi", "ok_anti", "ok_gather_every"):
+            assert by_name[name].passed is True, (name, by_name[name].errors)
+
+    def test_semi_join_missing_key_fails(self):
+        """Key validation still applies under how='semi'."""
+        source = textwrap.dedent("""
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+
+            class L(pa.DataFrameModel):
+                id: int
+
+            class R(pa.DataFrameModel):
+                id: int
+
+            def bad(left: DataFrame[L], right: DataFrame[R]) -> DataFrame[L]:
+                return left.join(right, on="missing", how="semi")
+        """)
+
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is False
+        assert any("PLY010" in str(e) for e in results[0].errors)
