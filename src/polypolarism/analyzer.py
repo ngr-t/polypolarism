@@ -40,6 +40,7 @@ from polypolarism.diagnostics import (
     PLY011,
     PLY012,
     PLY013,
+    PLY014,
     PLY020,
     PLY021,
     PLY022,
@@ -2699,6 +2700,12 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     # (issue #29). Must be dispatched before that fallback —
                     # ``sort`` stays in the compat identity set.
                     return _lazy_like(self._infer_sort_call(receiver_type, node), receiver_type)
+                elif method_name == "unique":
+                    # Identity-shaped, but the ``subset=`` columns are
+                    # validated (issue #35). Like ``sort``, dispatched before
+                    # the identity fallback — ``unique`` stays in the compat
+                    # identity set.
+                    return _lazy_like(self._infer_unique_call(receiver_type, node), receiver_type)
                 elif method_name == "explode":
                     return _lazy_like(self._infer_explode_call(receiver_type, node), receiver_type)
                 elif method_name == "vstack":
@@ -3924,6 +3931,36 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 if name not in input_frame.columns and input_frame.rest is None:
                     self.errors.append(tag(PLY007, f"sort: column '{name}' not found"))
         self.errors.extend(expr_analyzer.errors)
+        return input_frame
+
+    def _infer_unique_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
+        """Identity-typed, but validate the ``subset=`` columns (issue #35).
+
+        ``unique(subset=None, *, keep, maintain_order)`` — the subset can be
+        passed positionally or as the ``subset=`` kwarg: a string constant, a
+        list/tuple of strings, a constant-bound name, or a selector (which
+        resolves against the frame, so it can't name a missing column). A
+        subset column missing from a closed frame is PLY014 — polars raises
+        ColumnNotFoundError at runtime; open frames stay lenient. The
+        ``keep=`` / ``maintain_order=`` modifiers are ignored.
+        """
+        subset_nodes: list[ast.expr] = list(node.args[:1])
+        for kw in node.keywords:
+            if kw.arg == "subset":
+                subset_nodes.append(kw.value)
+
+        for subset_node in subset_nodes:
+            if _resolve_selector(subset_node, input_frame) is not None:
+                continue
+            single = self._const_str(subset_node)
+            names = [single] if single is not None else self._const_str_list(subset_node)
+            if names is None:
+                # Expression subset (``pl.col(...)`` etc.) or an unresolvable
+                # variable — stay silent rather than guess.
+                continue
+            for name in names:
+                if name not in input_frame.columns and input_frame.rest is None:
+                    self.errors.append(tag(PLY014, f"unique: subset column '{name}' not found"))
         return input_frame
 
     def _infer_with_row_index_call(

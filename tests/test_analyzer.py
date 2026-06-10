@@ -7250,3 +7250,130 @@ class TestCastImpossibleFrameLevel:
         analyzer = _run_body(self._frame(), "out = df.cast({'u': pl.Int64})")
         assert analyzer.errors == [], analyzer.errors
         assert analyzer.var_types["out"].columns["u"].dtype == Int64()
+
+
+class TestUniqueSubsetValidation:
+    """Issue #35: ``unique`` validates subset columns like drop_nulls does (PLY014)."""
+
+    HEADER = textwrap.dedent(
+        PANDERA_HEADER
+        + """
+            class In(pa.DataFrameModel):
+                a: int
+                b: str
+        """
+    )
+
+    def _analyze(self, body: str, extra_imports: str = ""):
+        source = (
+            extra_imports
+            + self.HEADER
+            + textwrap.dedent(
+                f"""
+            def f(df: DataFrame[In]):
+                return {body}
+            """
+            )
+        )
+        return analyze_source(source)
+
+    def test_missing_subset_list_kwarg_flags_ply014(self):
+        results = self._analyze('df.unique(subset=["ghost"])')
+        assert any("PLY014" in e and "ghost" in e for e in results[0].errors)
+
+    def test_missing_subset_string_kwarg_flags_ply014(self):
+        results = self._analyze('df.unique(subset="ghost")')
+        assert any("PLY014" in e and "ghost" in e for e in results[0].errors)
+
+    def test_missing_subset_positional_list_flags_ply014(self):
+        results = self._analyze('df.unique(["a", "ghost"])')
+        assert any("PLY014" in e and "ghost" in e for e in results[0].errors)
+
+    def test_missing_subset_positional_string_flags_ply014(self):
+        results = self._analyze('df.unique("ghost")')
+        assert any("PLY014" in e and "ghost" in e for e in results[0].errors)
+
+    def test_existing_subset_passes(self):
+        results = self._analyze('df.unique(subset=["a"])')
+        assert results[0].errors == []
+
+    def test_bare_unique_passes(self):
+        results = self._analyze("df.unique()")
+        assert results[0].errors == []
+
+    def test_local_const_name_subset_resolves(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]):
+                cols = ["ghost"]
+                return df.unique(subset=cols)
+            """
+        )
+        results = analyze_source(source)
+        assert any("PLY014" in e and "ghost" in e for e in results[0].errors)
+
+    def test_module_const_name_subset_resolves(self):
+        source = (
+            self.HEADER
+            + 'COLS = ["ghost"]\n'
+            + textwrap.dedent(
+                """
+            def f(df: DataFrame[In]):
+                return df.unique(subset=COLS)
+            """
+            )
+        )
+        results = analyze_source(source)
+        assert any("PLY014" in e and "ghost" in e for e in results[0].errors)
+
+    def test_local_const_shadows_module_const(self):
+        source = (
+            self.HEADER
+            + 'COLS = ["a"]\n'
+            + textwrap.dedent(
+                """
+            def f(df: DataFrame[In]):
+                COLS = ["ghost"]
+                return df.unique(subset=COLS)
+            """
+            )
+        )
+        results = analyze_source(source)
+        assert any("PLY014" in e and "ghost" in e for e in results[0].errors)
+
+    def test_keep_and_maintain_order_kwargs_are_ignored(self):
+        results = self._analyze('df.unique(subset=["a"], keep="first", maintain_order=True)')
+        assert results[0].errors == []
+
+    def test_selector_subset_passes(self):
+        results = self._analyze(
+            "df.unique(subset=cs.numeric())", extra_imports="import polars.selectors as cs\n"
+        )
+        assert results[0].errors == []
+
+    def test_open_frame_missing_subset_not_flagged(self):
+        frame = FrameType({"id": Int64()}, rest=RowVar("r"))
+        analyzer = _run_body(frame, 'out = df.unique(subset=["ghost"])')
+        assert analyzer.errors == []
+
+    def test_unique_stays_identity_typed(self):
+        results = self._analyze('df.unique(subset=["a"])')
+        assert results[0].inferred_return_type == FrameType({"a": Int64(), "b": Utf8()})
+
+    def test_lazy_unique_preserves_laziness(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            from pandera.typing.polars import LazyFrame
+
+            class In(pa.DataFrameModel):
+                a: int
+                b: str
+
+            def f(lf: LazyFrame[In]) -> DataFrame[In]:
+                return lf.unique(subset=["a"]).collect()
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        assert results[0].inferred_return_type == FrameType({"a": Int64(), "b": Utf8()})

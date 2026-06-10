@@ -1580,3 +1580,61 @@ class TestSortKeyEndToEnd:
 
         assert len(results) == 1
         assert results[0].passed is True, results[0].errors
+
+
+class TestUniqueSubsetEndToEnd:
+    """Issue #35 repro: ``unique(subset=[...])`` with a ghost column must fail."""
+
+    HEADER = textwrap.dedent("""
+        import polars as pl
+        import pandera.polars as pa
+        from pandera.typing.polars import DataFrame
+
+        class ASB(pa.DataFrameModel):
+            a: int
+            s: str
+            b: int
+
+            class Config:
+                coerce = True
+    """)
+
+    def test_missing_subset_column_fails_with_ply014(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            @pa.check_types
+            def bug_unique_subset_ghost(df: DataFrame[ASB]) -> DataFrame[ASB]:
+                return df.unique(subset=["ghost"])
+        """
+        )
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is False
+        assert any("PLY014" in str(e) for e in results[0].errors)
+
+    def test_existing_subset_column_passes(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            @pa.check_types
+            def unique_by_a(df: DataFrame[ASB]) -> DataFrame[ASB]:
+                return df.unique(subset=["a"])
+        """
+        )
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is True, results[0].errors
+
+    def test_bare_unique_passes(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            @pa.check_types
+            def unique_all(df: DataFrame[ASB]) -> DataFrame[ASB]:
+                return df.unique()
+        """
+        )
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is True, results[0].errors
