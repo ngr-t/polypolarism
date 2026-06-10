@@ -820,3 +820,44 @@ class TestSemiAntiGatherEndToEnd:
         assert len(results) == 1
         assert results[0].passed is False
         assert any("PLY010" in str(e) for e in results[0].errors)
+
+
+class TestIssue21SeqVariantsEndToEnd:
+    """Issue #21 repro: with_columns_seq / select_seq infer like the
+    non-seq forms (schema semantics identical; only evaluation order
+    differs)."""
+
+    ISSUE_SOURCE = textwrap.dedent("""
+        import polars as pl
+        import pandera.polars as pa
+        from pandera.typing.polars import DataFrame
+
+        class In(pa.DataFrameModel):
+            a: int
+            b: int
+            class Config:
+                coerce = True
+
+        class Out(pa.DataFrameModel):
+            a: int
+            c: int
+            class Config:
+                strict = True
+                coerce = True
+
+        def ok_seq_strings(df: DataFrame[In]) -> DataFrame[Out]:
+            return df.with_columns_seq(c=pl.col("a") + pl.col("b")).select_seq("a", "c")
+
+        def ok_seq_exprs(df: DataFrame[In]) -> DataFrame[Out]:
+            return df.with_columns_seq(c=pl.col("a") + pl.col("b")).select_seq(
+                pl.col("a"), pl.col("c")
+            )
+    """)
+
+    def test_issue_21_repro_functions_pass(self):
+        results = check_source(self.ISSUE_SOURCE)
+
+        assert len(results) == 2
+        by_name = {r.function_name: r for r in results}
+        for name in ("ok_seq_strings", "ok_seq_exprs"):
+            assert by_name[name].passed is True, (name, by_name[name].errors)

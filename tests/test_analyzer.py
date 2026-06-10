@@ -4851,3 +4851,67 @@ class TestGatherEvery:
         ft = results[0].inferred_return_type
         assert ft == FrameType({"id": Int64(), "value": Float64()})
         assert ft is not None and ft.is_lazy is True
+
+
+class TestSeqVariants:
+    """#21: select_seq / with_columns_seq behave like select / with_columns."""
+
+    def test_select_seq_string_args(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                a: int
+                b: str
+                c: pl.Float64
+
+            def f(df: DataFrame[S]):
+                return df.select_seq("a", "b")
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        assert results[0].inferred_return_type == FrameType({"a": Int64(), "b": Utf8()})
+
+    def test_select_seq_expr_args(self):
+        frame = FrameType({"a": Int64(), "b": Int64()})
+        analyzer = _run_body(frame, 'out = df.select_seq(pl.col("a"), pl.col("b"))')
+        assert analyzer.errors == []
+        assert analyzer.var_types["out"] == FrameType({"a": Int64(), "b": Int64()})
+
+    def test_with_columns_seq_kwarg_expr(self):
+        frame = FrameType({"a": Int64(), "b": Int64()})
+        analyzer = _run_body(frame, 'out = df.with_columns_seq(c=pl.col("a") + pl.col("b"))')
+        assert analyzer.errors == []
+        assert analyzer.var_types["out"] == FrameType(
+            {"a": Int64(), "b": Int64(), "c": Int64()}
+        )
+
+    def test_seq_chain(self):
+        frame = FrameType({"a": Int64(), "b": Int64()})
+        analyzer = _run_body(
+            frame,
+            'out = df.with_columns_seq(c=pl.col("a") + pl.col("b")).select_seq("a", "c")',
+        )
+        assert analyzer.errors == []
+        assert analyzer.var_types["out"] == FrameType({"a": Int64(), "c": Int64()})
+
+    def test_seq_variants_fire_no_eager_lazy_errors(self):
+        """Both methods exist on DataFrame AND LazyFrame — no PLY030/PLY031."""
+        eager = FrameType({"a": Int64()})
+        lazy = FrameType({"a": Int64()}, is_lazy=True)
+        for frame in (eager, lazy):
+            analyzer = _run_body(frame, 'out = df.select_seq("a")')
+            assert analyzer.errors == []
+            analyzer = _run_body(frame, "out = df.with_columns_seq(b=pl.col('a'))")
+            assert analyzer.errors == []
+
+    def test_select_seq_preserves_laziness(self):
+        frame = FrameType({"a": Int64()}, is_lazy=True)
+        analyzer = _run_body(frame, 'out = df.select_seq("a")')
+        assert analyzer.var_types["out"].is_lazy is True
+
+    def test_select_seq_missing_column_errors(self):
+        frame = FrameType({"a": Int64()})
+        analyzer = _run_body(frame, 'out = df.select_seq("ghost")')
+        assert any("ghost" in e for e in analyzer.errors)
