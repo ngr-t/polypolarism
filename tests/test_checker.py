@@ -805,6 +805,65 @@ class TestIssue19StrToIntegerEndToEnd:
         )
 
 
+class TestIssue23AggExprEndToEnd:
+    """Issue #23 repros: Expr.len() and .filter(...).<agg>() in agg context.
+
+    All schemas use ``strict = True`` + ``coerce = True`` like the issue's
+    reproduction — the output columns must be inferred *precisely* (UInt32 /
+    Int64), not Unknown, and the functions must pass.
+    """
+
+    HEADER = """
+        import polars as pl
+        import pandera.polars as pa
+        from pandera.typing.polars import DataFrame
+
+        class In(pa.DataFrameModel):
+            g: str
+            v: int
+
+            class Config:
+                strict = True
+                coerce = True
+    """
+
+    def _check(self, body: str):
+        source = textwrap.dedent(self.HEADER + body)
+        return check_source(source)[0]
+
+    def test_agg_sum_alias_passes(self):
+        """Regression guard: the plain sum repro already worked."""
+        result = self._check("""
+            class OSum(pa.DataFrameModel):
+                g: str
+                s: int
+
+                class Config:
+                    strict = True
+                    coerce = True
+
+            def agg_sum(df: DataFrame[In]) -> DataFrame[OSum]:
+                return df.group_by("g").agg(pl.col("v").sum().alias("s"))
+        """)
+        assert result.passed is True, result.errors
+
+    def test_agg_expr_len_alias_passes(self):
+        """``pl.col("v").len()`` infers UInt32; coerce bridges to Int64."""
+        result = self._check("""
+            class OLen(pa.DataFrameModel):
+                g: str
+                n: int
+
+                class Config:
+                    strict = True
+                    coerce = True
+
+            def agg_len(df: DataFrame[In]) -> DataFrame[OLen]:
+                return df.group_by("g").agg(pl.col("v").len().alias("n"))
+        """)
+        assert result.passed is True, result.errors
+
+
 class TestSemiAntiGatherEndToEnd:
     """Issue #15 repro: semi/anti joins and gather_every are schema-preserving."""
 

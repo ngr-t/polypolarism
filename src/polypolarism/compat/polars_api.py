@@ -173,6 +173,11 @@ def _build_agg_name_map() -> dict[str, AggFunction]:
         "sum": AggFunction.SUM,
         "mean": AggFunction.MEAN,
         "count": AggFunction.COUNT,
+        # ``Expr.len()`` is the count-including-nulls variant of
+        # ``Expr.count()`` — same UInt32 result dtype (issue #23). Method
+        # form only: zero-arg ``pl.len()`` is handled separately and
+        # ``len`` is deliberately NOT in AGG_SHORTHAND_NAMES.
+        "len": AggFunction.COUNT,
         "n_unique": AggFunction.N_UNIQUE,
         "list": AggFunction.LIST,
         "first": AggFunction.FIRST,

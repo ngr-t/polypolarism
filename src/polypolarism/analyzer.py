@@ -1370,6 +1370,8 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             "sum": AggFunction.SUM,
             "mean": AggFunction.MEAN,
             "count": AggFunction.COUNT,
+            # ``Expr.len()`` counts nulls too; same UInt32 dtype (issue #23).
+            "len": AggFunction.COUNT,
             "n_unique": AggFunction.N_UNIQUE,
             "first": AggFunction.FIRST,
             "last": AggFunction.LAST,

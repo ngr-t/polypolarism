@@ -489,6 +489,89 @@ class TestPlLenAggregation:
         assert results[0].inferred_return_type == expected
 
 
+class TestExprLenAggregation:
+    """``pl.col("v").len()`` — the count-including-nulls variant (issue #23)."""
+
+    def test_expr_len_in_agg_with_alias(self):
+        """``agg(pl.col("v").len().alias("n"))`` infers n: UInt32."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                g: str
+                v: int
+
+            def agg(data: DataFrame[In]):
+                return data.group_by("g").agg(pl.col("v").len().alias("n"))
+        """
+        )
+
+        results = analyze_source(source)
+
+        assert results[0].has_errors is False, results[0].errors
+        expected = FrameType({"g": Utf8(), "n": UInt32()})
+        assert results[0].inferred_return_type == expected
+
+    def test_expr_len_in_agg_kwarg_form(self):
+        """``agg(n=pl.col("v").len())`` infers n: UInt32."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                g: str
+                v: int
+
+            def agg(data: DataFrame[In]):
+                return data.group_by("g").agg(n=pl.col("v").len())
+        """
+        )
+
+        results = analyze_source(source)
+
+        assert results[0].has_errors is False, results[0].errors
+        expected = FrameType({"g": Utf8(), "n": UInt32()})
+        assert results[0].inferred_return_type == expected
+
+    def test_expr_len_in_select(self):
+        """``select(n=pl.col("v").len())`` infers UInt32 outside agg context."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                g: str
+                v: int
+
+            def count_rows(data: DataFrame[In]):
+                return data.select(n=pl.col("v").len())
+        """
+        )
+
+        results = analyze_source(source)
+
+        assert results[0].has_errors is False, results[0].errors
+        expected = FrameType({"n": UInt32()})
+        assert results[0].inferred_return_type == expected
+
+    def test_expr_len_on_missing_column_errors(self):
+        """``pl.col("missing").len()`` still surfaces the column error."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                g: str
+                v: int
+
+            def agg(data: DataFrame[In]):
+                return data.group_by("g").agg(pl.col("missing").len().alias("n"))
+        """
+        )
+
+        results = analyze_source(source)
+
+        assert results[0].has_errors is True
+        assert any("missing" in e for e in results[0].errors)
+
+
 class TestRankMethod:
     """``Expr.rank()`` dtype inference (issue #9)."""
 
