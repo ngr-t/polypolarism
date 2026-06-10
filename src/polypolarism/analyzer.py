@@ -33,6 +33,7 @@ from polypolarism.diagnostics import (
     PLY004,
     PLY005,
     PLY006,
+    PLY008,
     PLY010,
     PLY011,
     PLY020,
@@ -331,6 +332,27 @@ def _unwrap_cast(node: ast.expr) -> ast.expr:
     while isinstance(node, ast.Call) and _is_cast_func(node.func) and len(node.args) >= 2:
         node = node.args[1]
     return node
+
+
+def _nonboolean_predicate_error(dtype: DataType | None) -> str | None:
+    """Return a PLY008 message when a filter predicate's dtype is known and
+    not Boolean (issue #28).
+
+    ``None`` (unresolved) and ``Unknown`` dtypes are never flagged — we don't
+    guess. A ``Nullable`` wrapper is unwrapped first: ``Nullable[Boolean]``
+    is a valid predicate (null rows are simply dropped).
+    """
+    if dtype is None:
+        return None
+    inner = dtype.inner if isinstance(dtype, Nullable) else dtype
+    if isinstance(inner, (Boolean, Unknown)):
+        return None
+    return tag(
+        PLY008,
+        f"filter: predicate has dtype {dtype}, expected Boolean — "
+        f"polars only accepts boolean predicates "
+        f"(use a comparison or `.is_*()` method)",
+    )
 
 
 def _str_constant(node: ast.expr) -> str | None:
@@ -1398,10 +1420,16 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         # (Nullable wrapper included — nulls may survive the predicate).
         # Predicate sub-expressions are validated so missing-column refs
         # surface PLY001 (issue #23: conditional aggregation chains like
-        # ``pl.col("v").filter(pred).sum()``).
+        # ``pl.col("v").filter(pred).sum()``) and a known non-Boolean
+        # predicate dtype surfaces PLY008 (issue #28). A bare string is a
+        # column reference, not a Utf8 literal. Kwargs are equality
+        # constraints — boolean by construction, no dtype flag.
         if method == "filter":
             for arg in node.args:
-                self._validate_subexpr(arg)
+                _, pred_dtype = self._resolve_expr_or_col_str(arg)
+                pred_error = _nonboolean_predicate_error(pred_dtype)
+                if pred_error is not None:
+                    self.errors.append(pred_error)
             for kw in node.keywords:
                 self._validate_subexpr(kw.value)
             return receiver_name, receiver_type
@@ -3199,12 +3227,36 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         return FrameType(columns=result_columns, strict=input_frame.strict, rest=result_rest)
 
     def _infer_filter_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
-        """Identity-typed, but walk every predicate sub-expression to validate columns."""
+        """Identity-typed, but validate every predicate (issue #28).
+
+        Each positional predicate is walked through the expression analyzer
+        (so missing-column refs keep surfacing PLY001) and its resolved
+        dtype is checked: a known non-Boolean predicate is PLY008. A bare
+        string constant (or a constant-bound name) is a column reference,
+        not a Utf8 literal. Unresolved / Unknown dtypes are never flagged.
+        Kwarg constraints (``filter(a=1)``) are equality comparisons —
+        boolean by construction, so only their value expressions are walked.
+        """
         expr_analyzer = ExpressionAnalyzer(
             input_frame, warnings=self.warnings, registry=self.registry
         )
         for arg in node.args:
-            expr_analyzer.analyze_select_expr(arg)
+            dtype: DataType | None
+            col_ref = self._const_str(arg)
+            if col_ref is not None:
+                # ``filter("flag")`` ≡ ``filter(pl.col("flag"))``: resolve
+                # against the frame — PLY001 on closed frames, Unknown on
+                # open ones (the column may be among the unseen extras).
+                try:
+                    dtype = infer_col(col_ref, input_frame)
+                except ColumnNotFoundError as e:
+                    expr_analyzer.errors.append(tag(PLY001, str(e)))
+                    continue
+            else:
+                _, dtype = expr_analyzer.analyze_select_expr(arg)
+            pred_error = _nonboolean_predicate_error(dtype)
+            if pred_error is not None:
+                expr_analyzer.errors.append(pred_error)
         for kw in node.keywords:
             expr_analyzer.analyze_select_expr(kw.value)
         self.errors.extend(expr_analyzer.errors)

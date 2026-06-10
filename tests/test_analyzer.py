@@ -5961,3 +5961,161 @@ class TestFrameLiteralInference:
         )
         results = analyze_source(source)
         assert any("PLY001" in e and "nope" in e for e in results[0].errors)
+
+
+class TestFilterPredicateDtype:
+    """Issue #28: ``df.filter(...)`` with a non-boolean predicate is PLY008."""
+
+    HEADER = textwrap.dedent(
+        PANDERA_HEADER
+        + """
+            class In(pa.DataFrameModel):
+                a: int
+                flag: bool
+                v: pl.Float64 = pa.Field(nullable=True)
+        """
+    )
+
+    def _analyze(self, body: str):
+        source = self.HEADER + textwrap.dedent(
+            f"""
+            def f(df: DataFrame[In]):
+                return {body}
+            """
+        )
+        return analyze_source(source)
+
+    def test_nonbool_column_expr_predicate_flags_ply008(self):
+        results = self._analyze('df.filter(pl.col("a"))')
+        assert any("PLY008" in e and "Boolean" in e for e in results[0].errors)
+
+    def test_nonbool_bare_string_predicate_flags_ply008(self):
+        results = self._analyze('df.filter("a")')
+        assert any("PLY008" in e for e in results[0].errors)
+
+    def test_nonbool_const_name_predicate_flags_ply008(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]):
+                key = "a"
+                return df.filter(key)
+            """
+        )
+        results = analyze_source(source)
+        assert any("PLY008" in e for e in results[0].errors)
+
+    def test_bare_string_missing_column_is_ply001_not_ply008(self):
+        results = self._analyze('df.filter("ghost")')
+        assert any("PLY001" in e and "ghost" in e for e in results[0].errors)
+        assert not any("PLY008" in e for e in results[0].errors)
+
+    def test_boolean_column_expr_predicate_passes(self):
+        results = self._analyze('df.filter(pl.col("flag"))')
+        assert results[0].errors == []
+
+    def test_boolean_bare_string_predicate_passes(self):
+        results = self._analyze('df.filter("flag")')
+        assert results[0].errors == []
+
+    def test_comparison_predicate_passes(self):
+        results = self._analyze('df.filter(pl.col("a") > 0)')
+        assert results[0].errors == []
+
+    def test_nullable_comparison_predicate_passes(self):
+        # Since #18 a comparison over a nullable column infers
+        # Nullable(Boolean) — the wrapper must be unwrapped, not flagged.
+        results = self._analyze('df.filter(pl.col("v") > 0)')
+        assert results[0].errors == []
+
+    def test_combined_predicates_pass(self):
+        results = self._analyze('df.filter((pl.col("a") > 0) & pl.col("flag"))')
+        assert results[0].errors == []
+
+    def test_is_null_predicate_passes(self):
+        results = self._analyze('df.filter(pl.col("v").is_null())')
+        assert results[0].errors == []
+
+    def test_unknown_dtype_predicate_not_flagged(self):
+        # ``interpolate`` is not in the inference tables — the column is
+        # registered as Unknown; an Unknown predicate must never be flagged.
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]):
+                df2 = df.with_columns(u=pl.col("a").interpolate())
+                return df2.filter(pl.col("u"))
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+
+    def test_open_frame_bare_string_predicate_not_flagged(self):
+        frame = FrameType({"id": Int64()}, rest=RowVar("r"))
+        analyzer = _run_body(frame, 'out = df.filter("ghost")')
+        assert analyzer.errors == []
+
+    def test_each_positional_predicate_is_checked(self):
+        results = self._analyze('df.filter(pl.col("flag"), pl.col("a"))')
+        ply008 = [e for e in results[0].errors if "PLY008" in e]
+        assert len(ply008) == 1
+
+    def test_kwarg_equality_constraint_not_flagged(self):
+        # ``filter(a=1)`` is an equality constraint — boolean by construction.
+        results = self._analyze("df.filter(a=1)")
+        assert not any("PLY008" in e for e in results[0].errors)
+
+    def test_filter_stays_identity_typed(self):
+        results = self._analyze('df.filter(pl.col("flag"))')
+        assert results[0].inferred_return_type == FrameType(
+            {"a": Int64(), "flag": Boolean(), "v": Nullable(Float64())}
+        )
+
+
+class TestExprFilterPredicateDtype:
+    """Issue #28: ``Expr.filter(...)`` predicates get the same PLY008 check."""
+
+    HEADER = textwrap.dedent(
+        PANDERA_HEADER
+        + """
+            class In(pa.DataFrameModel):
+                g: str
+                a: int
+                flag: bool
+                v: pl.Float64 = pa.Field(nullable=True)
+        """
+    )
+
+    def _analyze(self, body: str):
+        source = self.HEADER + textwrap.dedent(
+            f"""
+            def f(df: DataFrame[In]):
+                return {body}
+            """
+        )
+        return analyze_source(source)
+
+    def test_nonbool_predicate_in_agg_flags_ply008(self):
+        results = self._analyze(
+            'df.group_by("g").agg(pl.col("v").filter(pl.col("a")).sum().alias("s"))'
+        )
+        assert any("PLY008" in e for e in results[0].errors)
+
+    def test_nonbool_bare_string_predicate_flags_ply008(self):
+        results = self._analyze('df.select(pl.col("v").filter("a").alias("x"))')
+        assert any("PLY008" in e for e in results[0].errors)
+
+    def test_boolean_predicate_passes(self):
+        results = self._analyze('df.select(pl.col("v").filter(pl.col("flag")).alias("x"))')
+        assert results[0].errors == []
+
+    def test_boolean_bare_string_predicate_passes(self):
+        results = self._analyze('df.select(pl.col("v").filter("flag").alias("x"))')
+        assert results[0].errors == []
+
+    def test_nullable_comparison_predicate_passes(self):
+        results = self._analyze('df.select(pl.col("a").filter(pl.col("v") > 0).alias("x"))')
+        assert results[0].errors == []
+
+    def test_missing_column_string_predicate_is_ply001_not_ply008(self):
+        results = self._analyze('df.select(pl.col("v").filter("ghost").alias("x"))')
+        assert any("PLY001" in e and "ghost" in e for e in results[0].errors)
+        assert not any("PLY008" in e for e in results[0].errors)

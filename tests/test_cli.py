@@ -72,6 +72,14 @@ class TestCheckDirectory:
         results = check_directory(tmp_path)
         assert results == []
 
+    def test_filter_nonbool_fixture_fails_with_ply008(self):
+        """Issue #28 fixture: non-boolean filter predicate."""
+        results = check_file(FIXTURES_DIR / "invalid" / "filter_nonbool_predicate.py")
+
+        assert len(results) == 1
+        assert results[0].passed is False
+        assert any("PLY008" in str(e) for e in results[0].errors)
+
 
 class TestCheckWarningFixtures:
     """Files in fixtures/warning produce warnings but still pass type-check."""
