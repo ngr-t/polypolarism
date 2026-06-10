@@ -20,6 +20,7 @@ from polypolarism.types import (
     Int16,
     Int32,
     Int64,
+    Null,
     Nullable,
     RowVar,
     UInt32,
@@ -4000,3 +4001,41 @@ class TestConstantResolution:
         assert ft is not None
         assert ft.columns["a"].dtype == Float64()
         assert ft.columns["b"].dtype == Float64()
+
+
+class TestBareConstantLiterals:
+    """Bare Python constants in expressions are typed like ``pl.lit`` values.
+
+    ``df.select(x=1)`` is a literal column in polars; recognising bare
+    constants also gives binary operators a right-operand type for
+    expressions like ``pl.col("a") * 2``.
+    """
+
+    def test_select_kwarg_int_literal(self):
+        analyzer = _run_body(FrameType({"id": Int64()}), "out = df.select(x=1)")
+        assert analyzer.var_types["out"].columns["x"].dtype == Int64()
+
+    def test_select_kwarg_float_literal(self):
+        analyzer = _run_body(FrameType({"id": Int64()}), "out = df.select(x=2.5)")
+        assert analyzer.var_types["out"].columns["x"].dtype == Float64()
+
+    def test_select_kwarg_bool_literal_is_boolean_not_int(self):
+        """bool is a subclass of int — must check bool first."""
+        analyzer = _run_body(FrameType({"id": Int64()}), "out = df.select(x=True)")
+        assert analyzer.var_types["out"].columns["x"].dtype == Boolean()
+
+    def test_select_kwarg_none_literal_is_null(self):
+        analyzer = _run_body(FrameType({"id": Int64()}), "out = df.select(x=None)")
+        assert analyzer.var_types["out"].columns["x"].dtype == Null()
+
+    def test_select_kwarg_str_literal_is_utf8(self):
+        analyzer = _run_body(FrameType({"id": Int64()}), "out = df.select(x='hi')")
+        assert analyzer.var_types["out"].columns["x"].dtype == Utf8()
+
+    def test_bare_string_positional_still_selects_column(self):
+        """Positional bare strings remain column selections, not literals."""
+        frame = FrameType({"id": Int64(), "name": Utf8()})
+        analyzer = _run_body(frame, "out = df.select('name')")
+        out = analyzer.var_types["out"]
+        assert list(out.columns) == ["name"]
+        assert out.columns["name"].dtype == Utf8()

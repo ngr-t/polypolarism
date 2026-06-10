@@ -47,6 +47,7 @@ from polypolarism.expr_infer import (
     ColumnNotFoundError,
     TypeUnificationError,
     infer_col,
+    infer_lit,
     unify_types,
 )
 from polypolarism.ops.groupby import (
@@ -838,6 +839,16 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 ):
                     alias = node.args[0].value
                     inner_node = node.func.value
+
+        # Bare Python constants are literal columns (``df.select(x=1)`` is
+        # ``pl.lit(1).alias("x")`` in polars). Bare *positional* strings in
+        # select/with_columns are column names — but those are consumed by
+        # the callers (``_str_constant``) before this method ever sees them.
+        # ``infer_lit`` checks bool before int (bool subclasses int).
+        if isinstance(inner_node, ast.Constant) and (
+            inner_node.value is None or isinstance(inner_node.value, (bool, int, float, str))
+        ):
+            return alias, infer_lit(inner_node.value)
 
         # Comparison expressions (==, !=, <, <=, >, >=) -> Boolean
         if isinstance(inner_node, ast.Compare):
