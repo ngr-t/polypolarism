@@ -129,6 +129,13 @@ class TestCheckDirectory:
         assert results[0].passed is False
         assert any("PLY015" in str(e) for e in results[0].errors)
 
+    def test_plural_col_exprs_fixture_passes(self):
+        """Issue #42 fixture: plural pl.col inside expressions expands per column."""
+        results = check_file(FIXTURES_DIR / "valid" / "plural_col_exprs.py")
+
+        assert len(results) == 2
+        assert all(r.passed for r in results), [r.errors for r in results]
+
 
 class TestCheckWarningFixtures:
     """Files in fixtures/warning produce warnings but still pass type-check."""

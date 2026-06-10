@@ -7331,3 +7331,84 @@ class TestDuplicateOutputColumns:
         analyzer = _run_body(self._frame(), "out = df.with_columns('a', a=pl.lit(1))")
         assert len(analyzer.errors) == 1, analyzer.errors
         assert "PLY015" in analyzer.errors[0]
+
+
+class TestPluralColExpansion:
+    """Issue #42: a plural ``pl.col("a", "b")`` nested inside an expression
+    expands the whole expression per column, matching polars semantics
+    (probed on 1.41.2: ``select(pl.col("a","b") * 10)`` → columns a, b).
+    """
+
+    def _frame(self) -> FrameType:
+        return FrameType({"s": Utf8(), "a": Int64(), "b": Float64()})
+
+    def test_select_plural_arithmetic_expands(self):
+        analyzer = _run_body(self._frame(), 'out = df.select(pl.col("a", "b") * 10)')
+        assert analyzer.errors == [], analyzer.errors
+        out = analyzer.var_types["out"]
+        assert list(out.columns.keys()) == ["a", "b"]
+        assert out.columns["a"].dtype == Int64()
+        assert out.columns["b"].dtype == Float64()
+
+    def test_select_plural_list_form_expands(self):
+        analyzer = _run_body(self._frame(), 'out = df.select(pl.col(["a", "b"]) * 10)')
+        assert analyzer.errors == [], analyzer.errors
+        out = analyzer.var_types["out"]
+        assert out.columns["a"].dtype == Int64()
+        assert out.columns["b"].dtype == Float64()
+
+    def test_select_plural_cast_expands(self):
+        analyzer = _run_body(self._frame(), 'out = df.select(pl.col("a", "b").cast(pl.Float64))')
+        assert analyzer.errors == [], analyzer.errors
+        out = analyzer.var_types["out"]
+        assert out.columns["a"].dtype == Float64()
+        assert out.columns["b"].dtype == Float64()
+
+    def test_with_columns_plural_arithmetic_expands(self):
+        analyzer = _run_body(self._frame(), 'out = df.with_columns(pl.col("a", "b") / 2)')
+        assert analyzer.errors == [], analyzer.errors
+        out = analyzer.var_types["out"]
+        # True division retypes both columns to Float64; "s" survives.
+        assert out.columns["a"].dtype == Float64()
+        assert out.columns["b"].dtype == Float64()
+        assert out.columns["s"].dtype == Utf8()
+
+    def test_agg_plural_sum_expands(self):
+        analyzer = _run_body(self._frame(), 'out = df.group_by("s").agg(pl.col("a", "b").sum())')
+        assert analyzer.errors == [], analyzer.errors
+        out = analyzer.var_types["out"]
+        assert list(out.columns.keys()) == ["s", "a", "b"]
+        assert out.columns["a"].dtype == Int64()
+        assert out.columns["b"].dtype == Float64()
+
+    def test_agg_bare_plural_implicit_list(self):
+        analyzer = _run_body(self._frame(), 'out = df.group_by("s").agg(pl.col("a", "b"))')
+        assert analyzer.errors == [], analyzer.errors
+        out = analyzer.var_types["out"]
+        # Probed: agg(pl.col("a","b")) collects each column into a list.
+        assert out.columns["a"].dtype == ListT(Int64())
+        assert out.columns["b"].dtype == ListT(Float64())
+
+    def test_aliased_plural_flags_duplicate_output(self):
+        # Probed: select(pl.col("a","b").alias("x")) raises DuplicateError —
+        # the expansion produces "x" twice and PLY015 catches it (issue #36).
+        analyzer = _run_body(self._frame(), 'out = df.select(pl.col("a", "b").alias("x"))')
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY015" in analyzer.errors[0]
+
+    def test_missing_column_in_plural_expression_errors(self):
+        analyzer = _run_body(self._frame(), 'out = df.select(pl.col("a", "missing") * 10)')
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY001" in analyzer.errors[0]
+        assert "missing" in analyzer.errors[0]
+
+    def test_two_plural_nodes_stay_silent(self):
+        # Pairwise plural-x-plural semantics are out of scope — no errors,
+        # unchanged (single-name) inference path.
+        analyzer = _run_body(self._frame(), 'out = df.select(pl.col("a", "b") + pl.col("a", "b"))')
+        assert analyzer.errors == [], analyzer.errors
+
+    def test_single_col_expression_path_unchanged(self):
+        analyzer = _run_body(self._frame(), 'out = df.select(pl.col("a") * 10)')
+        assert analyzer.errors == [], analyzer.errors
+        assert list(analyzer.var_types["out"].columns.keys()) == ["a"]

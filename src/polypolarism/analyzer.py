@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import copy
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -724,6 +725,25 @@ def _unwrap_cast(node: ast.expr) -> ast.expr:
     while isinstance(node, ast.Call) and _is_cast_func(node.func) and len(node.args) >= 2:
         node = node.args[1]
     return node
+
+
+class _ReplaceNode(ast.NodeTransformer):
+    """Swap one specific node — matched by identity — for a replacement.
+
+    Used by the plural-``pl.col`` expansion (issue #42): each clone of the
+    surrounding expression gets its plural node replaced by a single-name
+    ``pl.col(name)``. Identity matching makes the target unambiguous even
+    when the tree contains structurally equal calls.
+    """
+
+    def __init__(self, target: ast.AST, replacement: ast.AST) -> None:
+        self.target = target
+        self.replacement = replacement
+
+    def visit(self, node: ast.AST) -> ast.AST:
+        if node is self.target:
+            return self.replacement
+        return self.generic_visit(node)
 
 
 def _nonboolean_predicate_error(dtype: DataType | None) -> str | None:
@@ -3123,9 +3143,13 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         )
         agg_exprs: list[AggExpr] = []
         for arg in node.args:
-            agg_expr = expr_analyzer.analyze_agg_expr(arg)
-            if agg_expr:
-                agg_exprs.append(agg_expr)
+            # A plural ``pl.col`` inside an aggregation expression produces
+            # one output per column (issue #42): ``agg(pl.col("a", "b").sum())``
+            # yields columns ``a`` and ``b``. Analyze one clone per name.
+            for expr in self._expand_plural_expr(arg) or [arg]:
+                agg_expr = expr_analyzer.analyze_agg_expr(expr)
+                if agg_expr:
+                    agg_exprs.append(agg_expr)
 
         # Kwarg-form ``agg(name=expr)`` — polars uses the kwarg name as the
         # output column. It overrides any ``.alias(...)`` buried in the
@@ -3183,6 +3207,53 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 return None
             names.append(s)
         return names
+
+    def _expand_plural_expr(self, arg: ast.expr) -> list[ast.expr] | None:
+        """Expand an expression containing exactly one nested plural ``pl.col``.
+
+        polars runs ``select(pl.col("a", "b") * 10)`` once per column
+        (issue #42) — model that by returning one deep copy of ``arg`` per
+        name, with the plural node swapped for single-name ``pl.col(name)``.
+        Each clone then flows through the unchanged single-expression path,
+        so output names follow each column (polars keeps per-column names
+        through elementwise ops; probed on 1.41.2).
+
+        Returns ``None`` when the tree contains zero plural nodes (regular
+        path) or two-plus (polars' pairwise semantics there are out of
+        scope — stay silent). The bare-plural fast path in the callers
+        consumes ``pl.col("a", "b")`` arguments before this runs, so the
+        plural node is usually nested; a bare plural reaching here (the
+        ``agg`` loop has no fast path) expands to bare ``pl.col(name)``.
+        """
+        walked = list(ast.walk(arg))
+        found: list[tuple[int, list[str]]] = []
+        for idx, sub in enumerate(walked):
+            if isinstance(sub, ast.expr):
+                names = self._resolve_plural_col(sub)
+                if names is not None:
+                    found.append((idx, names))
+        if len(found) != 1:
+            return None
+        target_idx, names = found[0]
+        clones: list[ast.expr] = []
+        for name in names:
+            clone = copy.deepcopy(arg)
+            # ``ast.walk`` order is structural, so the clone's walk list
+            # lines up index-for-index with the original's.
+            clone_target = list(ast.walk(clone))[target_idx]
+            replacement = ast.Call(
+                func=ast.Attribute(
+                    value=ast.Name(id="pl", ctx=ast.Load()), attr="col", ctx=ast.Load()
+                ),
+                args=[ast.Constant(value=name)],
+                keywords=[],
+            )
+            ast.copy_location(replacement, clone_target)
+            ast.fix_missing_locations(replacement)
+            expanded = _ReplaceNode(clone_target, replacement).visit(clone)
+            assert isinstance(expanded, ast.expr)
+            clones.append(expanded)
+        return clones
 
     def _register_string_selection(
         self,
@@ -3295,15 +3366,19 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     if registered is not None:
                         self._track_output_name(registered, seen_outputs, "select")
                 continue
-            name, dtype = expr_analyzer.analyze_select_expr(arg)
-            if name and dtype:
-                result_columns[name] = dtype
-                self._track_output_name(name, seen_outputs, "select")
-            elif name:
-                # Named output whose dtype is uninferable — register it as
-                # Unknown so later references resolve (issue #8).
-                result_columns[name] = Unknown()
-                self._track_output_name(name, seen_outputs, "select")
+            # A plural ``pl.col`` nested inside an expression runs the
+            # expression once per column (issue #42) — analyze one clone
+            # per name through the unchanged single-expression path.
+            for expr in self._expand_plural_expr(arg) or [arg]:
+                name, dtype = expr_analyzer.analyze_select_expr(expr)
+                if name and dtype:
+                    result_columns[name] = dtype
+                    self._track_output_name(name, seen_outputs, "select")
+                elif name:
+                    # Named output whose dtype is uninferable — register it as
+                    # Unknown so later references resolve (issue #8).
+                    result_columns[name] = Unknown()
+                    self._track_output_name(name, seen_outputs, "select")
 
         # Kwarg form ``select(name=expr)`` — polars treats it as
         # ``expr.alias("name")``. Same for ``with_columns``.
@@ -3396,15 +3471,19 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                         continue
                     self._track_output_name(c, seen_outputs, "with_columns")
                 continue
-            name, dtype = expr_analyzer.analyze_select_expr(arg)
-            if name and dtype:
-                result_columns[name] = dtype
-                self._track_output_name(name, seen_outputs, "with_columns")
-            elif name:
-                # Named output whose dtype is uninferable — register it as
-                # Unknown so later references resolve (issue #8).
-                result_columns[name] = Unknown()
-                self._track_output_name(name, seen_outputs, "with_columns")
+            # A plural ``pl.col`` nested inside an expression runs the
+            # expression once per column (issue #42) — analyze one clone
+            # per name through the unchanged single-expression path.
+            for expr in self._expand_plural_expr(arg) or [arg]:
+                name, dtype = expr_analyzer.analyze_select_expr(expr)
+                if name and dtype:
+                    result_columns[name] = dtype
+                    self._track_output_name(name, seen_outputs, "with_columns")
+                elif name:
+                    # Named output whose dtype is uninferable — register it as
+                    # Unknown so later references resolve (issue #8).
+                    result_columns[name] = Unknown()
+                    self._track_output_name(name, seen_outputs, "with_columns")
 
         # Kwarg form ``with_columns(name=expr)`` — polars treats it as
         # ``expr.alias("name")``.
