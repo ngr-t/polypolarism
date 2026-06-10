@@ -38,6 +38,7 @@ from polypolarism.diagnostics import (
     PLY009,
     PLY010,
     PLY011,
+    PLY012,
     PLY020,
     PLY021,
     PLY022,
@@ -511,6 +512,36 @@ def _nonboolean_predicate_error(dtype: DataType | None) -> str | None:
         f"polars only accepts boolean predicates "
         f"(use a comparison or `.is_*()` method)",
     )
+
+
+# ---- namespace accessor receiver dtypes (issue #31) -------------------------
+#
+# Which (Nullable-unwrapped) receiver dtypes each expression sub-namespace
+# accepts. Verified against polars 1.41.2:
+# - ``.str`` rejects every non-String dtype at runtime, Categorical/Enum
+#   included ("InvalidOperationError: expected String type, got: cat"), so
+#   only Utf8 passes.
+# - ``.list`` and ``.arr`` both accept our ``List`` dtype because
+#   polypolarism models polars ``Array`` as ``List`` — the two are
+#   statically indistinguishable here, so ``.arr`` on a true List column
+#   (a runtime error) is deliberately not flagged: false positives are
+#   worse than false negatives.
+# Unknown / unresolved receivers are exempted by the caller.
+_NAMESPACE_VALID_DTYPES: dict[str, tuple[type[DataType], ...]] = {
+    "str": (Utf8,),
+    "dt": (Date, Datetime, Time, Duration),
+    "list": (ListT,),
+    "arr": (ListT,),
+    "struct": (Struct,),
+}
+
+_NAMESPACE_EXPECTED_DESC: dict[str, str] = {
+    "str": "a String column",
+    "dt": "a temporal column (Date, Datetime, Time or Duration)",
+    "list": "a List or Array column",
+    "arr": "a List or Array column",
+    "struct": "a Struct column",
+}
 
 
 def _str_constant(node: ast.expr) -> str | None:
@@ -1581,6 +1612,25 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         ):
             ns = receiver.attr
             col_name, col_type = self.analyze_select_expr(receiver.value)
+            # Receiver-dtype validation (issue #31): a known dtype outside
+            # the namespace's accepted set is a guaranteed runtime
+            # InvalidOperationError. Unknown / unresolved receivers stay
+            # silent; valid receivers fall through to dispatch unchanged.
+            if col_type is not None and not _base_is_unknown(col_type):
+                base = col_type.inner if isinstance(col_type, Nullable) else col_type
+                if not isinstance(base, _NAMESPACE_VALID_DTYPES[ns]):
+                    subject = f"column '{col_name}'" if col_name else "the receiver expression"
+                    self.errors.append(
+                        tag(
+                            PLY012,
+                            f"`.{ns}` accessor requires "
+                            f"{_NAMESPACE_EXPECTED_DESC[ns]}, but {subject} is "
+                            f"{col_type} — polars raises InvalidOperationError "
+                            f"at runtime",
+                        )
+                    )
+                    # One clear error; the output column degrades to Unknown.
+                    return col_name, None
             # Struct.field needs the field name (positional arg) — pass the
             # whole call node so the dispatcher can look at it.
             ns_result = self._dispatch_namespace_method(ns, method, col_type, node)
