@@ -763,6 +763,21 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                             alias=alias,
                         )
 
+        # Implicit list aggregation (issue #27): a bare column reference in
+        # ``agg`` with no reducing function collects each group's values
+        # into a list — ``agg(vs=pl.col("v"))`` is ``List(Int64)`` at
+        # runtime, not the element dtype. Single-arg ``pl.col("x")`` only;
+        # anything with a method chain was consumed by the branches above
+        # or falls through to the chain fallback. A bare string constant is
+        # the same thing — polars parses ``agg("v")`` as ``pl.col("v")``.
+        if isinstance(agg_node, ast.Call) and len(agg_node.args) == 1 and not agg_node.keywords:
+            bare_col = self._extract_col_name(agg_node)
+            if bare_col is not None:
+                return AggExpr(column=bare_col, function=AggFunction.LIST, alias=alias)
+        bare_str = _str_constant(agg_node)
+        if bare_str is not None:
+            return AggExpr(column=bare_str, function=AggFunction.LIST, alias=alias)
+
         # Chain fallback: anything more elaborate (post-aggregation method
         # chains like ``pl.col("ts").max().dt.year()``, arithmetic on the
         # aggregated value, sub-namespace methods on the aggregated value,

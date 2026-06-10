@@ -1069,3 +1069,46 @@ class TestIssue22SelectConstantEndToEnd:
         by_name = {r.function_name: r for r in results}
         for name in ("ok_select_var", "ok_select_seq_var"):
             assert by_name[name].passed is True, (name, by_name[name].errors)
+
+
+class TestImplicitListAggEndToEnd:
+    """Issue #27 repro: ``agg(vs=pl.col("v"))`` must type as List(Int64)."""
+
+    SOURCE = """
+        import polars as pl
+        import pandera.polars as pa
+        from pandera.typing.polars import DataFrame
+
+        class In(pa.DataFrameModel):
+            k: str
+            v: int
+
+        class Listed(pa.DataFrameModel):
+            k: str
+            vs: pl.List(pl.Int64) = pa.Field()
+
+            class Config:
+                strict = True
+
+        @pa.check_types
+        def agg_to_list(df: DataFrame[In]) -> DataFrame[Listed]:
+            return df.group_by("k").agg(vs=pl.col("v"))
+    """
+
+    def test_agg_to_list_passes_strict_schema(self):
+        results = check_source(textwrap.dedent(self.SOURCE))
+
+        assert len(results) == 1
+        assert results[0].passed is True, results[0].errors
+        assert results[0].errors == []
+
+    def test_element_dtype_declared_fails(self):
+        """Declaring the old (wrong) element dtype is a TypeDifference."""
+        source = textwrap.dedent(self.SOURCE).replace(
+            "vs: pl.List(pl.Int64) = pa.Field()", "vs: int"
+        )
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is False
+        assert any(isinstance(e, TypeDifference) and e.column == "vs" for e in results[0].errors)

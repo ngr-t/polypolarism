@@ -5480,3 +5480,112 @@ class TestSelectConstantResolution:
         assert "txn_id" in ft.columns
         assert "gl_amount" in ft.columns
         assert "sub_amount" in ft.columns
+
+
+class TestImplicitListAggregation:
+    """Issue #27: a bare column reference in ``agg`` (no reducer) collects
+    each group's values into a list — ``List(dtype)``, not the element dtype.
+
+    Ground truth: ``pl.DataFrame({"k": ["a", "a"], "v": [1, 2]})
+    .group_by("k").agg(vs=pl.col("v")).schema`` →
+    ``{'k': String, 'vs': List(Int64)}``.
+    """
+
+    HEADER = textwrap.dedent(
+        PANDERA_HEADER
+        + """
+            class In(pa.DataFrameModel):
+                k: str
+                v: int
+        """
+    )
+
+    def test_bare_col_kwarg_form(self):
+        """``agg(vs=pl.col("v"))`` infers vs: List(Int64)."""
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]):
+                return df.group_by("k").agg(vs=pl.col("v"))
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        assert results[0].inferred_return_type == FrameType({"k": Utf8(), "vs": ListT(Int64())})
+
+    def test_bare_col_positional_default_name(self):
+        """``agg(pl.col("v"))`` keeps the source column name."""
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]):
+                return df.group_by("k").agg(pl.col("v"))
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        assert results[0].inferred_return_type == FrameType({"k": Utf8(), "v": ListT(Int64())})
+
+    def test_bare_col_alias_form(self):
+        """``agg(pl.col("v").alias("vs"))`` renames the list column."""
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]):
+                return df.group_by("k").agg(pl.col("v").alias("vs"))
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        assert results[0].inferred_return_type == FrameType({"k": Utf8(), "vs": ListT(Int64())})
+
+    def test_bare_string_positional(self):
+        """``agg("v")`` — polars parses the string as a column reference."""
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]):
+                return df.group_by("k").agg("v")
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        assert results[0].inferred_return_type == FrameType({"k": Utf8(), "v": ListT(Int64())})
+
+    def test_bare_string_kwarg(self):
+        """``agg(vs="v")`` — string column reference renamed to the kwarg."""
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]):
+                return df.group_by("k").agg(vs="v")
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        assert results[0].inferred_return_type == FrameType({"k": Utf8(), "vs": ListT(Int64())})
+
+    def test_nullable_element_dtype_is_preserved(self):
+        """Implicit list over a nullable column keeps element nullability."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class NIn(pa.DataFrameModel):
+                k: str
+                v: int = pa.Field(nullable=True)
+
+            def f(df: DataFrame[NIn]):
+                return df.group_by("k").agg(vs=pl.col("v"))
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        assert results[0].inferred_return_type == FrameType(
+            {"k": Utf8(), "vs": ListT(Nullable(Int64()))}
+        )
+
+    def test_missing_column_raises_ply011(self):
+        """A bare reference to a missing column still surfaces PLY011."""
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]):
+                return df.group_by("k").agg(vs=pl.col("missing"))
+            """
+        )
+        results = analyze_source(source)
+        assert any("PLY011" in e and "missing" in e for e in results[0].errors)
