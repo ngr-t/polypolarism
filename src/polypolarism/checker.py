@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from polypolarism.analyzer import FunctionAnalysis, analyze_source
-from polypolarism.types import DataType, Nullable
+from polypolarism.types import DataType, Nullable, Unknown
 
 
 class TypeMismatch:
@@ -100,7 +100,16 @@ def _is_subtype(inferred: DataType, declared: DataType) -> bool:
     - T is a subtype of T
     - T is a subtype of Nullable[T] (non-nullable can be used where nullable is expected)
     - Nullable[T] is NOT a subtype of T (nullable cannot be used where non-nullable is expected)
+    - Unknown is compatible with everything in both directions (gradual
+      typing: uncertainty must not error), even ``Nullable[Unknown]`` vs a
+      non-nullable declared type.
     """
+    # Unknown on either side (after Nullable unwrap) always passes.
+    if isinstance(_get_base_type(inferred), Unknown) or isinstance(
+        _get_base_type(declared), Unknown
+    ):
+        return True
+
     # Exact match
     if inferred == declared:
         return True
@@ -160,11 +169,13 @@ def check_function(analysis: FunctionAnalysis) -> CheckResult:
             f"{actual_kind}[...]; {fix}."
         )
 
-    # Required/optional + dtype check for declared columns
+    # Required/optional + dtype check for declared columns. An open inferred
+    # frame (``rest`` is not None) may hold extra unknown columns, so a
+    # declared column missing from it is not provably absent — no error.
     for col_name, declared_spec in declared.columns.items():
         inferred_spec = inferred.columns.get(col_name)
         if inferred_spec is None:
-            if declared_spec.required:
+            if declared_spec.required and inferred.rest is None:
                 errors.append(MissingColumn(col_name, declared_spec.dtype))
             continue
         # Inferred frame may have the column as optional (may be absent);

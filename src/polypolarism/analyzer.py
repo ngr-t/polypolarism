@@ -98,6 +98,7 @@ from polypolarism.types import (
     UInt32,
     UInt64,
     UInt128,
+    Unknown,
     Utf8,
 )
 from polypolarism.types import (
@@ -493,7 +494,15 @@ def _is_column_subtype(actual: DataType, expected: DataType) -> bool:
     - T is subtype of T
     - T is subtype of Nullable[T]
     - Nullable[T] is NOT subtype of T
+    - Unknown is compatible with everything in both directions (gradual
+      typing: uncertainty must not error), even ``Nullable[Unknown]`` vs a
+      non-nullable expected type.
     """
+    actual_base = actual.inner if isinstance(actual, Nullable) else actual
+    expected_base = expected.inner if isinstance(expected, Nullable) else expected
+    if isinstance(actual_base, Unknown) or isinstance(expected_base, Unknown):
+        return True
+
     if actual == expected:
         return True
 
@@ -508,7 +517,9 @@ def _is_frame_subtype(actual: FrameType, expected: FrameType) -> bool:
     """Check if actual FrameType is subtype of expected.
 
     Rules:
-    - actual must contain every required column expected has
+    - actual must contain every required column expected has — unless
+      ``actual`` is an open frame (``rest`` is not None), whose unknown
+      extra columns may satisfy the requirement
     - For columns present on both sides, the actual dtype must be a subtype
       and an actual optional column cannot satisfy a required expected column
     - actual may have extra columns unless ``expected.strict`` is True
@@ -516,7 +527,7 @@ def _is_frame_subtype(actual: FrameType, expected: FrameType) -> bool:
     for col_name, expected_spec in expected.columns.items():
         actual_spec = actual.columns.get(col_name)
         if actual_spec is None:
-            if expected_spec.required:
+            if expected_spec.required and actual.rest is None:
                 return False
             continue
         if expected_spec.required and not actual_spec.required:

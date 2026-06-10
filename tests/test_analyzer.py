@@ -5,6 +5,8 @@ import textwrap
 import pytest
 
 from polypolarism.analyzer import (
+    _is_column_subtype,
+    _is_frame_subtype,
     analyze_source,
 )
 from polypolarism.types import (
@@ -18,7 +20,9 @@ from polypolarism.types import (
     Int32,
     Int64,
     Nullable,
+    RowVar,
     UInt32,
+    Unknown,
     Utf8,
 )
 from polypolarism.types import (
@@ -2967,3 +2971,42 @@ class TestSourceLocation:
         assert results[1].name == "second"
         # Second function comes after the first
         assert results[1].lineno > results[0].lineno
+
+
+class TestUnknownColumnSubtype:
+    """analyzer._is_column_subtype: Unknown is compatible in both directions."""
+
+    def test_unknown_actual_passes_any_expected(self):
+        assert _is_column_subtype(Unknown(), Int64())
+        assert _is_column_subtype(Unknown(), Utf8())
+        assert _is_column_subtype(Unknown(), Nullable(Int64()))
+
+    def test_any_actual_passes_unknown_expected(self):
+        assert _is_column_subtype(Int64(), Unknown())
+        assert _is_column_subtype(Nullable(Utf8()), Unknown())
+
+    def test_nullable_unknown_actual_passes_non_nullable_expected(self):
+        assert _is_column_subtype(Nullable(Unknown()), Int64())
+
+    def test_regular_mismatch_still_fails(self):
+        assert not _is_column_subtype(Utf8(), Int64())
+        assert not _is_column_subtype(Nullable(Int64()), Int64())
+
+
+class TestOpenFrameSubtype:
+    """analyzer._is_frame_subtype: open actual frames may satisfy extra columns."""
+
+    def test_missing_required_column_allowed_on_open_actual(self):
+        actual = FrameType({"id": Int64()}, rest=RowVar("r"))
+        expected = FrameType({"id": Int64(), "qty": Int64()})
+        assert _is_frame_subtype(actual, expected)
+
+    def test_missing_required_column_rejected_on_closed_actual(self):
+        actual = FrameType({"id": Int64()})
+        expected = FrameType({"id": Int64(), "qty": Int64()})
+        assert not _is_frame_subtype(actual, expected)
+
+    def test_present_column_still_type_checked_on_open_actual(self):
+        actual = FrameType({"id": Utf8()}, rest=RowVar("r"))
+        expected = FrameType({"id": Int64()})
+        assert not _is_frame_subtype(actual, expected)

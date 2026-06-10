@@ -12,6 +12,7 @@ from polypolarism.types import (
     Int64,
     Null,
     Nullable,
+    Unknown,
     Utf8,
 )
 
@@ -55,13 +56,17 @@ def infer_col(column_name: str, frame: FrameType) -> DataType:
         frame: The FrameType containing column definitions.
 
     Returns:
-        The DataType of the column.
+        The DataType of the column. On an open frame (``frame.rest`` is not
+        ``None``) a missing column resolves to ``Unknown()`` — it may be one
+        of the frame's unknown extra columns.
 
     Raises:
-        ColumnNotFoundError: If the column does not exist in the frame.
+        ColumnNotFoundError: If the column does not exist in a closed frame.
     """
     dtype = frame.get_column_type(column_name)
     if dtype is None:
+        if frame.rest is not None:
+            return Unknown()
         available = list(frame.columns.keys())
         raise ColumnNotFoundError(
             f"Column '{column_name}' not found. Available columns: {available}"
@@ -229,6 +234,10 @@ def unify_types(left: DataType, right: DataType) -> DataType:
     left_inner, left_nullable = _unwrap_nullable(left)
     right_inner, right_nullable = _unwrap_nullable(right)
     result_nullable = left_nullable or right_nullable
+
+    # Unknown absorbs everything — uncertainty propagates, never errors.
+    if isinstance(left_inner, Unknown) or isinstance(right_inner, Unknown):
+        return Unknown()
 
     # Check if types are exactly the same
     if left_inner == right_inner:
