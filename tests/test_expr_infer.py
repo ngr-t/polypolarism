@@ -172,6 +172,26 @@ class TestPromoteTypes:
         with pytest.raises(TypePromotionError):
             promote_types(Boolean(), Int64())
 
+    def test_unknown_plus_int64_returns_unknown(self) -> None:
+        """Unknown absorbs any other type on the left (like unify_types)."""
+        result = promote_types(Unknown(), Int64())
+        assert result == Unknown()
+
+    def test_int64_plus_unknown_returns_unknown(self) -> None:
+        """Unknown absorbs any other type on the right."""
+        result = promote_types(Int64(), Unknown())
+        assert result == Unknown()
+
+    def test_unknown_plus_utf8_returns_unknown_instead_of_raising(self) -> None:
+        """Unknown vs non-numeric must not raise — uncertainty propagates."""
+        result = promote_types(Unknown(), Utf8())
+        assert result == Unknown()
+
+    def test_nullable_unknown_plus_float64_returns_unknown(self) -> None:
+        """Nullable-wrapped Unknown still promotes to Unknown."""
+        result = promote_types(Nullable(Unknown()), Float64())
+        assert result == Unknown()
+
 
 class TestInferCast:
     """Tests for cast() type inference."""
