@@ -363,6 +363,208 @@ class TestAnalyzeGroupByOperations:
         assert any("category" in str(e) for e in results[0].errors)
 
 
+class TestPlLenAggregation:
+    """Zero-arg ``pl.len()`` / ``pl.count()`` recognition (issue #9)."""
+
+    def test_pl_len_in_agg_kwarg_form(self):
+        """``agg(n=pl.len())`` infers column n: UInt32."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                g: str
+                v: int
+
+            class Out(pa.DataFrameModel):
+                g: str
+                n: pl.UInt32
+
+            def agg(data: DataFrame[In]) -> DataFrame[Out]:
+                return data.group_by("g").agg(n=pl.len())
+        """
+        )
+
+        results = analyze_source(source)
+
+        expected = FrameType({"g": Utf8(), "n": UInt32()})
+        assert results[0].inferred_return_type == expected
+
+    def test_pl_len_in_agg_bare_form(self):
+        """Bare ``agg(pl.len())`` defaults the output column name to 'len'."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                g: str
+                v: int
+
+            class Out(pa.DataFrameModel):
+                g: str
+                len: pl.UInt32
+
+            def agg(data: DataFrame[In]) -> DataFrame[Out]:
+                return data.group_by("g").agg(pl.len())
+        """
+        )
+
+        results = analyze_source(source)
+
+        expected = FrameType({"g": Utf8(), "len": UInt32()})
+        assert results[0].inferred_return_type == expected
+
+    def test_pl_len_in_agg_with_alias(self):
+        """``agg(pl.len().alias("n"))`` names the output column 'n'."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                g: str
+                v: int
+
+            class Out(pa.DataFrameModel):
+                g: str
+                n: pl.UInt32
+
+            def agg(data: DataFrame[In]) -> DataFrame[Out]:
+                return data.group_by("g").agg(pl.len().alias("n"))
+        """
+        )
+
+        results = analyze_source(source)
+
+        expected = FrameType({"g": Utf8(), "n": UInt32()})
+        assert results[0].inferred_return_type == expected
+
+    def test_zero_arg_pl_count_in_agg(self):
+        """Zero-arg ``pl.count()`` behaves like ``pl.len()``."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                g: str
+                v: int
+
+            class Out(pa.DataFrameModel):
+                g: str
+                n: pl.UInt32
+
+            def agg(data: DataFrame[In]) -> DataFrame[Out]:
+                return data.group_by("g").agg(n=pl.count())
+        """
+        )
+
+        results = analyze_source(source)
+
+        expected = FrameType({"g": Utf8(), "n": UInt32()})
+        assert results[0].inferred_return_type == expected
+
+    def test_pl_len_in_select(self):
+        """``select(pl.len())`` infers column len: UInt32."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                g: str
+                v: int
+
+            class Out(pa.DataFrameModel):
+                len: pl.UInt32
+
+            def row_count(data: DataFrame[In]) -> DataFrame[Out]:
+                return data.select(pl.len())
+        """
+        )
+
+        results = analyze_source(source)
+
+        expected = FrameType({"len": UInt32()})
+        assert results[0].inferred_return_type == expected
+
+
+class TestRankMethod:
+    """``Expr.rank()`` dtype inference (issue #9)."""
+
+    def test_rank_default_returns_float64(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                v: int
+
+            class Out(pa.DataFrameModel):
+                r: pl.Float64
+
+            def ranked(data: DataFrame[In]) -> DataFrame[Out]:
+                return data.select(pl.col("v").rank().alias("r"))
+        """
+        )
+
+        results = analyze_source(source)
+
+        expected = FrameType({"r": Float64()})
+        assert results[0].inferred_return_type == expected
+
+    def test_rank_dense_returns_uint32(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                v: int
+
+            class Out(pa.DataFrameModel):
+                r: pl.UInt32
+
+            def ranked(data: DataFrame[In]) -> DataFrame[Out]:
+                return data.select(pl.col("v").rank(method="dense").alias("r"))
+        """
+        )
+
+        results = analyze_source(source)
+
+        expected = FrameType({"r": UInt32()})
+        assert results[0].inferred_return_type == expected
+
+    def test_rank_positional_method_returns_uint32(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                v: int
+
+            class Out(pa.DataFrameModel):
+                r: pl.UInt32
+
+            def ranked(data: DataFrame[In]) -> DataFrame[Out]:
+                return data.select(pl.col("v").rank("ordinal").alias("r"))
+        """
+        )
+
+        results = analyze_source(source)
+
+        expected = FrameType({"r": UInt32()})
+        assert results[0].inferred_return_type == expected
+
+    def test_rank_preserves_nullable_receiver(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                v: int = pa.Field(nullable=True)
+
+            class Out(pa.DataFrameModel):
+                r: pl.Float64 = pa.Field(nullable=True)
+
+            def ranked(data: DataFrame[In]) -> DataFrame[Out]:
+                return data.select(pl.col("v").rank().alias("r"))
+        """
+        )
+
+        results = analyze_source(source)
+
+        expected = FrameType({"r": Nullable(Float64())})
+        assert results[0].inferred_return_type == expected
+
+
 class TestAnalyzeChainedOperations:
     """Test chained DataFrame operations."""
 

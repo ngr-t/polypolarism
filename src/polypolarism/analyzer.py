@@ -628,6 +628,26 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                     alias = node.args[0].value
                     agg_node = node.func.value
 
+        # Zero-arg ``pl.len()`` / ``pl.count()`` — group-size aggregations
+        # that take no input column. polars returns its IDX dtype (UInt32)
+        # and defaults the output column name to the function name. Uses
+        # the pre-resolved-dtype AggExpr form; the kwarg path in
+        # ``_infer_agg_call`` overwrites ``alias`` with the kwarg name.
+        if (
+            isinstance(agg_node, ast.Call)
+            and isinstance(agg_node.func, ast.Attribute)
+            and agg_node.func.attr in ("len", "count")
+            and isinstance(agg_node.func.value, ast.Name)
+            and agg_node.func.value.id == "pl"
+            and not agg_node.args
+        ):
+            return AggExpr(
+                column=alias or agg_node.func.attr,
+                function=None,
+                alias=alias,
+                dtype=UInt32(),
+            )
+
         # Now look for the aggregation function call
         if isinstance(agg_node, ast.Call):
             if isinstance(agg_node.func, ast.Attribute):
@@ -878,6 +898,11 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             return None
         name = node.func.attr
 
+        # Zero-arg ``pl.len()`` — row count, polars' IDX dtype (UInt32).
+        # The default output column name is "len".
+        if name == "len" and not node.args:
+            return "len", UInt32()
+
         if name == "concat_str" or name == "format":
             for arg in node.args:
                 self._validate_subexpr(arg)
@@ -1089,6 +1114,27 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             if isinstance(receiver_type, Nullable):
                 return receiver_name, Nullable(Float64())
             return receiver_name, Float64()
+
+        # ``rank(method=...)`` — the ranking method decides the dtype: the
+        # default "average" returns Float64; the count-based methods return
+        # polars' IDX dtype (UInt32). The receiver's Nullable wrapper is
+        # preserved on the result.
+        if method == "rank" and receiver_type is not None:
+            rank_method = "average"
+            if node.args:
+                cand = _str_constant(node.args[0])
+                if cand is not None:
+                    rank_method = cand
+            for kw in node.keywords:
+                if kw.arg == "method":
+                    cand = _str_constant(kw.value)
+                    if cand is not None:
+                        rank_method = cand
+            if rank_method == "average":
+                return receiver_name, _wrap_like(receiver_type, Float64())
+            if rank_method in ("min", "max", "dense", "ordinal", "random"):
+                return receiver_name, _wrap_like(receiver_type, UInt32())
+            return None
 
         # ``pl.col("x").map_elements(fn, return_dtype=pl.Float64)`` /
         # ``map_batches(fn, return_dtype=...)``. The return type is what the
