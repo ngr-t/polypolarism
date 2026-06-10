@@ -12,10 +12,12 @@ from polypolarism.analyzer import (
 )
 from polypolarism.types import (
     Boolean,
+    Categorical,
     Date,
     Datetime,
     Decimal,
     Duration,
+    Enum,
     Float64,
     FrameType,
     Int8,
@@ -6459,3 +6461,329 @@ class TestSortKeyValidation:
         results = analyze_source(source)
         assert results[0].errors == []
         assert results[0].inferred_return_type == FrameType({"a": Int64(), "b": Utf8()})
+
+
+class TestComparisonIncompatibleDtypes:
+    """Issue #33: comparisons between incompatible dtypes flag PLY009.
+
+    Ground truth verified against polars 1.41.2 by driving the full
+    10-dtype x {==, !=, <, <=, >, >=} product through ``df.select``
+    (probe output in the implementing commit message). All six
+    comparison operators share one validity table:
+
+    ========  ==== ==== ==== ==== ==== ==== ==== ==== ==== ====
+    left\\right  i    f    s    b    d    dt   t    du   cat  en
+    i           ok   ok   ERR  ok   ok   ok   ok   ok   ERR  ERR
+    f           ok   ok   ERR  ok   ok   ok   ok   ok   ERR  ERR
+    s           ERR  ERR  ok   ok   ERR  ERR  ok*  ERR  ok   ok
+    b           ok   ok   ok   ok   ERR  ERR  ERR  ERR  ERR  ERR
+    d           ok   ok   ERR  ERR  ok   ok   ERR  ERR  ERR  ERR
+    dt          ok   ok   ERR  ERR  ok   ok   ERR  ERR  ERR  ERR
+    t           ok   ok   ERR* ERR  ERR  ERR  ok   ERR  ERR  ERR
+    du          ok   ok   ERR  ERR  ERR  ERR  ERR  ok   ERR  ERR
+    cat         ERR  ERR  ok   ERR  ERR  ERR  ERR  ERR  ok   ERR
+    en          ERR  ERR  ok   ERR  ERR  ERR  ERR  ERR  ERR  ok
+    ========  ==== ==== ==== ==== ==== ==== ==== ==== ==== ====
+
+    Notable: numeric vs temporal comparisons are *allowed* (physical
+    repr); str vs time is asymmetric (``s == t`` ok, ``t == s`` ERR) so
+    that pair stays silent. Only pairs that error in both directions
+    are flagged. Operands outside the closed set (Unknown, Decimal,
+    Null literals, unresolved) keep the silent fallback. The result
+    stays Boolean — the dtype is not in question, the error is the
+    signal.
+    """
+
+    def _frame(self) -> FrameType:
+        return FrameType(
+            {
+                "i": Int64(),
+                "f": Float64(),
+                "s": Utf8(),
+                "b": Boolean(),
+                "d": Date(),
+                "dt": Datetime(),
+                "t": Time(),
+                "du": Duration(),
+                "cat": Categorical(),
+                "en": Enum(),
+                "ni": Nullable(Int64()),
+                "ns": Nullable(Utf8()),
+                "u": Unknown(),
+                "dec": Decimal(10, 2),
+            }
+        )
+
+    # -- allowed combinations -------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "expr",
+        [
+            "pl.col('i') == pl.col('i')",
+            "pl.col('i') < pl.col('f')",
+            "pl.col('f') > 0",
+            "pl.col('i') == 1.5",
+            "pl.col('i') != pl.col('b')",
+            "pl.col('b') <= pl.col('f')",
+            "pl.col('b') == pl.col('b')",
+            # numeric vs temporal is allowed (probed)
+            "pl.col('i') == pl.col('d')",
+            "pl.col('i') < pl.col('dt')",
+            "pl.col('f') == pl.col('t')",
+            "pl.col('i') >= pl.col('du')",
+            "pl.col('d') == 1",
+            # string-likes
+            "pl.col('s') == pl.col('s')",
+            "pl.col('s') != 'x'",
+            "pl.col('s') == pl.col('b')",
+            "pl.col('s') < pl.col('cat')",
+            "pl.col('s') == pl.col('en')",
+            "pl.col('cat') == 'x'",
+            "pl.col('en') == pl.col('s')",
+            "pl.col('cat') == pl.col('cat')",
+            "pl.col('en') != pl.col('en')",
+            # temporal same-family
+            "pl.col('d') == pl.col('dt')",
+            "pl.col('dt') < pl.col('d')",
+            "pl.col('t') == pl.col('t')",
+            "pl.col('du') >= pl.col('du')",
+            # asymmetric str/time quirk stays silent (both directions)
+            "pl.col('s') == pl.col('t')",
+            "pl.col('t') == pl.col('s')",
+        ],
+    )
+    def test_allowed_combination_no_error(self, expr: str) -> None:
+        analyzer = _run_body(self._frame(), f"out = df.select(m={expr})")
+        assert analyzer.errors == [], analyzer.errors
+        dtype = analyzer.var_types["out"].columns["m"].dtype
+        base = dtype.inner if isinstance(dtype, Nullable) else dtype
+        assert base == Boolean()
+
+    # -- known-invalid combinations -------------------------------------------
+
+    @pytest.mark.parametrize(
+        "expr",
+        [
+            # string vs numeric / temporal
+            "pl.col('s') == pl.col('i')",
+            "pl.col('i') == pl.col('s')",
+            "pl.col('s') < pl.col('f')",
+            "pl.col('s') != pl.col('i')",
+            "pl.col('s') == 1",
+            "pl.col('i') == 'x'",
+            "pl.col('s') <= pl.col('d')",
+            "pl.col('s') == pl.col('dt')",
+            "pl.col('s') > pl.col('du')",
+            # boolean vs temporal / categorical
+            "pl.col('b') == pl.col('d')",
+            "pl.col('b') < pl.col('dt')",
+            "pl.col('b') == pl.col('t')",
+            "pl.col('b') != pl.col('du')",
+            "pl.col('b') == pl.col('cat')",
+            "pl.col('b') == pl.col('en')",
+            # temporal cross-family
+            "pl.col('d') == pl.col('t')",
+            "pl.col('d') < pl.col('du')",
+            "pl.col('dt') == pl.col('t')",
+            "pl.col('dt') != pl.col('du')",
+            "pl.col('t') == pl.col('du')",
+            # categorical / enum
+            "pl.col('cat') == pl.col('i')",
+            "pl.col('cat') < pl.col('f')",
+            "pl.col('cat') == pl.col('d')",
+            "pl.col('cat') == pl.col('en')",
+            "pl.col('en') == pl.col('f')",
+            "pl.col('en') != pl.col('du')",
+            "pl.col('cat') == 1",
+        ],
+    )
+    def test_invalid_combination_flags_ply009(self, expr: str) -> None:
+        analyzer = _run_body(self._frame(), f"out = df.select(m={expr})")
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY009" in analyzer.errors[0]
+        # Comparisons stay Boolean-typed — the error is the signal.
+        assert analyzer.var_types["out"].columns["m"].dtype == Boolean()
+
+    def test_error_message_names_dtypes_and_op(self):
+        analyzer = _run_body(self._frame(), "out = df.select(m=pl.col('s') == pl.col('i'))")
+        assert "comparison 'Utf8 == Int64'" in analyzer.errors[0]
+
+    def test_chained_comparison_checks_each_adjacent_pair(self):
+        # cat < i is invalid AND i < s is invalid -> two errors.
+        analyzer = _run_body(
+            self._frame(), "out = df.select(m=pl.col('cat') < pl.col('i') < pl.col('s'))"
+        )
+        assert len(analyzer.errors) == 2, analyzer.errors
+        assert all("PLY009" in e for e in analyzer.errors)
+
+    def test_parenthesized_comparison_result_is_boolean_operand(self):
+        # (i < f) < s is NOT a chained compare: the left operand is the
+        # Boolean comparison result, and bool vs str is probed-valid.
+        analyzer = _run_body(
+            self._frame(), "out = df.select(m=(pl.col('i') < pl.col('f')) < pl.col('s'))"
+        )
+        assert analyzer.errors == [], analyzer.errors
+
+    def test_chained_comparison_native_syntax(self):
+        analyzer = _run_body(self._frame(), "out = df.select(m=pl.col('s') < pl.col('i') < 3)")
+        # s < i is invalid; i < 3 is fine.
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY009" in analyzer.errors[0]
+        assert analyzer.var_types["out"].columns["m"].dtype == Boolean()
+
+    # -- Nullable unwrap / nullability propagation -----------------------------
+
+    def test_invalid_pair_detected_under_nullable_wrappers(self):
+        analyzer = _run_body(self._frame(), "out = df.select(m=pl.col('ns') == pl.col('ni'))")
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY009" in analyzer.errors[0]
+        assert "Utf8 == Int64" in analyzer.errors[0]
+
+    def test_nullable_operand_keeps_nullable_boolean_result(self):
+        analyzer = _run_body(self._frame(), "out = df.select(m=pl.col('ni') > 0)")
+        assert analyzer.errors == []
+        assert analyzer.var_types["out"].columns["m"].dtype == Nullable(Boolean())
+
+    # -- silent fallback --------------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "expr",
+        [
+            "pl.col('u') == pl.col('s')",  # Unknown operand
+            "pl.col('dec') == pl.col('s')",  # Decimal outside the closed set
+            "pl.col('s') == helper()",  # unresolved operand
+            "pl.col('i') == None",  # Null literal: null-compare, not a dtype error
+            "pl.col('s') == None",
+        ],
+    )
+    def test_not_fully_understood_pair_is_silent(self, expr: str) -> None:
+        analyzer = _run_body(self._frame(), f"out = df.select(m={expr})")
+        assert analyzer.errors == [], analyzer.errors
+
+
+class TestIsInIncompatibleDtypes:
+    """Issue #33: ``is_in`` element dtype incompatible with receiver flags PLY009.
+
+    Ground truth verified against polars 1.41.2 (probe output in the
+    implementing commit message). ``is_in`` is stricter than comparison:
+    valid pairs are exactly num x num, str x {str, cat, enum}, cat x cat,
+    enum x enum, bool x bool, date x date, datetime x datetime,
+    time x time, dur x dur. Everything else inside the closed set raises
+    InvalidOperationError — including int x bool, date x datetime and
+    cat x enum. Enum x str failures are value-dependent (out-of-category
+    values) so that pair stays valid/silent. A non-List expression arg of
+    dtype T is imploded by polars and acts as element dtype T.
+    """
+
+    def _frame(self) -> FrameType:
+        return FrameType(
+            {
+                "i": Int64(),
+                "f": Float64(),
+                "s": Utf8(),
+                "b": Boolean(),
+                "d": Date(),
+                "du": Duration(),
+                "cat": Categorical(),
+                "en": Enum(),
+                "ni": Nullable(Int64()),
+                "u": Unknown(),
+                "dec": Decimal(10, 2),
+                "li": ListT(Int64()),
+                "lf": ListT(Float64()),
+                "ls": ListT(Utf8()),
+                "ldt": ListT(Datetime()),
+                "len_": ListT(Enum()),
+                "nls": Nullable(ListT(Utf8())),
+            }
+        )
+
+    # -- allowed combinations ---------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "expr",
+        [
+            # literal lists / tuples
+            "pl.col('i').is_in([1, 2, 3])",
+            "pl.col('i').is_in((1, 2))",
+            "pl.col('i').is_in([1.5, 2.5])",  # int/float interchangeable
+            "pl.col('f').is_in([1, 2])",
+            "pl.col('s').is_in(['x', 'y'])",
+            "pl.col('b').is_in([True])",
+            "pl.col('cat').is_in(['x', 'y'])",
+            "pl.col('en').is_in(['x', 'y'])",  # value-dependent only -> silent
+            # Null elements are unwrapped before the check
+            "pl.col('i').is_in([1, None])",
+            # Nullable receiver unwraps
+            "pl.col('ni').is_in([1, 2])",
+            # expression args: List(T) contributes T
+            "pl.col('i').is_in(pl.col('li'))",
+            "pl.col('i').is_in(pl.col('lf'))",
+            "pl.col('s').is_in(pl.col('ls'))",
+            "pl.col('cat').is_in(pl.col('ls'))",
+            # non-List expr arg of dtype T acts as element dtype T
+            "pl.col('i').is_in(pl.col('f'))",
+            # Nullable List expr arg unwraps at both levels
+            "pl.col('s').is_in(pl.col('nls'))",
+        ],
+    )
+    def test_allowed_combination_no_error(self, expr: str) -> None:
+        analyzer = _run_body(self._frame(), f"out = df.select(m={expr})")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["m"].dtype == Boolean()
+
+    # -- known-invalid combinations ----------------------------------------------
+
+    @pytest.mark.parametrize(
+        "expr",
+        [
+            # the issue #33 repro
+            "pl.col('i').is_in(['x', 'y'])",
+            "pl.col('s').is_in([1, 2])",
+            # is_in is stricter than comparison: bool/int don't mix
+            "pl.col('i').is_in([True])",
+            "pl.col('b').is_in([1])",
+            "pl.col('du').is_in([1])",
+            "pl.col('cat').is_in([1, 2])",
+            # expression args
+            "pl.col('s').is_in(pl.col('li'))",
+            "pl.col('i').is_in(pl.col('ls'))",
+            "pl.col('d').is_in(pl.col('ldt'))",  # date vs datetime errors
+            "pl.col('cat').is_in(pl.col('len_'))",  # cat vs enum errors
+            # non-List expr arg with incompatible dtype
+            "pl.col('i').is_in(pl.col('s'))",
+            # Nullable receiver still checked after unwrap
+            "pl.col('ni').is_in(['x'])",
+        ],
+    )
+    def test_invalid_combination_flags_ply009(self, expr: str) -> None:
+        analyzer = _run_body(self._frame(), f"out = df.select(m={expr})")
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY009" in analyzer.errors[0]
+        # Result stays Boolean — the error is the signal.
+        assert analyzer.var_types["out"].columns["m"].dtype == Boolean()
+
+    def test_error_message_mirrors_polars_wording(self):
+        analyzer = _run_body(self._frame(), "out = df.select(m=pl.col('i').is_in(['x', 'y']))")
+        assert "is_in" in analyzer.errors[0]
+        assert "Utf8" in analyzer.errors[0]
+        assert "Int64" in analyzer.errors[0]
+
+    # -- silent fallback ----------------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "expr",
+        [
+            "pl.col('i').is_in([])",  # empty list: polars accepts
+            "pl.col('i').is_in([1, 'x'])",  # non-unifiable literals
+            "pl.col('i').is_in([x, y])",  # non-constant elements
+            "pl.col('u').is_in(['x'])",  # Unknown receiver
+            "pl.col('dec').is_in([1])",  # Decimal outside the closed set
+            "pl.col('i').is_in(helper())",  # unresolvable arg
+            "pl.col('i').is_in()",  # no args
+        ],
+    )
+    def test_not_fully_understood_is_silent(self, expr: str) -> None:
+        analyzer = _run_body(self._frame(), f"out = df.select(m={expr})")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["m"].dtype == Boolean()

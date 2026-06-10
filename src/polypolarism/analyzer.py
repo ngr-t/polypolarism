@@ -84,11 +84,13 @@ from polypolarism.pandera_schema import (
 from polypolarism.types import (
     NUMERIC_DTYPES,
     Boolean,
+    Categorical,
     ColumnSpec,
     DataType,
     Date,
     Datetime,
     Duration,
+    Enum,
     Float16,
     Float32,
     Float64,
@@ -435,6 +437,123 @@ def _arith_verdict(
             return Utf8()
         return _ARITH_INVALID
     return _temporal_arith(op, left_inner, lcat, right_inner, rcat)
+
+
+# ---- comparison / is_in dtype rules (issue #33) ------------------------------
+#
+# Classification of ``left <cmp> right`` and ``recv.is_in(elements)`` over the
+# dtypes whose comparability we fully understand: numeric ∪ {Utf8, Boolean,
+# Date, Datetime, Time, Duration, Categorical, Enum}. Verified against polars
+# 1.41.2 by driving the full dtype x dtype product through ``df.select``
+# (tables in TestComparisonIncompatibleDtypes / TestIsInIncompatibleDtypes).
+# Anything outside this set stays silent — false positives are worse than
+# false negatives here.
+
+_CMP_OP_SYMBOLS: dict[type[ast.cmpop], str] = {
+    ast.Eq: "==",
+    ast.NotEq: "!=",
+    ast.Lt: "<",
+    ast.LtE: "<=",
+    ast.Gt: ">",
+    ast.GtE: ">=",
+}
+
+
+def _cmp_category(dtype: DataType) -> str | None:
+    """``_arith_category`` extended with Categorical / Enum.
+
+    ``None`` means the dtype is outside the fully-understood set (Unknown,
+    Null, Decimal, List, ...) and the caller must stay silent.
+    """
+    cat = _arith_category(dtype)
+    if cat is not None:
+        return cat
+    if isinstance(dtype, Categorical):
+        return "cat"
+    if isinstance(dtype, Enum):
+        return "enum"
+    return None
+
+
+# Unordered category pairs where every comparison operator errors at runtime
+# in BOTH operand orders (all six operators share one validity table). The
+# asymmetric str/time quirk (``s == t`` ok, ``t == s`` errors) is deliberately
+# absent — asymmetric cells stay silent.
+_CMP_INVALID_PAIRS: frozenset[frozenset[str]] = frozenset(
+    frozenset(pair)
+    for pair in (
+        ("str", "num"),
+        ("str", "date"),
+        ("str", "datetime"),
+        ("str", "dur"),
+        ("bool", "date"),
+        ("bool", "datetime"),
+        ("bool", "time"),
+        ("bool", "dur"),
+        ("bool", "cat"),
+        ("bool", "enum"),
+        ("date", "time"),
+        ("date", "dur"),
+        ("datetime", "time"),
+        ("datetime", "dur"),
+        ("time", "dur"),
+        ("cat", "num"),
+        ("cat", "date"),
+        ("cat", "datetime"),
+        ("cat", "time"),
+        ("cat", "dur"),
+        ("cat", "enum"),
+        ("enum", "num"),
+        ("enum", "date"),
+        ("enum", "datetime"),
+        ("enum", "time"),
+        ("enum", "dur"),
+    )
+)
+
+
+def _comparison_invalid(left_inner: DataType, right_inner: DataType) -> bool:
+    """True when polars provably rejects comparing the (unwrapped) dtype pair."""
+    lcat = _cmp_category(left_inner)
+    rcat = _cmp_category(right_inner)
+    if lcat is None or rcat is None:
+        return False
+    return frozenset((lcat, rcat)) in _CMP_INVALID_PAIRS
+
+
+# ``is_in`` is stricter than comparison: the receiver and element categories
+# must match exactly, except int/float interchange and the string-likes
+# (str accepts cat and enum partners — but cat x enum errors). Enum x str
+# failures are value-dependent (out-of-category values), hence valid here.
+_IS_IN_VALID_PAIRS: frozenset[frozenset[str]] = frozenset(
+    frozenset(pair)
+    for pair in (
+        ("num", "num"),
+        ("str", "str"),
+        ("str", "cat"),
+        ("str", "enum"),
+        ("cat", "cat"),
+        ("enum", "enum"),
+        ("bool", "bool"),
+        ("date", "date"),
+        ("datetime", "datetime"),
+        ("time", "time"),
+        ("dur", "dur"),
+    )
+)
+
+
+def _is_in_invalid(receiver_inner: DataType, element_inner: DataType) -> bool:
+    """True when polars provably rejects ``receiver.is_in([element, ...])``.
+
+    Both dtypes must be inside the fully-understood set; the full category
+    product was probed, so any non-valid pair within the set is an error.
+    """
+    rcat = _cmp_category(receiver_inner)
+    ecat = _cmp_category(element_inner)
+    if rcat is None or ecat is None:
+        return False
+    return frozenset((rcat, ecat)) not in _IS_IN_VALID_PAIRS
 
 
 def _wrap_like(receiver: DataType, new_inner: DataType) -> DataType:
@@ -1209,10 +1328,30 @@ class ExpressionAnalyzer(ast.NodeVisitor):
 
         # Comparison expressions (==, !=, <, <=, >, >=) -> Boolean.
         # A Nullable operand makes the result Nullable (``null > 0`` is null).
+        # Probed-invalid dtype pairs flag PLY009 (issue #33) — each adjacent
+        # pair of a chained comparison is checked. The result stays Boolean:
+        # the dtype is not in question, the error is the signal.
         if isinstance(inner_node, ast.Compare):
             operand_types = [self.analyze_select_expr(inner_node.left)[1]]
             for cmp in inner_node.comparators:
                 operand_types.append(self.analyze_select_expr(cmp)[1])
+            for op, left_type, right_type in zip(
+                inner_node.ops, operand_types, operand_types[1:], strict=False
+            ):
+                op_sym = _CMP_OP_SYMBOLS.get(type(op))
+                if op_sym is None or left_type is None or right_type is None:
+                    continue
+                left_inner = left_type.inner if isinstance(left_type, Nullable) else left_type
+                right_inner = right_type.inner if isinstance(right_type, Nullable) else right_type
+                if _comparison_invalid(left_inner, right_inner):
+                    self.errors.append(
+                        tag(
+                            PLY009,
+                            f"comparison '{left_inner} {op_sym} {right_inner}' is not "
+                            f"supported — polars rejects comparing these dtypes at "
+                            f"runtime; cast an operand first",
+                        )
+                    )
             resolved = [t for t in operand_types if t is not None]
             return alias, _wrap_nullable_if_any(Boolean(), resolved)
 
@@ -1553,6 +1692,44 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         """
         self.analyze_select_expr(node)
 
+    def _is_in_element_dtype(self, arg: ast.expr) -> DataType | None:
+        """Element dtype of an ``is_in`` argument, or ``None`` when not understood.
+
+        - list/tuple/set literal of constants → ``infer_lit`` per element,
+          folded with ``unify_types`` (``[1, None]`` → ``Nullable[Int64]``;
+          the caller unwraps). Empty, non-constant or non-unifiable → ``None``.
+        - any other expression → its inferred dtype; a ``List(T)`` expr
+          contributes ``T``, and a non-List expr of dtype ``T`` is imploded
+          by polars so it contributes ``T`` as well (probed).
+        - a bare scalar constant is outside the understood surface → ``None``.
+        """
+        if isinstance(arg, (ast.List, ast.Tuple, ast.Set)):
+            unified: DataType | None = None
+            for elt in arg.elts:
+                if not isinstance(elt, ast.Constant):
+                    return None
+                value = elt.value
+                if value is not None and not isinstance(value, (bool, int, float, str)):
+                    return None
+                element = infer_lit(value)
+                if unified is None:
+                    unified = element
+                    continue
+                try:
+                    unified = unify_types(unified, element)
+                except TypeUnificationError:
+                    return None
+            return unified
+        if isinstance(arg, ast.Constant):
+            return None
+        _, arg_dtype = self.analyze_select_expr(arg)
+        if arg_dtype is None:
+            return None
+        inner = arg_dtype.inner if isinstance(arg_dtype, Nullable) else arg_dtype
+        if isinstance(inner, ListT):
+            return inner.inner
+        return inner
+
     def _analyze_method_chain(self, node: ast.expr) -> tuple[str | None, DataType | None] | None:
         """Analyze ``pl.col("x").<method>(...)`` style chains.
 
@@ -1593,6 +1770,29 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         if receiver_type is None and receiver_name is None:
             # Receiver wasn't recognised — bail out.
             return None
+
+        # ``is_in``: validate the element dtype against the receiver dtype
+        # (issue #33) before falling through to the Boolean predicate path.
+        # Unresolvable arguments / receivers stay silent.
+        if method == "is_in" and node.args and receiver_type is not None:
+            element_dtype = self._is_in_element_dtype(node.args[0])
+            if element_dtype is not None:
+                receiver_inner = (
+                    receiver_type.inner if isinstance(receiver_type, Nullable) else receiver_type
+                )
+                element_inner = (
+                    element_dtype.inner if isinstance(element_dtype, Nullable) else element_dtype
+                )
+                if _is_in_invalid(receiver_inner, element_inner):
+                    self.errors.append(
+                        tag(
+                            PLY009,
+                            f"is_in: cannot check for List({element_inner}) values in "
+                            f"{receiver_inner} data — polars raises "
+                            f"InvalidOperationError at runtime; cast an operand first",
+                        )
+                    )
+            # The result dtype is Boolean either way — handled just below.
 
         # Boolean predicates always produce Boolean; column name carried through.
         if method in self._BOOLEAN_PREDICATE_METHODS:

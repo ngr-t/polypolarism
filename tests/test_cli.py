@@ -88,6 +88,15 @@ class TestCheckDirectory:
         assert results[0].passed is False
         assert any("PLY007" in str(e) for e in results[0].errors)
 
+    def test_compare_incompatible_fixture_fails_with_ply009(self):
+        """Issue #33 fixture: String == Int64 comparison and Int64.is_in(list-of-str)."""
+        results = check_file(FIXTURES_DIR / "invalid" / "compare_incompatible.py")
+
+        assert len(results) == 2
+        for result in results:
+            assert result.passed is False
+            assert any("PLY009" in str(e) for e in result.errors)
+
 
 class TestCheckWarningFixtures:
     """Files in fixtures/warning produce warnings but still pass type-check."""
