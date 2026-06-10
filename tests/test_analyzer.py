@@ -4883,9 +4883,7 @@ class TestSeqVariants:
         frame = FrameType({"a": Int64(), "b": Int64()})
         analyzer = _run_body(frame, 'out = df.with_columns_seq(c=pl.col("a") + pl.col("b"))')
         assert analyzer.errors == []
-        assert analyzer.var_types["out"] == FrameType(
-            {"a": Int64(), "b": Int64(), "c": Int64()}
-        )
+        assert analyzer.var_types["out"] == FrameType({"a": Int64(), "b": Int64(), "c": Int64()})
 
     def test_seq_chain(self):
         frame = FrameType({"a": Int64(), "b": Int64()})
