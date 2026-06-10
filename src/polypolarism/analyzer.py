@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from polypolarism.compat.polars_api import (
     STR_NAMESPACE_RETURN,
     agg_function_for,
     canonicalize_method,
+    parse_decimal_call,
 )
 from polypolarism.diagnostics import (
     PLW001,
@@ -40,6 +42,7 @@ from polypolarism.diagnostics import (
     PLY011,
     PLY012,
     PLY013,
+    PLY014,
     PLY020,
     PLY021,
     PLY022,
@@ -170,6 +173,12 @@ def _resolve_pl_dtype(node: ast.expr) -> DataType | None:
             if node.func.attr == "List" and node.args:
                 element = _resolve_pl_dtype(node.args[0])
                 return ListT(element if element is not None else Unknown())
+            # ``pl.Decimal(p, s)`` preserves precision/scale (issue #38);
+            # omitted args take polars' defaults. Non-literal args are
+            # unknowable — return unresolved (None) rather than fabricating
+            # the bare default, which would be a false-positive trap.
+            if node.func.attr == "Decimal":
+                return parse_decimal_call(node)
             base = _PL_DTYPE_NAME_MAP.get(node.func.attr)
             if isinstance(base, Datetime):
                 tz: str | None = None
@@ -223,37 +232,61 @@ def _resolve_schema_dtype(node: ast.expr) -> DataType:
     return Unknown()
 
 
-def _frame_literal_value_dtype(node: ast.expr) -> DataType:
+def _unify_literal_values(values: list[object]) -> DataType:
+    """Fold ``infer_lit`` over python literal values with ``unify_types``.
+
+    ``[1, None]`` → ``Nullable[Int64]``; empty, non-literal or
+    non-unifiable values → ``Unknown``.
+    """
+    if not values:
+        return Unknown()
+    unified: DataType | None = None
+    for value in values:
+        if value is not None and not isinstance(value, (bool, int, float, str)):
+            return Unknown()
+        elem = infer_lit(value)
+        if unified is None:
+            unified = elem
+            continue
+        try:
+            unified = unify_types(unified, elem)
+        except TypeUnificationError:
+            return Unknown()
+    assert unified is not None
+    return unified
+
+
+def _frame_literal_value_dtype(
+    node: ast.expr,
+    lookup_const: Callable[[str], str | list[str] | None] | None = None,
+) -> DataType:
     """Per-column dtype for one value of a ``pl.DataFrame({...})`` data dict.
 
     - list/tuple of constants → element dtypes folded with ``unify_types``
       (``[1, None]`` → ``Nullable[Int64]``); empty or any non-constant /
       non-unifiable element → ``Unknown``.
+    - a ``Name`` bound to a string(-list) constant (issue #39): resolved
+      through ``lookup_const`` — a ``list[str]`` value behaves like the
+      equivalent list literal, a ``str`` like the broadcast scalar.
     - recognised eager range constructors (``pl.date_range(...)`` etc.)
       → their fixed Series dtype.
     - a bare scalar constant (broadcast) → ``infer_lit``.
     - anything else → ``Unknown``.
     """
     if isinstance(node, (ast.List, ast.Tuple)):
-        if not node.elts:
+        if not all(isinstance(elt, ast.Constant) for elt in node.elts):
             return Unknown()
-        unified: DataType | None = None
-        for elt in node.elts:
-            if not isinstance(elt, ast.Constant):
-                return Unknown()
-            value = elt.value
-            if value is not None and not isinstance(value, (bool, int, float, str)):
-                return Unknown()
-            elem = infer_lit(value)
-            if unified is None:
-                unified = elem
-                continue
-            try:
-                unified = unify_types(unified, elem)
-            except TypeUnificationError:
-                return Unknown()
-        assert unified is not None
-        return unified
+        return _unify_literal_values(
+            [elt.value for elt in node.elts if isinstance(elt, ast.Constant)]
+        )
+
+    if isinstance(node, ast.Name) and lookup_const is not None:
+        const_val = lookup_const(node.id)
+        if isinstance(const_val, str):
+            return infer_lit(const_val)
+        if isinstance(const_val, list):
+            return _unify_literal_values(list(const_val))
+        return Unknown()
 
     if (
         isinstance(node, ast.Call)
@@ -2886,6 +2919,12 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     # (issue #29). Must be dispatched before that fallback —
                     # ``sort`` stays in the compat identity set.
                     return _lazy_like(self._infer_sort_call(receiver_type, node), receiver_type)
+                elif method_name == "unique":
+                    # Identity-shaped, but the ``subset=`` columns are
+                    # validated (issue #35). Like ``sort``, dispatched before
+                    # the identity fallback — ``unique`` stays in the compat
+                    # identity set.
+                    return _lazy_like(self._infer_unique_call(receiver_type, node), receiver_type)
                 elif method_name == "explode":
                     return _lazy_like(self._infer_explode_call(receiver_type, node), receiver_type)
                 elif method_name == "vstack":
@@ -3809,7 +3848,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             name = _str_constant(key_node)
             if name is None:
                 return None
-            columns[name] = _frame_literal_value_dtype(val_node)
+            columns[name] = _frame_literal_value_dtype(val_node, self._lookup_const)
 
         if isinstance(overrides_kw, ast.Dict):
             for key_node, val_node in zip(overrides_kw.keys, overrides_kw.values, strict=False):
@@ -4111,6 +4150,36 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 if name not in input_frame.columns and input_frame.rest is None:
                     self.errors.append(tag(PLY007, f"sort: column '{name}' not found"))
         self.errors.extend(expr_analyzer.errors)
+        return input_frame
+
+    def _infer_unique_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
+        """Identity-typed, but validate the ``subset=`` columns (issue #35).
+
+        ``unique(subset=None, *, keep, maintain_order)`` — the subset can be
+        passed positionally or as the ``subset=`` kwarg: a string constant, a
+        list/tuple of strings, a constant-bound name, or a selector (which
+        resolves against the frame, so it can't name a missing column). A
+        subset column missing from a closed frame is PLY014 — polars raises
+        ColumnNotFoundError at runtime; open frames stay lenient. The
+        ``keep=`` / ``maintain_order=`` modifiers are ignored.
+        """
+        subset_nodes: list[ast.expr] = list(node.args[:1])
+        for kw in node.keywords:
+            if kw.arg == "subset":
+                subset_nodes.append(kw.value)
+
+        for subset_node in subset_nodes:
+            if _resolve_selector(subset_node, input_frame) is not None:
+                continue
+            single = self._const_str(subset_node)
+            names = [single] if single is not None else self._const_str_list(subset_node)
+            if names is None:
+                # Expression subset (``pl.col(...)`` etc.) or an unresolvable
+                # variable — stay silent rather than guess.
+                continue
+            for name in names:
+                if name not in input_frame.columns and input_frame.rest is None:
+                    self.errors.append(tag(PLY014, f"unique: subset column '{name}' not found"))
         return input_frame
 
     def _infer_with_row_index_call(

@@ -7652,3 +7652,269 @@ class TestShiftFillValue:
         # dtype (slots are filled with *something*, so no Nullable wrap).
         ft = self._infer('df.select(pl.col("a").shift(1, fill_value=pl.col("a").interpolate()))')
         assert ft.columns["a"].dtype == Int64()
+
+
+class TestUniqueSubsetValidation:
+    """Issue #35: ``unique`` validates subset columns like drop_nulls does (PLY014)."""
+
+    HEADER = textwrap.dedent(
+        PANDERA_HEADER
+        + """
+            class In(pa.DataFrameModel):
+                a: int
+                b: str
+        """
+    )
+
+    def _analyze(self, body: str, extra_imports: str = ""):
+        source = (
+            extra_imports
+            + self.HEADER
+            + textwrap.dedent(
+                f"""
+            def f(df: DataFrame[In]):
+                return {body}
+            """
+            )
+        )
+        return analyze_source(source)
+
+    def test_missing_subset_list_kwarg_flags_ply014(self):
+        results = self._analyze('df.unique(subset=["ghost"])')
+        assert any("PLY014" in e and "ghost" in e for e in results[0].errors)
+
+    def test_missing_subset_string_kwarg_flags_ply014(self):
+        results = self._analyze('df.unique(subset="ghost")')
+        assert any("PLY014" in e and "ghost" in e for e in results[0].errors)
+
+    def test_missing_subset_positional_list_flags_ply014(self):
+        results = self._analyze('df.unique(["a", "ghost"])')
+        assert any("PLY014" in e and "ghost" in e for e in results[0].errors)
+
+    def test_missing_subset_positional_string_flags_ply014(self):
+        results = self._analyze('df.unique("ghost")')
+        assert any("PLY014" in e and "ghost" in e for e in results[0].errors)
+
+    def test_existing_subset_passes(self):
+        results = self._analyze('df.unique(subset=["a"])')
+        assert results[0].errors == []
+
+    def test_bare_unique_passes(self):
+        results = self._analyze("df.unique()")
+        assert results[0].errors == []
+
+    def test_local_const_name_subset_resolves(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]):
+                cols = ["ghost"]
+                return df.unique(subset=cols)
+            """
+        )
+        results = analyze_source(source)
+        assert any("PLY014" in e and "ghost" in e for e in results[0].errors)
+
+    def test_module_const_name_subset_resolves(self):
+        source = (
+            self.HEADER
+            + 'COLS = ["ghost"]\n'
+            + textwrap.dedent(
+                """
+            def f(df: DataFrame[In]):
+                return df.unique(subset=COLS)
+            """
+            )
+        )
+        results = analyze_source(source)
+        assert any("PLY014" in e and "ghost" in e for e in results[0].errors)
+
+    def test_local_const_shadows_module_const(self):
+        source = (
+            self.HEADER
+            + 'COLS = ["a"]\n'
+            + textwrap.dedent(
+                """
+            def f(df: DataFrame[In]):
+                COLS = ["ghost"]
+                return df.unique(subset=COLS)
+            """
+            )
+        )
+        results = analyze_source(source)
+        assert any("PLY014" in e and "ghost" in e for e in results[0].errors)
+
+    def test_keep_and_maintain_order_kwargs_are_ignored(self):
+        results = self._analyze('df.unique(subset=["a"], keep="first", maintain_order=True)')
+        assert results[0].errors == []
+
+    def test_selector_subset_passes(self):
+        results = self._analyze(
+            "df.unique(subset=cs.numeric())", extra_imports="import polars.selectors as cs\n"
+        )
+        assert results[0].errors == []
+
+    def test_open_frame_missing_subset_not_flagged(self):
+        frame = FrameType({"id": Int64()}, rest=RowVar("r"))
+        analyzer = _run_body(frame, 'out = df.unique(subset=["ghost"])')
+        assert analyzer.errors == []
+
+    def test_unique_stays_identity_typed(self):
+        results = self._analyze('df.unique(subset=["a"])')
+        assert results[0].inferred_return_type == FrameType({"a": Int64(), "b": Utf8()})
+
+    def test_lazy_unique_preserves_laziness(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            from pandera.typing.polars import LazyFrame
+
+            class In(pa.DataFrameModel):
+                a: int
+                b: str
+
+            def f(lf: LazyFrame[In]) -> DataFrame[In]:
+                return lf.unique(subset=["a"]).collect()
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        assert results[0].inferred_return_type == FrameType({"a": Int64(), "b": Utf8()})
+
+
+class TestDecimalCastPrecisionScale:
+    """Issue #38: ``cast(pl.Decimal(p, s))`` preserves precision/scale.
+
+    Ground truth (polars 1.41.2): ``pl.col("x").cast(pl.Decimal(10, 2))``
+    produces ``Decimal(precision=10, scale=2)``; omitted args take polars'
+    defaults (precision=38, scale=0).
+    """
+
+    def _frame(self) -> FrameType:
+        return FrameType({"x": Int64(), "n": Nullable(Int64())})
+
+    def _cast_dtype(self, target: str):
+        analyzer = _run_body(self._frame(), f"out = df.select(d=pl.col('x').cast({target}))")
+        assert analyzer.errors == [], analyzer.errors
+        return analyzer.var_types["out"].columns["d"].dtype
+
+    def test_positional_args_preserved(self):
+        assert self._cast_dtype("pl.Decimal(10, 2)") == Decimal(10, 2)
+
+    def test_keyword_args_preserved(self):
+        assert self._cast_dtype("pl.Decimal(precision=10, scale=2)") == Decimal(10, 2)
+
+    def test_precision_only_defaults_scale(self):
+        assert self._cast_dtype("pl.Decimal(10)") == Decimal(10, 0)
+
+    def test_scale_only_defaults_precision(self):
+        assert self._cast_dtype("pl.Decimal(scale=2)") == Decimal(38, 2)
+
+    def test_bare_call_uses_polars_defaults(self):
+        assert self._cast_dtype("pl.Decimal()") == Decimal(38, 0)
+
+    def test_bare_attribute_uses_polars_defaults(self):
+        assert self._cast_dtype("pl.Decimal") == Decimal(38, 0)
+
+    def test_non_literal_args_degrade_to_unknown(self):
+        # ``pl.Decimal(p, s)`` with variable args: claiming the bare default
+        # would be a false-positive trap — the cast target is unresolved and
+        # the column degrades to Unknown (still registered, never an error).
+        analyzer = _run_body(self._frame(), "out = df.select(d=pl.col('x').cast(pl.Decimal(p, s)))")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["d"].dtype == Unknown()
+
+    def test_nullable_receiver_wrapper_preserved(self):
+        analyzer = _run_body(
+            self._frame(), "out = df.select(d=pl.col('n').cast(pl.Decimal(10, 2)))"
+        )
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["d"].dtype == Nullable(Decimal(10, 2))
+
+    def test_frame_level_dict_cast_preserved(self):
+        analyzer = _run_body(self._frame(), "out = df.cast({'x': pl.Decimal(10, 2)})")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["x"].dtype == Decimal(10, 2)
+
+
+class TestFrameLiteralConstantValues:
+    """Issue #39a: ``pl.DataFrame({"col": VAR})`` resolves constant bindings
+    used as column values (a ``str`` / ``list[str]`` constant -> Utf8),
+    consistent with the literal-list case (#25)."""
+
+    HEADER = textwrap.dedent(
+        PANDERA_HEADER
+        + """
+            class In(pa.DataFrameModel):
+                x: int
+        """
+    )
+
+    def test_module_const_str_list_value_is_utf8(self):
+        source = (
+            self.HEADER
+            + 'NAMES = ["x", "y", "z"]\n'
+            + textwrap.dedent(
+                """
+            def f(df: DataFrame[In]):
+                return pl.DataFrame({"step": [1, 2, 3], "name": NAMES})
+            """
+            )
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        assert results[0].inferred_return_type == FrameType({"step": Int64(), "name": Utf8()})
+
+    def test_local_const_str_list_value_is_utf8(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]):
+                names = ["x", "y"]
+                return pl.DataFrame({"name": names})
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        assert results[0].inferred_return_type == FrameType({"name": Utf8()})
+
+    def test_const_str_value_broadcasts_to_utf8(self):
+        source = (
+            self.HEADER
+            + 'SOURCE = "manual"\n'
+            + textwrap.dedent(
+                """
+            def f(df: DataFrame[In]):
+                return pl.DataFrame({"a": [1, 2], "src": SOURCE})
+            """
+            )
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        assert results[0].inferred_return_type == FrameType({"a": Int64(), "src": Utf8()})
+
+    def test_local_const_shadows_module_const(self):
+        source = (
+            self.HEADER
+            + 'NAMES = "scalar"\n'
+            + textwrap.dedent(
+                """
+            def f(df: DataFrame[In]):
+                NAMES = ["x", "y"]
+                return pl.DataFrame({"name": NAMES})
+            """
+            )
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        assert results[0].inferred_return_type == FrameType({"name": Utf8()})
+
+    def test_unresolvable_name_value_stays_unknown(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]):
+                names = load_names()
+                return pl.DataFrame({"name": names})
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        assert results[0].inferred_return_type == FrameType({"name": Unknown()})

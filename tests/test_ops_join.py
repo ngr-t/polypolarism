@@ -9,6 +9,7 @@ from polypolarism.types import (
     Int64,
     Nullable,
     RowVar,
+    Unknown,
     Utf8,
 )
 
@@ -703,3 +704,48 @@ class TestCrossJoin:
             infer_join(left, right, left_on="id", right_on="rid", how="cross")
 
         assert "cross join takes no join keys" in str(exc_info.value)
+
+
+class TestUnknownKeyCompatibility:
+    """Issue #39b: an Unknown join key never reports a dtype mismatch
+    (gradual typing — uncertainty must not error)."""
+
+    def test_left_unknown_key_joins_against_utf8(self):
+        left = FrameType({"name": Unknown(), "step": Int64()})
+        right = FrameType({"name": Utf8(), "v": Int64()})
+
+        result = infer_join(left, right, on="name", how="left")
+
+        assert result.columns["name"].dtype == Unknown()
+        assert result.columns["v"].dtype == Nullable(Int64())
+
+    def test_right_unknown_key_joins_against_utf8(self):
+        left = FrameType({"name": Utf8(), "step": Int64()})
+        right = FrameType({"name": Unknown(), "v": Int64()})
+
+        result = infer_join(left, right, on="name", how="inner")
+
+        assert result.columns["name"].dtype == Utf8()
+
+    def test_both_unknown_keys_join(self):
+        left = FrameType({"name": Unknown()})
+        right = FrameType({"name": Unknown(), "v": Int64()})
+
+        result = infer_join(left, right, on="name", how="inner")
+
+        assert result.columns["name"].dtype == Unknown()
+
+    def test_nullable_unknown_key_joins_against_utf8(self):
+        left = FrameType({"name": Nullable(Unknown())})
+        right = FrameType({"name": Utf8(), "v": Int64()})
+
+        result = infer_join(left, right, on="name", how="inner")
+
+        assert result.columns["v"].dtype == Int64()
+
+    def test_genuine_dtype_mismatch_still_raises(self):
+        left = FrameType({"name": Int64()})
+        right = FrameType({"name": Utf8()})
+
+        with pytest.raises(JoinError, match="dtype mismatch"):
+            infer_join(left, right, on="name", how="inner")

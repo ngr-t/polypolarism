@@ -18,3 +18,18 @@ class PriceSchema(pa.DataFrameModel):
 
 def passthrough(df: DataFrame[PriceSchema]) -> DataFrame[PriceSchema]:
     return df.filter(pl.col("sku") > 0)
+
+
+class DecOut(pa.DataFrameModel):
+    """Issue #38: ``cast(pl.Decimal(p, s))`` preserves precision/scale."""
+
+    d: pl.Decimal(10, 2)
+
+    class Config:
+        strict = True
+        coerce = True
+
+
+@pa.check_types
+def decimal_cast(df: DataFrame[PriceSchema]) -> DataFrame[DecOut]:
+    return df.select(d=pl.col("sku").cast(pl.Decimal(10, 2)))

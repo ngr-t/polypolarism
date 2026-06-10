@@ -29,6 +29,7 @@ the policy that motivates the centralization.
 
 from __future__ import annotations
 
+import ast
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -86,8 +87,54 @@ DEFAULT_POLARS_PROFILE = POLARS_1_X
 
 # Polars' own ``pl.Decimal()`` defaults (precision=38, scale=0). Used when
 # the analyzer sees a bare ``pl.Decimal`` reference; explicit
-# ``pl.Decimal(p, s)`` is parsed at the call site to preserve p / s.
+# ``pl.Decimal(p, s)`` is parsed via ``parse_decimal_call`` to preserve p / s.
 DECIMAL_DEFAULT = Decimal(38, 0)
+
+
+def _decimal_call_arg(call: ast.Call, *, position: int, name: str, default: int) -> int | None:
+    """One ``pl.Decimal(...)`` argument: positional or keyword.
+
+    Returns ``default`` when the argument is omitted (or an explicit
+    ``None`` literal — polars substitutes its own default), the value for
+    an integer literal, and ``None`` when the argument is present but not
+    statically readable (a variable, an expression, ...).
+    """
+    node: ast.expr | None = None
+    if position < len(call.args):
+        node = call.args[position]
+    for kw in call.keywords:
+        if kw.arg == name:
+            node = kw.value
+    if node is None:
+        return default
+    if isinstance(node, ast.Constant):
+        if node.value is None:
+            return default
+        if isinstance(node.value, int) and not isinstance(node.value, bool):
+            return node.value
+    return None
+
+
+def parse_decimal_call(node: ast.Call) -> Decimal | None:
+    """Parse a ``pl.Decimal(...)`` call form into a ``Decimal`` dtype.
+
+    Shared by the analyzer (``cast`` targets, ``schema=`` dicts) and
+    ``pandera_dtype`` (schema field annotations). Omitted arguments take
+    polars' own defaults — ground truth on 1.41.2: ``pl.Decimal()`` →
+    ``Decimal(38, 0)``, ``pl.Decimal(10)`` → ``Decimal(10, 0)``,
+    ``pl.Decimal(scale=2)`` → ``Decimal(38, 2)``. Returns ``None`` when an
+    argument is present but not an integer literal: the precision/scale are
+    unknowable and each caller picks its own fallback (the analyzer
+    degrades to unresolved/Unknown; pandera_dtype keeps the bare default).
+    """
+    precision = _decimal_call_arg(
+        node, position=0, name="precision", default=DECIMAL_DEFAULT.precision
+    )
+    scale = _decimal_call_arg(node, position=1, name="scale", default=DECIMAL_DEFAULT.scale)
+    if precision is None or scale is None:
+        return None
+    return Decimal(precision, scale)
+
 
 # Single source of truth for ``pl.<Name>`` attribute → DataType. Both the
 # analyzer (for column / cast inference) and pandera_dtype (for schema
