@@ -749,3 +749,33 @@ class TestUnknownKeyCompatibility:
 
         with pytest.raises(JoinError, match="dtype mismatch"):
             infer_join(left, right, on="name", how="inner")
+
+
+class TestJoinDatetimeTzKeys:
+    """Issue #50: joining on Datetime keys with mismatched time zones is a
+    probed polars SchemaError ("datatypes of join keys don't match") —
+    for aware vs naive AND two different zones. Same-tz keys join fine."""
+
+    def test_tz_mismatched_keys_raise(self):
+        from polypolarism.types import Datetime
+
+        left = FrameType({"t": Datetime(), "x": Int64()})
+        right = FrameType({"t": Datetime(tz="UTC"), "y": Int64()})
+        with pytest.raises(JoinError, match="dtype mismatch"):
+            infer_join(left, right, on="t", how="inner")
+
+    def test_two_different_zones_raise(self):
+        from polypolarism.types import Datetime
+
+        left = FrameType({"t": Datetime(tz="UTC")})
+        right = FrameType({"t": Datetime(tz="Asia/Tokyo")})
+        with pytest.raises(JoinError, match="dtype mismatch"):
+            infer_join(left, right, on="t", how="left")
+
+    def test_same_tz_keys_join(self):
+        from polypolarism.types import Datetime
+
+        left = FrameType({"t": Datetime(tz="UTC"), "x": Int64()})
+        right = FrameType({"t": Datetime(tz="UTC"), "y": Int64()})
+        result = infer_join(left, right, on="t", how="inner")
+        assert result.columns["t"].dtype == Datetime(tz="UTC")

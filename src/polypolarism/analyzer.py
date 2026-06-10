@@ -2065,8 +2065,10 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         is preserved on the result for almost all of these methods.
 
         ``call_node`` is the full ``ast.Call`` (e.g. ``...struct.field("x")``);
-        passed in so per-namespace handlers that need positional arguments
-        (currently just ``struct.field``) can read them.
+        passed in so per-namespace handlers that need arguments
+        (``struct.field`` / ``struct.rename_fields``, ``list.eval``,
+        ``str.to_datetime``, ``dt.replace_time_zone`` /
+        ``dt.convert_time_zone``) can read them.
         """
         receiver_inner = receiver_type
         receiver_is_nullable = False

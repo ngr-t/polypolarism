@@ -638,3 +638,18 @@ class TestInferShiftFill:
     def test_unknown_receiver_stays_unknown(self) -> None:
         assert infer_shift_fill(Unknown(), Int64(), fill_is_literal=True) == Unknown()
         assert infer_shift_fill(Nullable(Unknown()), Utf8(), fill_is_literal=False) == Unknown()
+
+
+class TestShiftFillTzMismatch:
+    """Issue #50: a tz-mismatched expression fill has no supertype; the
+    probed runtime failure is out of scope for shift, so the receiver
+    dtype is kept SILENTLY — pinned so the no-supertype path never starts
+    fabricating a dtype or erroring."""
+
+    def test_tz_mismatched_expression_fill_keeps_receiver(self) -> None:
+        result = infer_shift_fill(Datetime("UTC"), Datetime(), fill_is_literal=False)
+        assert result == Datetime("UTC")
+
+    def test_same_tz_expression_fill_keeps_dtype(self) -> None:
+        result = infer_shift_fill(Datetime("UTC"), Datetime("UTC"), fill_is_literal=False)
+        assert result == Datetime("UTC")
