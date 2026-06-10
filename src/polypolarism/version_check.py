@@ -76,7 +76,7 @@ def _leading_digits(s: str) -> int | None:
 # polars ships a new minor, bump ``POLARS_LATEST_KNOWN`` and
 # ``POLARS_FLOOR`` follows automatically (latest minor minus one). Anything
 # below ``POLARS_FLOOR`` triggers a PLW010 warning.
-POLARS_LATEST_KNOWN = Version(1, 40, 0)
+POLARS_LATEST_KNOWN = Version(1, 41, 0)
 POLARS_FLOOR = Version(POLARS_LATEST_KNOWN.major, POLARS_LATEST_KNOWN.minor - 1, 0)
 POLARS_SUPPORT_NOTE = (
     f"polypolarism supports polars >= {POLARS_FLOOR} (the latest two 1.x minor "
