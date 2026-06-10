@@ -205,6 +205,31 @@ class Float64(DataType):
         return "Float64"
 
 
+# Complete set of numeric dtype classes: every signed/unsigned integer
+# width plus the float widths. Pandera ``coerce=True`` can cast any of
+# these into any other at validation time, so the coercion-compatibility
+# check (``checker._is_coercible_difference``) treats differences within
+# this set as non-errors. Membership is checked via ``type(dtype)`` —
+# these classes are leaf dataclasses with no subclasses.
+NUMERIC_DTYPES: frozenset[type[DataType]] = frozenset(
+    {
+        Int8,
+        Int16,
+        Int32,
+        Int64,
+        Int128,
+        UInt8,
+        UInt16,
+        UInt32,
+        UInt64,
+        UInt128,
+        Float16,
+        Float32,
+        Float64,
+    }
+)
+
+
 @dataclass(frozen=True)
 class Utf8(DataType):
     """UTF-8 string."""

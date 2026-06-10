@@ -7,6 +7,7 @@ from polypolarism.checker import (
     ExtraColumn,
     MissingColumn,
     TypeDifference,
+    _is_coercible_difference,
     check_function,
     check_source,
 )
@@ -15,6 +16,7 @@ from polypolarism.types import (
     FrameType,
     Int64,
     Nullable,
+    UInt32,
     Utf8,
 )
 
@@ -224,6 +226,86 @@ class TestCheckNullability:
 
         # Non-nullable is a subtype of nullable
         assert result.passed is True
+
+
+class TestIsCoercibleDifference:
+    """Unit tests for the coercion-compatibility helper."""
+
+    def test_numeric_to_numeric_is_coercible(self):
+        assert _is_coercible_difference(UInt32(), Int64()) is True
+
+    def test_float_to_int_is_coercible(self):
+        assert _is_coercible_difference(Float64(), Int64()) is True
+
+    def test_non_numeric_is_not_coercible(self):
+        assert _is_coercible_difference(Utf8(), Int64()) is False
+        assert _is_coercible_difference(Int64(), Utf8()) is False
+
+    def test_nullable_inferred_to_non_nullable_declared_is_not_coercible(self):
+        # Coercion casts values; it does not remove nulls.
+        assert _is_coercible_difference(Nullable(UInt32()), Int64()) is False
+
+    def test_nullable_inferred_to_nullable_declared_is_coercible(self):
+        assert _is_coercible_difference(Nullable(UInt32()), Nullable(Int64())) is True
+
+    def test_non_nullable_inferred_to_nullable_declared_is_coercible(self):
+        assert _is_coercible_difference(UInt32(), Nullable(Int64())) is True
+
+
+class TestCheckCoerce:
+    """Config.coerce relaxes coercible dtype differences (issue #9)."""
+
+    @staticmethod
+    def _analysis(inferred_dtype, declared_dtype, coerce: bool) -> FunctionAnalysis:
+        return FunctionAnalysis(
+            name="process",
+            lineno=1,
+            end_lineno=1,
+            input_types={},
+            declared_return_type=FrameType({"n": declared_dtype}, coerce=coerce),
+            inferred_return_type=FrameType({"n": inferred_dtype}),
+            errors=[],
+        )
+
+    def test_uint32_vs_int64_passes_with_coerce(self):
+        result = check_function(self._analysis(UInt32(), Int64(), coerce=True))
+        assert result.passed is True
+        assert result.errors == []
+
+    def test_uint32_vs_int64_fails_without_coerce(self):
+        result = check_function(self._analysis(UInt32(), Int64(), coerce=False))
+        assert result.passed is False
+        assert any(isinstance(e, TypeDifference) for e in result.errors)
+
+    def test_nullable_mismatch_still_fails_with_coerce(self):
+        # Coercion does not remove nulls — Nullable inferred vs required
+        # non-nullable declared must still error.
+        result = check_function(self._analysis(Nullable(UInt32()), Int64(), coerce=True))
+        assert result.passed is False
+        assert any(isinstance(e, TypeDifference) for e in result.errors)
+
+    def test_nullable_both_sides_passes_with_coerce(self):
+        result = check_function(self._analysis(Nullable(UInt32()), Nullable(Int64()), coerce=True))
+        assert result.passed is True
+
+    def test_non_numeric_mismatch_still_fails_with_coerce(self):
+        result = check_function(self._analysis(Utf8(), Int64(), coerce=True))
+        assert result.passed is False
+        assert any(isinstance(e, TypeDifference) for e in result.errors)
+
+    def test_coerce_does_not_excuse_missing_column(self):
+        analysis = FunctionAnalysis(
+            name="process",
+            lineno=1,
+            end_lineno=1,
+            input_types={},
+            declared_return_type=FrameType({"n": Int64()}, coerce=True),
+            inferred_return_type=FrameType({}),
+            errors=[],
+        )
+        result = check_function(analysis)
+        assert result.passed is False
+        assert any(isinstance(e, MissingColumn) for e in result.errors)
 
 
 class TestCheckSource:

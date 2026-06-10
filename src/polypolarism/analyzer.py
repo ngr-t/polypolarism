@@ -511,8 +511,15 @@ def _is_frame_subtype(actual: FrameType, expected: FrameType) -> bool:
     - actual must contain every required column expected has
     - For columns present on both sides, the actual dtype must be a subtype
       and an actual optional column cannot satisfy a required expected column
+    - When ``expected.coerce`` is True (Pandera ``Config.coerce``),
+      coercible numeric dtype differences are tolerated — ``pa.check_types``
+      coerces input frames at call time
     - actual may have extra columns unless ``expected.strict`` is True
     """
+    # Deferred import: checker imports analyzer at module level, so a
+    # top-level import here would create a cycle.
+    from polypolarism.checker import _is_coercible_difference
+
     for col_name, expected_spec in expected.columns.items():
         actual_spec = actual.columns.get(col_name)
         if actual_spec is None:
@@ -522,6 +529,8 @@ def _is_frame_subtype(actual: FrameType, expected: FrameType) -> bool:
         if expected_spec.required and not actual_spec.required:
             return False
         if not _is_column_subtype(actual_spec.dtype, expected_spec.dtype):
+            if expected.coerce and _is_coercible_difference(actual_spec.dtype, expected_spec.dtype):
+                continue
             return False
     if expected.strict:
         for col_name in actual.columns:
@@ -1776,6 +1785,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                         )
                     )
                 if not _is_frame_subtype(arg_type, expected_type):
+                    # Deferred import — see _is_frame_subtype.
+                    from polypolarism.checker import _is_coercible_difference
+
                     # Generate detailed error
                     for col_name, expected_col_spec in expected_type.columns.items():
                         if col_name not in arg_type.columns:
@@ -1785,11 +1797,18 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                         else:
                             actual_col_dtype = arg_type.columns[col_name].dtype
                             expected_col_dtype = expected_col_spec.dtype
-                            if not _is_column_subtype(actual_col_dtype, expected_col_dtype):
-                                self.errors.append(
-                                    f"Argument '{param_name}' column '{col_name}' has type "
-                                    f"{actual_col_dtype} but expected {expected_col_dtype}"
-                                )
+                            if _is_column_subtype(actual_col_dtype, expected_col_dtype):
+                                continue
+                            # Mirror _is_frame_subtype: coercible dtype
+                            # differences are not errors under coerce.
+                            if expected_type.coerce and _is_coercible_difference(
+                                actual_col_dtype, expected_col_dtype
+                            ):
+                                continue
+                            self.errors.append(
+                                f"Argument '{param_name}' column '{col_name}' has type "
+                                f"{actual_col_dtype} but expected {expected_col_dtype}"
+                            )
             return sig.return_type
 
         # Untyped function - analyze body with propagated argument types
