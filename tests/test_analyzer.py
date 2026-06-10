@@ -7432,3 +7432,87 @@ class TestDecimalCastPrecisionScale:
         analyzer = _run_body(self._frame(), "out = df.cast({'x': pl.Decimal(10, 2)})")
         assert analyzer.errors == [], analyzer.errors
         assert analyzer.var_types["out"].columns["x"].dtype == Decimal(10, 2)
+
+
+class TestFrameLiteralConstantValues:
+    """Issue #39a: ``pl.DataFrame({"col": VAR})`` resolves constant bindings
+    used as column values (a ``str`` / ``list[str]`` constant -> Utf8),
+    consistent with the literal-list case (#25)."""
+
+    HEADER = textwrap.dedent(
+        PANDERA_HEADER
+        + """
+            class In(pa.DataFrameModel):
+                x: int
+        """
+    )
+
+    def test_module_const_str_list_value_is_utf8(self):
+        source = (
+            self.HEADER
+            + 'NAMES = ["x", "y", "z"]\n'
+            + textwrap.dedent(
+                """
+            def f(df: DataFrame[In]):
+                return pl.DataFrame({"step": [1, 2, 3], "name": NAMES})
+            """
+            )
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        assert results[0].inferred_return_type == FrameType({"step": Int64(), "name": Utf8()})
+
+    def test_local_const_str_list_value_is_utf8(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]):
+                names = ["x", "y"]
+                return pl.DataFrame({"name": names})
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        assert results[0].inferred_return_type == FrameType({"name": Utf8()})
+
+    def test_const_str_value_broadcasts_to_utf8(self):
+        source = (
+            self.HEADER
+            + 'SOURCE = "manual"\n'
+            + textwrap.dedent(
+                """
+            def f(df: DataFrame[In]):
+                return pl.DataFrame({"a": [1, 2], "src": SOURCE})
+            """
+            )
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        assert results[0].inferred_return_type == FrameType({"a": Int64(), "src": Utf8()})
+
+    def test_local_const_shadows_module_const(self):
+        source = (
+            self.HEADER
+            + 'NAMES = "scalar"\n'
+            + textwrap.dedent(
+                """
+            def f(df: DataFrame[In]):
+                NAMES = ["x", "y"]
+                return pl.DataFrame({"name": NAMES})
+            """
+            )
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        assert results[0].inferred_return_type == FrameType({"name": Utf8()})
+
+    def test_unresolvable_name_value_stays_unknown(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]):
+                names = load_names()
+                return pl.DataFrame({"name": names})
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == []
+        assert results[0].inferred_return_type == FrameType({"name": Unknown()})

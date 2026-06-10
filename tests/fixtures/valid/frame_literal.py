@@ -76,3 +76,32 @@ def explicit_schema(df: DataFrame[Empty]) -> DataFrame[Typed]:
 @pa.check_types
 def lazy_literal_collected(df: DataFrame[Empty]) -> DataFrame[Lit]:
     return pl.LazyFrame({"a": [1, 2, 3]}).collect()
+
+
+NAMES = ["x", "y", "z"]
+
+
+class Ev(pa.DataFrameModel):
+    name: str
+    v: int
+
+    class Config:
+        coerce = True
+
+
+class Joined(pa.DataFrameModel):
+    """Issue #39: a column whose values come from a module constant types
+    like the literal-list case and joins cleanly."""
+
+    step: int
+    name: str
+    v: int = pa.Field(nullable=True)
+
+    class Config:
+        strict = True
+
+
+@pa.check_types
+def skeleton_join(ev: DataFrame[Ev]) -> DataFrame[Joined]:
+    sk = pl.DataFrame({"step": [1, 2, 3], "name": NAMES})
+    return sk.join(ev, on="name", how="left")

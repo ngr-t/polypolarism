@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -229,37 +230,61 @@ def _resolve_schema_dtype(node: ast.expr) -> DataType:
     return Unknown()
 
 
-def _frame_literal_value_dtype(node: ast.expr) -> DataType:
+def _unify_literal_values(values: list[object]) -> DataType:
+    """Fold ``infer_lit`` over python literal values with ``unify_types``.
+
+    ``[1, None]`` → ``Nullable[Int64]``; empty, non-literal or
+    non-unifiable values → ``Unknown``.
+    """
+    if not values:
+        return Unknown()
+    unified: DataType | None = None
+    for value in values:
+        if value is not None and not isinstance(value, (bool, int, float, str)):
+            return Unknown()
+        elem = infer_lit(value)
+        if unified is None:
+            unified = elem
+            continue
+        try:
+            unified = unify_types(unified, elem)
+        except TypeUnificationError:
+            return Unknown()
+    assert unified is not None
+    return unified
+
+
+def _frame_literal_value_dtype(
+    node: ast.expr,
+    lookup_const: Callable[[str], str | list[str] | None] | None = None,
+) -> DataType:
     """Per-column dtype for one value of a ``pl.DataFrame({...})`` data dict.
 
     - list/tuple of constants → element dtypes folded with ``unify_types``
       (``[1, None]`` → ``Nullable[Int64]``); empty or any non-constant /
       non-unifiable element → ``Unknown``.
+    - a ``Name`` bound to a string(-list) constant (issue #39): resolved
+      through ``lookup_const`` — a ``list[str]`` value behaves like the
+      equivalent list literal, a ``str`` like the broadcast scalar.
     - recognised eager range constructors (``pl.date_range(...)`` etc.)
       → their fixed Series dtype.
     - a bare scalar constant (broadcast) → ``infer_lit``.
     - anything else → ``Unknown``.
     """
     if isinstance(node, (ast.List, ast.Tuple)):
-        if not node.elts:
+        if not all(isinstance(elt, ast.Constant) for elt in node.elts):
             return Unknown()
-        unified: DataType | None = None
-        for elt in node.elts:
-            if not isinstance(elt, ast.Constant):
-                return Unknown()
-            value = elt.value
-            if value is not None and not isinstance(value, (bool, int, float, str)):
-                return Unknown()
-            elem = infer_lit(value)
-            if unified is None:
-                unified = elem
-                continue
-            try:
-                unified = unify_types(unified, elem)
-            except TypeUnificationError:
-                return Unknown()
-        assert unified is not None
-        return unified
+        return _unify_literal_values(
+            [elt.value for elt in node.elts if isinstance(elt, ast.Constant)]
+        )
+
+    if isinstance(node, ast.Name) and lookup_const is not None:
+        const_val = lookup_const(node.id)
+        if isinstance(const_val, str):
+            return infer_lit(const_val)
+        if isinstance(const_val, list):
+            return _unify_literal_values(list(const_val))
+        return Unknown()
 
     if (
         isinstance(node, ast.Call)
@@ -3636,7 +3661,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             name = _str_constant(key_node)
             if name is None:
                 return None
-            columns[name] = _frame_literal_value_dtype(val_node)
+            columns[name] = _frame_literal_value_dtype(val_node, self._lookup_const)
 
         if isinstance(overrides_kw, ast.Dict):
             for key_node, val_node in zip(overrides_kw.keys, overrides_kw.values, strict=False):

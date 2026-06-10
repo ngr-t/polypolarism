@@ -1695,3 +1695,61 @@ class TestDecimalCastEndToEnd:
         assert len(results) == 1
         assert results[0].passed is False
         assert any(isinstance(e, TypeDifference) and e.column == "d" for e in results[0].errors)
+
+
+class TestFrameLiteralVariableValuesEndToEnd:
+    """Issue #39 repro: a frame-literal column whose values come from a
+    constant binding must type like the literal-list case and join cleanly."""
+
+    HEADER = textwrap.dedent("""
+        import polars as pl
+        import pandera.polars as pa
+        from pandera.typing.polars import DataFrame
+
+        NAMES = ["x", "y", "z"]
+
+        class Ev(pa.DataFrameModel):
+            name: str
+            v: int
+
+            class Config:
+                coerce = True
+
+        class Out(pa.DataFrameModel):
+            step: int
+            name: str
+            v: int = pa.Field(nullable=True)
+
+            class Config:
+                strict = True
+                coerce = True
+    """)
+
+    def test_via_variable_passes(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            @pa.check_types
+            def via_variable(ev: DataFrame[Ev]) -> DataFrame[Out]:
+                sk = pl.DataFrame({"step": [1, 2, 3], "name": NAMES})
+                return sk.join(ev, on="name", how="left")
+        """
+        )
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is True, results[0].errors
+        assert results[0].errors == []
+
+    def test_via_literal_still_passes(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            @pa.check_types
+            def via_literal(ev: DataFrame[Ev]) -> DataFrame[Out]:
+                sk = pl.DataFrame({"step": [1, 2, 3], "name": ["x", "y", "z"]})
+                return sk.join(ev, on="name", how="left")
+        """
+        )
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is True, results[0].errors
