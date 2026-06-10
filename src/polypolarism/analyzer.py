@@ -262,6 +262,25 @@ def _str_list_or_tuple(node: ast.expr) -> list[str] | None:
     return None
 
 
+def _flatten_expr_args(args: list[ast.expr]) -> list[ast.expr]:
+    """Flatten list/tuple literal arguments into their elements.
+
+    Multi-expression helpers (``pl.struct``, ``pl.coalesce``,
+    ``pl.concat_str``, ``pl.sum_horizontal``, ...) accept both varargs and a
+    list of expressions: ``pl.struct(pl.col("a"), pl.col("b"))`` ≡
+    ``pl.struct([pl.col("a"), pl.col("b")])``. Expanding top-level
+    ``ast.List`` / ``ast.Tuple`` args lets the caller analyze both forms
+    (and mixed forms) uniformly (issue #16).
+    """
+    out: list[ast.expr] = []
+    for arg in args:
+        if isinstance(arg, (ast.List, ast.Tuple)):
+            out.extend(arg.elts)
+        else:
+            out.append(arg)
+    return out
+
+
 # polars.selectors return-type predicates by selector name.
 _SELECTOR_NUMERIC = (
     Int8,
@@ -981,14 +1000,19 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             return "len", UInt32()
 
         if name == "concat_str" or name == "format":
-            for arg in node.args:
+            for arg in _flatten_expr_args(node.args):
                 self._validate_subexpr(arg)
             return None, Utf8()
 
         if name == "struct":
             fields: dict[str, DataType] = {}
-            for arg in node.args:
-                col = self._extract_col_name(arg)
+            for arg in _flatten_expr_args(node.args):
+                # In expression-input position a bare string is a column
+                # reference: ``pl.struct(["a", "b"])`` ≡
+                # ``pl.struct(pl.col("a"), pl.col("b"))``.
+                col = _str_constant(arg)
+                if col is None:
+                    col = self._extract_col_name(arg)
                 if col is None:
                     continue
                 try:
@@ -1017,10 +1041,11 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 return col, result_type
 
         if name == "coalesce":
+            args = _flatten_expr_args(node.args)
             inferred: list[DataType] = []
             any_non_nullable = False
-            for arg in node.args:
-                _, t = self.analyze_select_expr(arg)
+            for arg in args:
+                _, t = self._resolve_expr_or_col_str(arg)
                 if t is None:
                     continue
                 inferred.append(t)
@@ -1037,11 +1062,77 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             # If any operand is non-Nullable, the coalesced result is non-Nullable.
             if any_non_nullable and isinstance(unified, Nullable):
                 unified = unified.inner
-            # Preserve the first-arg column name as the default output name.
-            first_name = self._extract_col_name(node.args[0]) if node.args else None
+            # Preserve the first-element column name as the default output
+            # name (a bare string element names the output like pl.col does).
+            first_name = None
+            if args:
+                first_name = self._extract_col_name(args[0]) or _str_constant(args[0])
             return first_name, unified
 
+        if name == "concat_list":
+            elem_types: list[DataType] = []
+            for arg in _flatten_expr_args(node.args):
+                _, t = self._resolve_expr_or_col_str(arg)
+                if t is not None:
+                    elem_types.append(t)
+            if not elem_types:
+                return None, ListT(Unknown())
+            elem: DataType = elem_types[0]
+            for t in elem_types[1:]:
+                try:
+                    elem = unify_types(elem, t)
+                except TypeUnificationError:
+                    elem = Unknown()
+                    break
+            return None, ListT(elem)
+
+        if name in ("sum_horizontal", "min_horizontal", "max_horizontal", "mean_horizontal"):
+            operands: list[DataType] = []
+            for arg in _flatten_expr_args(node.args):
+                _, t = self._resolve_expr_or_col_str(arg)
+                if t is not None:
+                    operands.append(t)
+            if not operands:
+                return None, Unknown()
+            # Horizontal ops skip nulls: the result is null only when every
+            # input is null, so the result is Nullable only if *all* resolved
+            # operands are. Strip per-operand wrappers before promotion.
+            all_nullable = all(isinstance(t, Nullable) for t in operands)
+            inners = [t.inner if isinstance(t, Nullable) else t for t in operands]
+            result: DataType
+            if name == "mean_horizontal":
+                result = Float64()
+            else:
+                result = inners[0]
+                for t in inners[1:]:
+                    try:
+                        result = promote_types(result, t)
+                    except TypePromotionError:
+                        result = Unknown()
+                        break
+            if all_nullable and not isinstance(result, Unknown):
+                result = Nullable(result)
+            return None, result
+
         return None
+
+    def _resolve_expr_or_col_str(self, node: ast.expr) -> tuple[str | None, DataType | None]:
+        """Resolve one element of a multi-expression helper's arguments.
+
+        polars treats a bare string in expression-input position as a column
+        reference (``pl.coalesce(["a", "b"])`` ≡
+        ``pl.coalesce(pl.col("a"), pl.col("b"))``), so strings resolve via
+        the frame — with PLY001 on closed frames, mirroring the ``pl.col``
+        path. Everything else goes through ``analyze_select_expr``.
+        """
+        s = _str_constant(node)
+        if s is not None:
+            try:
+                return s, infer_col(s, self.current_frame)
+            except ColumnNotFoundError as e:
+                self.errors.append(tag(PLY001, str(e)))
+                return s, None
+        return self.analyze_select_expr(node)
 
     def _dispatch_namespace_method(
         self,

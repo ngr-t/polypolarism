@@ -2036,6 +2036,451 @@ class TestM6PlExprConstructors:
         assert ft.columns["ab"].dtype == Struct({"a": Int64(), "b": Float64()})
 
 
+class TestExprListArgs:
+    """Issue #16: a list/tuple literal of expressions is equivalent to varargs
+    for multi-expression helpers (pl.struct, pl.coalesce, pl.concat_str, ...)."""
+
+    _ISSUE_SCHEMAS = """
+            class In(pa.DataFrameModel):
+                a: int
+                b: int
+
+            class StructOut(pa.DataFrameModel):
+                a: int
+                b: int
+
+            class CoOut(pa.DataFrameModel):
+                c: int
+    """
+
+    def test_struct_list_then_unnest(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + self._ISSUE_SCHEMAS
+            + """
+            def f(df: DataFrame[In]) -> DataFrame[StructOut]:
+                return df.select(s=pl.struct([pl.col("a"), pl.col("b")])).unnest("s")
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["a"].dtype == Int64()
+        assert ft.columns["b"].dtype == Int64()
+
+    def test_struct_varargs_then_unnest(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + self._ISSUE_SCHEMAS
+            + """
+            def f(df: DataFrame[In]) -> DataFrame[StructOut]:
+                return df.select(s=pl.struct(pl.col("a"), pl.col("b"))).unnest("s")
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["a"].dtype == Int64()
+        assert ft.columns["b"].dtype == Int64()
+
+    def test_coalesce_list(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + self._ISSUE_SCHEMAS
+            + """
+            def f(df: DataFrame[In]) -> DataFrame[CoOut]:
+                return df.select(c=pl.coalesce([pl.col("a"), pl.col("b")]))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["c"].dtype == Int64()
+
+    def test_coalesce_varargs(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + self._ISSUE_SCHEMAS
+            + """
+            def f(df: DataFrame[In]) -> DataFrame[CoOut]:
+                return df.select(c=pl.coalesce(pl.col("a"), pl.col("b")))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["c"].dtype == Int64()
+
+    def test_struct_bare_string_names(self):
+        from polypolarism.types import Struct
+
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                a: int
+                b: pl.Float64
+
+            def f(data: DataFrame[S]):
+                return data.select(pl.struct(["a", "b"]).alias("ab"))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["ab"].dtype == Struct({"a": Int64(), "b": Float64()})
+
+    def test_struct_bare_string_names_unnest_roundtrip(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + self._ISSUE_SCHEMAS
+            + """
+            def f(df: DataFrame[In]) -> DataFrame[StructOut]:
+                return df.select(s=pl.struct(["a", "b"])).unnest("s")
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["a"].dtype == Int64()
+        assert ft.columns["b"].dtype == Int64()
+
+    def test_struct_mixed_varargs_and_list(self):
+        from polypolarism.types import Struct
+
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                a: int
+                b: pl.Float64
+
+            def f(data: DataFrame[S]):
+                return data.select(pl.struct("a", [pl.col("b")]).alias("ab"))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["ab"].dtype == Struct({"a": Int64(), "b": Float64()})
+
+    def test_struct_unknown_string_column_ply001(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                a: int
+
+            def f(data: DataFrame[S]):
+                return data.select(pl.struct(["missing"]).alias("s"))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is True
+        assert any("PLY001" in e and "missing" in e for e in results[0].errors)
+
+    def test_coalesce_list_default_output_name(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                a: pl.Float64 = pa.Field(nullable=True)
+                b: pl.Float64
+
+            def f(data: DataFrame[S]):
+                return data.select(pl.coalesce([pl.col("a"), pl.col("b")]))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        # First flattened element supplies the default output name; b is
+        # non-nullable so the coalesced result is non-nullable.
+        assert ft.columns["a"].dtype == Float64()
+
+    def test_coalesce_bare_string_names(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                a: pl.Float64 = pa.Field(nullable=True)
+                b: pl.Float64 = pa.Field(nullable=True)
+
+            def f(data: DataFrame[S]):
+                return data.select(pl.coalesce(["a", "b"]))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        # All operands nullable -> result stays nullable; string element
+        # yields the default output name like pl.col does.
+        assert ft.columns["a"].dtype == Nullable(Float64())
+
+    def test_concat_str_list_form(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                first: str
+                last: str
+
+            def f(data: DataFrame[S]):
+                return data.select(full=pl.concat_str([pl.col("first"), pl.col("last")]))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["full"].dtype == Utf8()
+
+    def test_concat_str_list_form_missing_column_ply001(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                first: str
+
+            def f(data: DataFrame[S]):
+                return data.select(full=pl.concat_str([pl.col("first"), pl.col("nope")]))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is True
+        assert any("PLY001" in e and "nope" in e for e in results[0].errors)
+
+
+class TestConcatListAndHorizontal:
+    """Issue #16 (continued): pl.concat_list and the horizontal helpers
+    (sum/min/max/mean_horizontal) infer through list-literal and varargs args."""
+
+    def test_concat_list_returns_list_dtype(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                a: int
+                b: int
+
+            def f(data: DataFrame[S]):
+                return data.select(xs=pl.concat_list([pl.col("a"), pl.col("b")]))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["xs"].dtype == ListT(Int64())
+
+    def test_concat_list_unifies_numeric(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                a: int
+                b: pl.Float64
+
+            def f(data: DataFrame[S]):
+                return data.select(xs=pl.concat_list(pl.col("a"), pl.col("b")))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["xs"].dtype == ListT(Float64())
+
+    def test_concat_list_bare_string_names(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                a: int
+                b: int
+
+            def f(data: DataFrame[S]):
+                return data.select(xs=pl.concat_list(["a", "b"]))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["xs"].dtype == ListT(Int64())
+
+    def test_concat_list_unresolvable_elements_is_list_unknown(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                a: int
+
+            def f(data: DataFrame[S]):
+                return data.select(xs=pl.concat_list([pl.col("a").mystery_method()]))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["xs"].dtype == ListT(Unknown())
+
+    @pytest.mark.parametrize("func", ["sum_horizontal", "min_horizontal", "max_horizontal"])
+    def test_horizontal_promotes_int_float(self, func):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + f"""
+            class S(pa.DataFrameModel):
+                a: int
+                b: pl.Float64
+
+            def f(data: DataFrame[S]):
+                return data.select(out=pl.{func}([pl.col("a"), pl.col("b")]))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["out"].dtype == Float64()
+
+    @pytest.mark.parametrize("func", ["sum_horizontal", "min_horizontal", "max_horizontal"])
+    def test_horizontal_same_int_types(self, func):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + f"""
+            class S(pa.DataFrameModel):
+                a: int
+                b: int
+
+            def f(data: DataFrame[S]):
+                return data.select(out=pl.{func}(["a", "b"]))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["out"].dtype == Int64()
+
+    def test_horizontal_all_nullable_wraps_nullable(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                a: int = pa.Field(nullable=True)
+                b: int = pa.Field(nullable=True)
+
+            def f(data: DataFrame[S]):
+                return data.select(out=pl.sum_horizontal([pl.col("a"), pl.col("b")]))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["out"].dtype == Nullable(Int64())
+
+    def test_horizontal_any_non_nullable_strips_nullable(self):
+        # Horizontal ops skip nulls — the result is null only when *every*
+        # input is null, so one non-Nullable operand makes it non-Nullable.
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                a: int = pa.Field(nullable=True)
+                b: int
+
+            def f(data: DataFrame[S]):
+                return data.select(out=pl.sum_horizontal([pl.col("a"), pl.col("b")]))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["out"].dtype == Int64()
+
+    def test_horizontal_non_numeric_is_unknown(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                a: int
+                s: str
+
+            def f(data: DataFrame[S]):
+                return data.select(out=pl.sum_horizontal([pl.col("a"), pl.col("s")]))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["out"].dtype == Unknown()
+
+    def test_mean_horizontal_returns_float64(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                a: int
+                b: int = pa.Field(nullable=True)
+
+            def f(data: DataFrame[S]):
+                return data.select(out=pl.mean_horizontal([pl.col("a"), pl.col("b")]))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["out"].dtype == Float64()
+
+    def test_mean_horizontal_all_nullable(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                a: int = pa.Field(nullable=True)
+                b: int = pa.Field(nullable=True)
+
+            def f(data: DataFrame[S]):
+                return data.select(out=pl.mean_horizontal(["a", "b"]))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["out"].dtype == Nullable(Float64())
+
+    def test_horizontal_missing_column_ply001(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                a: int
+
+            def f(data: DataFrame[S]):
+                return data.select(out=pl.sum_horizontal(["a", "nope"]))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is True
+        assert any("PLY001" in e and "nope" in e for e in results[0].errors)
+
+
 class TestM6Selectors:
     def test_cs_numeric_in_select(self):
         source = textwrap.dedent(
