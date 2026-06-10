@@ -21,6 +21,7 @@ from polypolarism.compat.polars_api import (
     STR_NAMESPACE_RETURN,
     agg_function_for,
     canonicalize_method,
+    parse_datetime_call,
     parse_decimal_call,
 )
 from polypolarism.diagnostics import (
@@ -183,18 +184,12 @@ def _resolve_pl_dtype(node: ast.expr) -> DataType | None:
             # the bare default, which would be a false-positive trap.
             if node.func.attr == "Decimal":
                 return parse_decimal_call(node)
-            base = _PL_DTYPE_NAME_MAP.get(node.func.attr)
-            if isinstance(base, Datetime):
-                tz: str | None = None
-                if len(node.args) >= 2 and isinstance(node.args[1], ast.Constant):
-                    if isinstance(node.args[1].value, str):
-                        tz = node.args[1].value
-                for kw in node.keywords:
-                    if kw.arg == "time_zone" and isinstance(kw.value, ast.Constant):
-                        if isinstance(kw.value.value, str):
-                            tz = kw.value.value
-                return Datetime(tz=tz)
-            return base
+            # ``pl.Datetime("us", "UTC")`` preserves the time zone (shared
+            # parser in compat; issue #50). A non-literal time_zone is
+            # unknowable — unresolved (None), like Decimal above.
+            if node.func.attr == "Datetime":
+                return parse_datetime_call(node)
+            return _PL_DTYPE_NAME_MAP.get(node.func.attr)
     return None
 
 

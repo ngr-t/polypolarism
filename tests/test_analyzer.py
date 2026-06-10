@@ -8691,3 +8691,50 @@ class TestListEvalBody:
         analyzer = _run_body(frame, 'out = df.select(pl.col("v").list.eval(pl.element() * 2))')
         assert analyzer.errors == [], analyzer.errors
         assert analyzer.var_types["out"].columns["v"].dtype == ListT(Nullable(Int64()))
+
+
+class TestResolvePlDtypeDatetime:
+    """``_resolve_pl_dtype`` Datetime call forms route through the shared
+    ``compat.parse_datetime_call`` (issue #50) — same forms, same results,
+    on the analyzer side (cast targets, ``schema=`` dicts)."""
+
+    @staticmethod
+    def _resolve(src: str):
+        import ast as _ast
+
+        from polypolarism.analyzer import _resolve_pl_dtype
+
+        return _resolve_pl_dtype(_ast.parse(src, mode="eval").body)
+
+    def test_bare_attribute_is_naive(self):
+        assert self._resolve("pl.Datetime") == Datetime()
+
+    def test_call_no_args_is_naive(self):
+        assert self._resolve("pl.Datetime()") == Datetime()
+
+    def test_positional_tz(self):
+        assert self._resolve('pl.Datetime("us", "UTC")') == Datetime(tz="UTC")
+
+    def test_keyword_tz(self):
+        assert self._resolve('pl.Datetime(time_zone="Asia/Tokyo")') == Datetime(tz="Asia/Tokyo")
+
+    def test_explicit_none_tz_is_naive(self):
+        assert self._resolve('pl.Datetime("us", None)') == Datetime()
+
+    def test_time_unit_only_is_naive(self):
+        assert self._resolve('pl.Datetime("ms")') == Datetime()
+
+    def test_non_literal_tz_is_unresolved(self):
+        # A variable time zone is unknowable; claiming naive would be a
+        # false-positive trap now that tz mismatches are flagged.
+        assert self._resolve("pl.Datetime(time_zone=tz)") is None
+
+    def test_cast_target_carries_tz(self):
+        # End-to-end: ``cast(pl.Datetime("us", "UTC"))`` pins the tz-aware
+        # dtype on the output column (probed: any tz x tz cast is valid).
+        frame = FrameType({"t": Datetime()})
+        analyzer = _run_body(
+            frame, 'out = df.with_columns(pl.col("t").cast(pl.Datetime("us", "UTC")))'
+        )
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["t"].dtype == Datetime(tz="UTC")

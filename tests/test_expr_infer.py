@@ -284,6 +284,19 @@ class TestUnifyTypes:
         with pytest.raises(TypeUnificationError):
             unify_types(Int64(), Utf8())
 
+    def test_unify_tz_mismatched_datetimes_raises_error(self) -> None:
+        """Issue #50 regression: ``pl.concat`` of tz-aware and tz-naive
+        Datetime columns is a probed SchemaError — unification must fail
+        for any tz-mismatched pair (naive/aware and aware/aware alike)."""
+        with pytest.raises(TypeUnificationError):
+            unify_types(Datetime(), Datetime(tz="UTC"))
+        with pytest.raises(TypeUnificationError):
+            unify_types(Datetime(tz="UTC"), Datetime(tz="Asia/Tokyo"))
+
+    def test_unify_same_tz_datetimes_returns_same_dtype(self) -> None:
+        assert unify_types(Datetime(tz="UTC"), Datetime(tz="UTC")) == Datetime(tz="UTC")
+        assert unify_types(Datetime(), Datetime()) == Datetime()
+
     def test_unify_utf8_and_utf8_returns_utf8(self) -> None:
         """Unifying Utf8 with Utf8 should return Utf8."""
         result = unify_types(Utf8(), Utf8())

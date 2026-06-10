@@ -28,8 +28,9 @@ from __future__ import annotations
 import ast
 
 from polypolarism.compat.pandera_api import FIELD_CALLABLE_NAME
-from polypolarism.compat.polars_api import DTYPE_NAME_MAP, parse_decimal_call
+from polypolarism.compat.polars_api import DTYPE_NAME_MAP, parse_datetime_call, parse_decimal_call
 from polypolarism.types import (
+    Binary,
     Boolean,
     ColumnSpec,
     DataType,
@@ -50,7 +51,9 @@ _BUILTIN_MAP: dict[str, DataType] = {
     "str": Utf8(),
     "float": Float64(),
     "bool": Boolean(),
-    "bytes": Utf8(),
+    # Probed (pandera + polars 1.41.2): ``x: bytes`` validates a Binary
+    # column and rejects a String one — pandera maps bytes to pl.Binary.
+    "bytes": Binary(),
     # Python stdlib temporal types — accepted as bare names when the
     # user wrote ``from datetime import date, datetime`` (the canonical
     # pandera form). The ``<module>.date`` qualified form is handled in
@@ -168,13 +171,18 @@ def _parse_plain_dtype(node: ast.expr) -> DataType | None:
             return _parse_struct_call(node)
         # ``pl.Decimal(precision, scale)`` preserves its arguments (shared
         # parser in compat; omitted args take polars' defaults). Non-literal
-        # args fall through to the bare ``pl.Decimal`` default below. Other
-        # parametrized dtypes (Datetime, Duration, ...) drop arguments
-        # today — see DTYPE_NAME_MAP comment in compat.
+        # args fall through to the bare ``pl.Decimal`` default below.
         if _is_pl_attr(node.func, "Decimal"):
             decimal_dt = parse_decimal_call(node)
             if decimal_dt is not None:
                 return decimal_dt
+        # ``pl.Datetime("us", "UTC")`` / ``pl.Datetime(time_zone=...)``
+        # preserves the time zone (shared parser in compat; issue #50).
+        # A non-literal time_zone argument is unknowable — degrade to
+        # ``Unknown`` rather than claiming tz-naive.
+        if _is_pl_attr(node.func, "Datetime"):
+            datetime_dt = parse_datetime_call(node)
+            return datetime_dt if datetime_dt is not None else Unknown()
         return _parse_plain_dtype(node.func)
 
     return None
@@ -256,6 +264,19 @@ def _parse_annotated(node: ast.expr) -> tuple[DataType, bool] | None:
                 return None
             fields[k.value] = inner
         return Struct(fields), True
+
+    # ``Annotated[pl.Datetime, "us", "UTC"]`` — pandera passes the metadata
+    # as the dtype's positional arguments (probed: this form enforces UTC).
+    # Anything other than the full 2-arg form with a literal time zone is
+    # either a pandera TypeError at runtime (probed for the 1-arg form:
+    # "requires all positional arguments") or unknowable — ``Unknown``.
+    if _is_pl_attr(head, "Datetime") and meta:
+        if len(meta) == 2 and isinstance(meta[1], ast.Constant):
+            if meta[1].value is None:
+                return Datetime(), True
+            if isinstance(meta[1].value, str):
+                return Datetime(tz=meta[1].value), True
+        return Unknown(), True
 
     return _parse_dtype_expr(head)
 

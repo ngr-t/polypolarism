@@ -8,6 +8,7 @@ from polypolarism.pandera_dtype import parse_field_annotation
 from polypolarism.types import (
     Boolean,
     ColumnSpec,
+    Datetime,
     Float64,
     Int64,
     List,
@@ -184,6 +185,92 @@ class TestPolarsLandmarkDtypes:
         assert _parse("pl.Float16") == ColumnSpec(Float16(), required=True)
         assert _parse("pl.Float32") == ColumnSpec(Float32(), required=True)
         assert _parse("pl.Float16") != _parse("pl.Float32")
+
+    def test_pl_binary_bare(self):
+        from polypolarism.types import Binary
+
+        # Issue #51: ``.bin`` namespace needs a Binary receiver dtype.
+        assert _parse("pl.Binary") == ColumnSpec(Binary(), required=True)
+
+    def test_pl_binary_call(self):
+        from polypolarism.types import Binary
+
+        assert _parse("pl.Binary()") == ColumnSpec(Binary(), required=True)
+
+    def test_bytes_builtin_maps_to_binary(self):
+        from polypolarism.types import Binary
+
+        # Probed (pandera 0.x + polars 1.41.2): ``x: bytes`` validates a
+        # Binary column and REJECTS a String column.
+        assert _parse("bytes") == ColumnSpec(Binary(), required=True)
+
+
+class TestPolarsDatetimeTimezone:
+    """Issue #50: ``pl.Datetime(...)`` call arguments must not be dropped.
+
+    Probed (pandera + polars 1.41.2): ``t: pl.Datetime(time_zone="UTC")``
+    rejects a tz-naive frame, and bare ``pl.Datetime`` rejects a tz-aware
+    frame — the tz is part of the dtype, both ways.
+    """
+
+    def test_bare_datetime_is_naive(self):
+        assert _parse("pl.Datetime") == ColumnSpec(Datetime(), required=True)
+
+    def test_call_no_args_is_naive(self):
+        assert _parse("pl.Datetime()") == ColumnSpec(Datetime(), required=True)
+
+    def test_positional_time_unit_and_zone(self):
+        assert _parse('pl.Datetime("us", "UTC")') == ColumnSpec(Datetime(tz="UTC"), required=True)
+
+    def test_time_zone_keyword(self):
+        assert _parse('pl.Datetime(time_zone="UTC")') == ColumnSpec(
+            Datetime(tz="UTC"), required=True
+        )
+
+    def test_time_unit_only_is_naive(self):
+        assert _parse('pl.Datetime("us")') == ColumnSpec(Datetime(), required=True)
+        assert _parse('pl.Datetime(time_unit="ms")') == ColumnSpec(Datetime(), required=True)
+
+    def test_explicit_none_time_zone_is_naive(self):
+        assert _parse('pl.Datetime("us", None)') == ColumnSpec(Datetime(), required=True)
+        assert _parse("pl.Datetime(time_zone=None)") == ColumnSpec(Datetime(), required=True)
+
+    def test_series_wrapped(self):
+        assert _parse('Series[pl.Datetime("us", "UTC")]') == ColumnSpec(
+            Datetime(tz="UTC"), required=True
+        )
+
+    def test_optional_wrapped(self):
+        assert _parse('Optional[pl.Datetime(time_zone="UTC")]') == ColumnSpec(
+            Datetime(tz="UTC"), required=False
+        )
+
+    def test_field_nullable(self):
+        assert _parse('pl.Datetime(time_zone="UTC")', "pa.Field(nullable=True)") == ColumnSpec(
+            Nullable(Datetime(tz="UTC")), required=True
+        )
+
+    def test_non_literal_time_zone_degrades_to_unknown(self):
+        # The tz is unknowable — claiming naive would be a false-positive
+        # trap now that tz mismatches are flagged.
+        assert _parse("pl.Datetime(time_zone=TZ)") == ColumnSpec(Unknown(), required=True)
+
+    def test_annotated_form_with_tz(self):
+        # Probed: ``Annotated[pl.Datetime, "us", "UTC"]`` enforces UTC.
+        assert _parse('Annotated[pl.Datetime, "us", "UTC"]') == ColumnSpec(
+            Datetime(tz="UTC"), required=True
+        )
+
+    def test_annotated_form_single_arg_degrades_to_unknown(self):
+        # Probed: pandera raises TypeError for the 1-arg form (it requires
+        # all positional dtype arguments) — the schema is broken at runtime,
+        # so polypolarism stays silent rather than guessing a dtype.
+        assert _parse('Annotated[pl.Datetime, "us"]') == ColumnSpec(Unknown(), required=True)
+
+    def test_distinct_time_zones_are_distinct_dtypes(self):
+        assert _parse('pl.Datetime(time_zone="UTC")') != _parse(
+            'pl.Datetime(time_zone="Asia/Tokyo")'
+        )
 
 
 class TestOptional:
