@@ -1,8 +1,11 @@
 """Valid: un-inferable expression outputs stay registered as columns (issue #8).
 
-Columns produced by expressions polypolarism cannot type (when/then/
-otherwise, interpolate, pl.len) carry an Unknown dtype instead of being
-dropped from the tracked schema, so later references resolve cleanly.
+Columns produced by expressions polypolarism cannot type (interpolate,
+pl.len) carry an Unknown dtype instead of being dropped from the tracked
+schema, so later references resolve cleanly. when/then/otherwise used to be
+in that bucket but is inferred precisely since #40 —
+``when_then_otherwise_column`` now passes because then(1).otherwise(0)
+really is the declared Int64.
 """
 
 import pandera.polars as pa

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from polypolarism.expr_infer import TypeUnificationError, unify_types
+from polypolarism.expr_infer import TypeUnificationError, supertype, unify_types
 from polypolarism.types import (
     ColumnSpec,
     DataType,
@@ -114,7 +114,11 @@ def unpivot(
     """``unpivot(index=..., on=..., variable_name=..., value_name=...)``.
 
     Output schema: ``{index..., variable_name: Utf8, value_name: T}`` where T
-    is the unification of the dtypes of the ``on`` columns.
+    is the polars common supertype of the ``on`` columns' dtypes (issue #41).
+    Probed (polars 1.41.2): ``unpivot(index="id", on=["a", "s"])`` with
+    ``a: Int64``, ``s: String`` yields ``value: String``; only combinations
+    without a polars supertype (e.g. ``List`` + scalar) raise — quirky
+    combinations ``supertype`` does not model degrade to ``Unknown``.
     """
     for col in index:
         if col not in input_frame.columns:
@@ -129,10 +133,13 @@ def unpivot(
     value_dtype: DataType = input_frame.columns[on[0]].dtype
     for col in on[1:]:
         spec = input_frame.columns[col]
-        try:
-            value_dtype = unify_types(value_dtype, spec.dtype)
-        except TypeUnificationError as e:
-            raise ReshapeError(f"unpivot: value columns {on} have incompatible dtypes — {e}") from e
+        merged = supertype(value_dtype, spec.dtype)
+        if merged is None:
+            raise ReshapeError(
+                f"unpivot: value columns {on} have incompatible dtypes — "
+                f"polars finds no common supertype of {value_dtype} and {spec.dtype}"
+            )
+        value_dtype = merged
 
     out: dict[str, ColumnSpec] = {}
     for col in index:

@@ -9,20 +9,40 @@ from polypolarism.expr_infer import (
     infer_cast,
     infer_col,
     infer_lit,
-    infer_when_then_otherwise,
+    infer_shift_fill,
     promote_types,
+    supertype,
     unify_types,
 )
 from polypolarism.types import (
     Boolean,
+    Categorical,
+    DataType,
+    Date,
+    Datetime,
+    Decimal,
+    Duration,
+    Enum,
+    Float16,
     Float32,
     Float64,
     FrameType,
+    Int8,
+    Int16,
     Int32,
     Int64,
+    Int128,
+    List,
     Null,
     Nullable,
     RowVar,
+    Struct,
+    Time,
+    UInt8,
+    UInt16,
+    UInt32,
+    UInt64,
+    UInt128,
     Unknown,
     Utf8,
 )
@@ -290,81 +310,311 @@ class TestUnifyTypes:
         assert result == Unknown()
 
 
-class TestInferWhenThenOtherwise:
-    """Tests for when/then/otherwise type inference."""
+# ``TestInferWhenThenOtherwise`` was deliberately removed together with
+# ``infer_when_then_otherwise`` (issues #37/#40): the function was never
+# wired into the analyzer, and its nullable-condition rule contradicts
+# probed polars 1.41.2 behaviour — a null condition row takes the
+# *otherwise* branch (``pl.when(pl.Series([True, None, False]))
+# .then(10).otherwise(20)`` -> ``[10, 20, 20]``, null_count 0). The probed
+# semantics live in ``analyzer._analyze_when_chain`` + ``supertype`` below.
 
-    def test_when_then_otherwise_same_types(self) -> None:
-        """when/then/otherwise with same types should return that type."""
-        result = infer_when_then_otherwise(
-            condition=Boolean(),
-            then_type=Int64(),
-            otherwise_type=Int64(),
+
+class TestSupertype:
+    """Probed polars common-supertype relation (issues #37/#40/#41/#43).
+
+    Ground truth: polars 1.41.2, full dtype-pair matrix driven through
+    ``pl.when(c).then(pl.col("l")).otherwise(pl.col("r"))`` and cross-checked
+    via ``df.unpivot`` and ``Expr.shift(fill_value=pl.col(...))`` — all three
+    ops agree on every probed cell. Representative probe output::
+
+        Int64 + String  -> String          Boolean + Int64  -> Int64
+        Int32 + Float32 -> Float64         Date + Datetime  -> Datetime
+        Date  + Int64   -> Int64           Duration + Int64 -> Int64
+        Null  + Int64   -> Int64 (rows stay null)
+        List(Int64) + Int64   -> SchemaError (no supertype)
+        List(Int64) + List(String) -> List(String)
+        Boolean + Date  -> SchemaError     String + Duration -> InvalidOperationError
+    """
+
+    # ---- probed precise cells ----------------------------------------------
+
+    @pytest.mark.parametrize(
+        ("left", "right", "expected"),
+        [
+            # identical dtypes
+            (Int64(), Int64(), Int64()),
+            (Utf8(), Utf8(), Utf8()),
+            # numeric lattice (probed widths)
+            (Int32(), Int64(), Int64()),
+            (Int8(), Int16(), Int16()),
+            (UInt8(), UInt16(), UInt16()),
+            (Int8(), UInt8(), Int16()),
+            (Int8(), UInt16(), Int32()),
+            (Int8(), UInt32(), Int64()),
+            (Int8(), UInt64(), Float64()),
+            (Int32(), UInt16(), Int32()),
+            (Int64(), UInt64(), Float64()),
+            (Int128(), UInt64(), Int128()),
+            (Int64(), Int128(), Int128()),
+            (Int8(), Float32(), Float32()),
+            (Int16(), Float32(), Float32()),
+            (UInt16(), Float32(), Float32()),
+            (Int32(), Float32(), Float64()),
+            (Int128(), Float32(), Float64()),
+            (Int64(), Float64(), Float64()),
+            (Float32(), Float64(), Float64()),
+            # Boolean widens into any probed numeric
+            (Boolean(), Int64(), Int64()),
+            (Boolean(), Int8(), Int8()),
+            (Boolean(), UInt32(), UInt32()),
+            (Boolean(), Float64(), Float64()),
+            # Utf8 absorbs most scalar dtypes
+            (Int64(), Utf8(), Utf8()),
+            (Float64(), Utf8(), Utf8()),
+            (Boolean(), Utf8(), Utf8()),
+            (Date(), Utf8(), Utf8()),
+            (Time(), Utf8(), Utf8()),
+            (Datetime(), Utf8(), Utf8()),
+            (Decimal(10, 2), Utf8(), Utf8()),
+            (Categorical(), Utf8(), Utf8()),
+            (Enum(), Utf8(), Utf8()),
+            # temporal pairs
+            (Date(), Datetime(), Datetime()),
+            (Datetime("UTC"), Date(), Datetime("UTC")),
+            # temporal x numeric quirk cells (physical-repr promotion, probed)
+            (Date(), Int32(), Int32()),
+            (Date(), Int64(), Int64()),
+            (Date(), UInt32(), Int64()),
+            (Date(), UInt64(), Int64()),
+            (Date(), Float32(), Float32()),
+            (Date(), Float64(), Float64()),
+            (Datetime(), Int32(), Int64()),
+            (Datetime(), Int64(), Int64()),
+            (Datetime("UTC"), Float32(), Float64()),
+            (Duration(), Int32(), Int64()),
+            (Duration(), Int64(), Int64()),
+            (Duration(), Float64(), Float64()),
+            (Time(), Int32(), Int64()),
+            (Time(), Int64(), Int64()),
+            (Time(), Float32(), Float64()),
+            # Decimal x float
+            (Decimal(10, 2), Float32(), Float64()),
+            (Decimal(10, 2), Float64(), Float64()),
+            # List recursion
+            (List(Int64()), List(Utf8()), List(Utf8())),
+            (List(Int32()), List(Float64()), List(Float64())),
+            (List(List(Int64())), List(List(Utf8())), List(List(Utf8()))),
+        ],
+    )
+    def test_probed_supertype_cells(
+        self, left: DataType, right: DataType, expected: DataType
+    ) -> None:
+        assert supertype(left, right) == expected
+        assert supertype(right, left) == expected  # the relation is symmetric
+
+    # ---- probed no-supertype cells (polars raises at runtime) ---------------
+
+    @pytest.mark.parametrize(
+        ("left", "right"),
+        [
+            (List(Int64()), Int64()),
+            (List(Int64()), Utf8()),
+            (List(Int64()), Date()),
+            (Utf8(), Duration()),
+            (Boolean(), Date()),
+            (Boolean(), Time()),
+            (Boolean(), Datetime()),
+            (Boolean(), Duration()),
+            (Boolean(), Decimal(10, 2)),
+            (Boolean(), Categorical()),
+            (Boolean(), Enum()),
+            (Date(), Time()),
+            (Time(), Datetime()),
+            (Duration(), Date()),
+            (Duration(), Datetime()),
+            (Duration(), Time()),
+            (Datetime(), Datetime("UTC")),  # tz mismatch
+            (Datetime("UTC"), Datetime("Asia/Tokyo")),
+            (Date(), Int8()),  # probed: only the >=32-bit widths promote
+            (Date(), Int16()),
+            (Date(), UInt8()),
+            (Date(), Int128()),
+            (Time(), UInt32()),  # probed polars quirk: Datetime+UInt32 works, Time+UInt32 errors
+            (Time(), UInt64()),
+            (Datetime(), Int8()),
+            (Duration(), UInt16()),
+            (Decimal(10, 2), Date()),
+            (Decimal(10, 2), Boolean()),
+            (Decimal(10, 2), Categorical()),
+            (Categorical(), Int64()),
+            (Categorical(), Enum()),
+            (Enum(), Float64()),
+            (List(Date()), List(Time())),  # recursion propagates no-supertype
+        ],
+    )
+    def test_probed_no_supertype_cells_return_none(self, left: DataType, right: DataType) -> None:
+        assert supertype(left, right) is None
+        assert supertype(right, left) is None
+
+    # ---- Unknown / unprobed combinations stay silent -------------------------
+
+    @pytest.mark.parametrize(
+        ("left", "right"),
+        [
+            (Unknown(), Int64()),
+            (Int64(), Unknown()),
+            (Nullable(Unknown()), Utf8()),
+            (Unknown(), Unknown()),
+            # quirky-but-succeeding combos polypolarism deliberately does not
+            # model precisely (when/then broadcasts scalars into Structs;
+            # Decimal precision arithmetic is data-dependent):
+            (Struct({"f": Int64()}), Int64()),
+            (Struct({"f": Int64()}), Utf8()),
+            (Struct({"f": Int64()}), Boolean()),
+            (Decimal(10, 2), Int64()),
+            (Decimal(10, 2), Decimal(20, 4)),
+            # dtypes outside the probed numeric widths
+            (Float16(), Int64()),
+            (UInt128(), Int64()),
+        ],
+    )
+    def test_unprobed_combinations_return_unknown(self, left: DataType, right: DataType) -> None:
+        assert supertype(left, right) == Unknown()
+        assert supertype(right, left) == Unknown()
+
+    # ---- Null / Nullable handling -------------------------------------------
+
+    def test_null_plus_type_is_nullable(self) -> None:
+        """Probed: Null + Int64 -> Int64 with the null rows preserved, which
+        polypolarism models as Nullable[Int64] (consistent with unify_types)."""
+        assert supertype(Null(), Int64()) == Nullable(Int64())
+        assert supertype(Utf8(), Null()) == Nullable(Utf8())
+
+    def test_null_plus_null_is_null(self) -> None:
+        assert supertype(Null(), Null()) == Null()
+
+    def test_null_plus_nullable_stays_nullable(self) -> None:
+        assert supertype(Null(), Nullable(Int64())) == Nullable(Int64())
+
+    def test_nullable_operand_makes_result_nullable(self) -> None:
+        assert supertype(Nullable(Int64()), Utf8()) == Nullable(Utf8())
+        assert supertype(Int32(), Nullable(Int64())) == Nullable(Int64())
+        assert supertype(Nullable(Int64()), Nullable(Float64())) == Nullable(Float64())
+
+    def test_nullable_no_supertype_still_none(self) -> None:
+        assert supertype(Nullable(Boolean()), Date()) is None
+
+    def test_nullable_unknown_absorbs(self) -> None:
+        assert supertype(Nullable(Int64()), Unknown()) == Unknown()
+
+    def test_identical_nullable_types(self) -> None:
+        assert supertype(Nullable(Int64()), Nullable(Int64())) == Nullable(Int64())
+
+    def test_equal_parametrized_dtypes(self) -> None:
+        assert supertype(Datetime("UTC"), Datetime("UTC")) == Datetime("UTC")
+        assert supertype(Decimal(10, 2), Decimal(10, 2)) == Decimal(10, 2)
+        assert supertype(Struct({"f": Int64()}), Struct({"f": Int64()})) == Struct({"f": Int64()})
+
+
+class TestInferShiftFill:
+    """Probed dtype rules for ``Expr.shift(n, fill_value=...)`` (issue #43).
+
+    Ground truth (polars 1.41.2): with a fill the shifted-in slots are
+    plugged, so a non-nullable receiver stays non-nullable while original
+    nulls keep flowing (``[1, None, 3].shift(1, fill_value=0)`` ->
+    ``[0, 1, None]``). Expression fills follow the supertype matrix exactly
+    (probed via ``fill_value=pl.col(...).first()``); *literal* fills are
+    lenient — polars casts the literal INTO the receiver dtype whenever it
+    can hold it::
+
+        shift(Int64,   fill=0)      -> Int64      shift(Date,  fill=5)   -> Date
+        shift(Float32, fill=5)      -> Float32    shift(Time,  fill=7)   -> Time
+        shift(Int64,   fill="x")    -> String     shift(Date,  fill="x") -> String
+        shift(Int32,   fill=5.5)    -> Float64    shift(Date,  fill=5.5) -> Date
+        shift(Int64,   fill=True)   -> Int64      shift(Utf8,  fill=5)   -> String
+        shift(Bool,    fill=5)      -> Int32      shift(Categorical, fill="z") -> Categorical
+    """
+
+    # ---- literal fills -------------------------------------------------------
+
+    @pytest.mark.parametrize(
+        ("receiver", "fill", "expected"),
+        [
+            # int literal coerces into the receiver
+            (Int64(), Int64(), Int64()),
+            (Int32(), Int64(), Int32()),
+            (Float32(), Int64(), Float32()),
+            (Date(), Int64(), Date()),
+            (Datetime(), Int64(), Datetime()),
+            (Time(), Int64(), Time()),
+            (Duration(), Int64(), Duration()),
+            (Utf8(), Int64(), Utf8()),
+            # ... except a Boolean receiver, which widens (probed Int32 at
+            # runtime; polypolarism models int literals as Int64 throughout)
+            (Boolean(), Int64(), Int64()),
+            # bool literal coerces into the receiver (probed: Int64 receiver
+            # gives [1, ...], Utf8 receiver gives ['true', ...])
+            (Boolean(), Boolean(), Boolean()),
+            (Int64(), Boolean(), Int64()),
+            (Utf8(), Boolean(), Utf8()),
+            # float literal: ints/Decimal promote to Float64 (probed); float
+            # and lenient receivers keep their dtype
+            (Float32(), Float64(), Float32()),
+            (Float64(), Float64(), Float64()),
+            (Int32(), Float64(), Float64()),
+            (Int64(), Float64(), Float64()),
+            (Decimal(10, 2), Float64(), Float64()),
+            (Date(), Float64(), Date()),
+            (Utf8(), Float64(), Utf8()),
+            # str literal: string-family receivers absorb it; everything else
+            # follows the supertype matrix (Int64 -> String, Date -> String)
+            (Utf8(), Utf8(), Utf8()),
+            (Categorical(), Utf8(), Categorical()),
+            (Enum(), Utf8(), Enum()),
+            (Int64(), Utf8(), Utf8()),
+            (Date(), Utf8(), Utf8()),
+            # ... and where even the matrix has no supertype, keep the
+            # receiver dtype (silent; polars errors at runtime)
+            (Duration(), Utf8(), Duration()),
+        ],
+    )
+    def test_literal_fill_dtypes(
+        self, receiver: DataType, fill: DataType, expected: DataType
+    ) -> None:
+        assert infer_shift_fill(receiver, fill, fill_is_literal=True) == expected
+
+    # ---- expression fills follow the supertype matrix ------------------------
+
+    def test_expression_fill_follows_supertype(self) -> None:
+        assert infer_shift_fill(Int64(), Utf8(), fill_is_literal=False) == Utf8()
+        assert infer_shift_fill(Date(), Int64(), fill_is_literal=False) == Int64()
+        assert infer_shift_fill(Boolean(), Int64(), fill_is_literal=False) == Int64()
+
+    def test_expression_fill_without_supertype_keeps_receiver(self) -> None:
+        assert infer_shift_fill(Int64(), List(Int64()), fill_is_literal=False) == Int64()
+
+    def test_expression_fill_unknown_supertype_stays_unknown(self) -> None:
+        # Struct mixes are deliberately Unknown in the supertype relation.
+        assert infer_shift_fill(Struct({"f": Int64()}), Int64(), fill_is_literal=False) == Unknown()
+
+    # ---- nullability ----------------------------------------------------------
+
+    def test_nullable_receiver_stays_nullable(self) -> None:
+        # Probed: [1, None, 3].shift(1, fill_value=0) -> [0, 1, None].
+        assert infer_shift_fill(Nullable(Int64()), Int64(), fill_is_literal=True) == Nullable(
+            Int64()
         )
-        assert result == Int64()
 
-    def test_when_then_otherwise_promotes_numeric_types(self) -> None:
-        """when/then/otherwise should promote Int64 and Float64 to Float64."""
-        result = infer_when_then_otherwise(
-            condition=Boolean(),
-            then_type=Int64(),
-            otherwise_type=Float64(),
+    def test_non_nullable_receiver_stays_non_nullable(self) -> None:
+        assert infer_shift_fill(Int64(), Int64(), fill_is_literal=True) == Int64()
+
+    def test_nullable_expression_fill_makes_result_nullable(self) -> None:
+        # A Nullable fill expression can plug null values into the
+        # shifted-in slots.
+        assert infer_shift_fill(Int64(), Nullable(Float64()), fill_is_literal=False) == Nullable(
+            Float64()
         )
-        assert result == Float64()
 
-    def test_when_then_otherwise_nullable_increases(self) -> None:
-        """when/then/otherwise should be nullable if either branch is nullable."""
-        result = infer_when_then_otherwise(
-            condition=Boolean(),
-            then_type=Nullable(Int64()),
-            otherwise_type=Int64(),
-        )
-        assert result == Nullable(Int64())
-
-    def test_when_then_otherwise_nullable_condition_makes_result_nullable(self) -> None:
-        """when/then/otherwise with nullable condition makes result nullable.
-
-        This is because when condition is null, the result could be null.
-        """
-        result = infer_when_then_otherwise(
-            condition=Nullable(Boolean()),
-            then_type=Int64(),
-            otherwise_type=Int64(),
-        )
-        assert result == Nullable(Int64())
-
-    def test_when_then_otherwise_with_null_then(self) -> None:
-        """when/then/otherwise with Null in then branch."""
-        result = infer_when_then_otherwise(
-            condition=Boolean(),
-            then_type=Null(),
-            otherwise_type=Int64(),
-        )
-        assert result == Nullable(Int64())
-
-    def test_when_then_otherwise_with_null_otherwise(self) -> None:
-        """when/then/otherwise with Null in otherwise branch."""
-        result = infer_when_then_otherwise(
-            condition=Boolean(),
-            then_type=Int64(),
-            otherwise_type=Null(),
-        )
-        assert result == Nullable(Int64())
-
-    def test_when_then_otherwise_incompatible_types_raises_error(self) -> None:
-        """when/then/otherwise with incompatible types should raise error."""
-        with pytest.raises(TypeUnificationError):
-            infer_when_then_otherwise(
-                condition=Boolean(),
-                then_type=Int64(),
-                otherwise_type=Utf8(),
-            )
-
-    def test_when_then_otherwise_condition_must_be_boolean(self) -> None:
-        """when/then/otherwise condition must be Boolean or Nullable[Boolean]."""
-        with pytest.raises(TypeError) as exc_info:
-            infer_when_then_otherwise(
-                condition=Int64(),
-                then_type=Int64(),
-                otherwise_type=Int64(),
-            )
-        assert "Boolean" in str(exc_info.value)
+    def test_unknown_receiver_stays_unknown(self) -> None:
+        assert infer_shift_fill(Unknown(), Int64(), fill_is_literal=True) == Unknown()
+        assert infer_shift_fill(Nullable(Unknown()), Utf8(), fill_is_literal=False) == Unknown()

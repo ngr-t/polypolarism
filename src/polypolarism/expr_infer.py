@@ -4,16 +4,34 @@ from typing import Any
 
 from polypolarism.types import (
     Boolean,
+    Categorical,
     DataType,
+    Date,
+    Datetime,
+    Decimal,
+    Duration,
+    Enum,
     Float32,
     Float64,
     FrameType,
+    Int8,
+    Int16,
     Int32,
     Int64,
+    Int128,
     Null,
     Nullable,
+    Struct,
+    Time,
+    UInt8,
+    UInt16,
+    UInt32,
+    UInt64,
     Unknown,
     Utf8,
+)
+from polypolarism.types import (
+    List as ListT,
 )
 
 
@@ -261,37 +279,322 @@ def unify_types(left: DataType, right: DataType) -> DataType:
     raise TypeUnificationError(f"Cannot unify types {left} and {right}")
 
 
-def infer_when_then_otherwise(
-    condition: DataType,
-    then_type: DataType,
-    otherwise_type: DataType,
-) -> DataType:
-    """Infer the result type of a when/then/otherwise expression.
+# ``infer_when_then_otherwise`` used to live here but was never wired into
+# the analyzer and is retired (issues #37/#40): its nullable-condition rule
+# ("a Nullable condition makes the result Nullable") contradicts probed
+# polars behaviour — a null condition row takes the *otherwise* branch
+# (``pl.when(pl.Series([True, None, False])).then(10).otherwise(20)`` ->
+# ``[10, 20, 20]``, null_count 0 on polars 1.41.2) — and its numeric-only
+# ``unify_types`` fold is superseded by ``supertype`` below. The analyzer's
+# ``_analyze_when_chain`` implements the probed semantics.
 
-    Args:
-        condition: The type of the condition expression (should be Boolean).
-        then_type: The type of the then branch.
-        otherwise_type: The type of the otherwise branch.
+
+# ---------------------------------------------------------------------------
+# polars common-supertype relation (issues #37/#40/#41/#43)
+#
+# Ground truth: polars 1.41.2. The full pair matrix over every dtype
+# polypolarism models was driven through
+# ``pl.when(c).then(pl.col("l")).otherwise(pl.col("r"))`` and cross-checked
+# against ``DataFrame.unpivot`` and ``Expr.shift(fill_value=pl.col(...))`` —
+# all three operations agree on every probed cell. Representative output::
+#
+#     Int64 + String   -> String       Boolean + Int64   -> Int64
+#     Int32 + Float32  -> Float64      Int8 + Float32    -> Float32
+#     Int64 + UInt64   -> Float64      Int8 + UInt8      -> Int16
+#     Date + Datetime  -> Datetime     Date + Int64      -> Int64
+#     Duration + Int64 -> Int64        Null + Int64      -> Int64 (rows null)
+#     List(i64) + List(str) -> List(String)
+#     List(i64) + i64  -> SchemaError "failed to determine supertype"
+#     Boolean + Date   -> SchemaError  String + Duration -> InvalidOperationError
+# ---------------------------------------------------------------------------
+
+_SIGNED_INT_WIDTH: dict[type, int] = {Int8: 8, Int16: 16, Int32: 32, Int64: 64, Int128: 128}
+_UNSIGNED_INT_WIDTH: dict[type, int] = {UInt8: 8, UInt16: 16, UInt32: 32, UInt64: 64}
+_FLOAT_WIDTH: dict[type, int] = {Float32: 32, Float64: 64}
+_SIGNED_BY_WIDTH: dict[int, type] = {8: Int8, 16: Int16, 32: Int32, 64: Int64, 128: Int128}
+_UNSIGNED_BY_WIDTH: dict[int, type] = {8: UInt8, 16: UInt16, 32: UInt32, 64: UInt64}
+
+# Temporal x numeric supertypes follow the temporal dtype's *physical*
+# representation, with probed quirks that defeat any clean formula
+# (Date + UInt64 -> Int64 although Int32 + UInt64 -> Float64; Time + UInt32
+# errors although Datetime + UInt32 -> Int64). Widths absent from a table
+# are probed SchemaErrors (Int8/Int16/Int128/UInt8/UInt16 everywhere).
+_DATE_NUMERIC_SUPERTYPE: dict[type, DataType] = {
+    Int32: Int32(),
+    Int64: Int64(),
+    UInt32: Int64(),
+    UInt64: Int64(),
+    Float32: Float32(),
+    Float64: Float64(),
+}
+_DATETIME_DURATION_NUMERIC_SUPERTYPE: dict[type, DataType] = {
+    Int32: Int64(),
+    Int64: Int64(),
+    UInt32: Int64(),
+    UInt64: Int64(),
+    Float32: Float64(),
+    Float64: Float64(),
+}
+_TIME_NUMERIC_SUPERTYPE: dict[type, DataType] = {
+    Int32: Int64(),
+    Int64: Int64(),
+    Float32: Float64(),
+    Float64: Float64(),
+}
+
+
+def _is_probed_numeric(dtype: DataType) -> bool:
+    """Numeric dtype whose supertype lattice was probed (excludes the exotic
+    ``Float16`` / ``UInt128`` widths, which stay :class:`Unknown`)."""
+    t = type(dtype)
+    return t in _SIGNED_INT_WIDTH or t in _UNSIGNED_INT_WIDTH or t in _FLOAT_WIDTH
+
+
+def _numeric_supertype(left: DataType, right: DataType) -> DataType:
+    """Probed numeric lattice; both operands must satisfy _is_probed_numeric."""
+    lt, rt = type(left), type(right)
+    l_float, r_float = lt in _FLOAT_WIDTH, rt in _FLOAT_WIDTH
+    if l_float and r_float:
+        return Float64() if 64 in (_FLOAT_WIDTH[lt], _FLOAT_WIDTH[rt]) else Float32()
+    if l_float or r_float:
+        float_t, int_t = (lt, rt) if l_float else (rt, lt)
+        if _FLOAT_WIDTH[float_t] == 64:
+            return Float64()
+        # Float32 keeps its width only against ints it can represent
+        # exactly (probed: Int8/Int16/UInt8/UInt16 -> Float32, wider -> Float64).
+        int_width = _SIGNED_INT_WIDTH.get(int_t) or _UNSIGNED_INT_WIDTH[int_t]
+        return Float32() if int_width <= 16 else Float64()
+    l_signed, r_signed = lt in _SIGNED_INT_WIDTH, rt in _SIGNED_INT_WIDTH
+    if l_signed and r_signed:
+        return _SIGNED_BY_WIDTH[max(_SIGNED_INT_WIDTH[lt], _SIGNED_INT_WIDTH[rt])]()
+    if not l_signed and not r_signed:
+        return _UNSIGNED_BY_WIDTH[max(_UNSIGNED_INT_WIDTH[lt], _UNSIGNED_INT_WIDTH[rt])]()
+    signed_t, unsigned_t = (lt, rt) if l_signed else (rt, lt)
+    if signed_t is Int128:
+        return Int128()  # probed: Int128 absorbs every unsigned width
+    needed = max(_SIGNED_INT_WIDTH[signed_t], 2 * _UNSIGNED_INT_WIDTH[unsigned_t])
+    if needed <= 64:
+        return _SIGNED_BY_WIDTH[needed]()
+    return Float64()  # probed: signed(<=64) + UInt64 -> Float64
+
+
+def _supertype_base(left: DataType, right: DataType) -> DataType | None:
+    """Supertype of two bare (non-Nullable, non-Null, non-Unknown) dtypes."""
+    if left == right:
+        return left
+
+    # Struct combinations are not a real supertype lattice: when/then
+    # broadcasts scalars *into* the struct's fields (Struct{f: i64} + Int64
+    # -> Struct{f: i64}) and stringifies against Utf8 — both probed, both
+    # too field/data-dependent to claim. Stay silent.
+    if isinstance(left, Struct) or isinstance(right, Struct):
+        return Unknown()
+
+    # List recursion (probed: List(i64) + List(str) -> List(String), nested
+    # lists recurse, and an inner pair without a supertype fails the outer
+    # pair with the same SchemaError).
+    if isinstance(left, ListT) and isinstance(right, ListT):
+        inner = supertype(left.inner, right.inner)
+        if inner is None:
+            return None
+        return ListT(inner)
+    # List vs any scalar: probed SchemaError / InvalidOperationError for
+    # every scalar dtype in the matrix.
+    if isinstance(left, ListT) or isinstance(right, ListT):
+        return None
+
+    # Utf8 absorbs most scalars (probed; values are stringified).
+    if isinstance(left, Utf8) or isinstance(right, Utf8):
+        other = right if isinstance(left, Utf8) else left
+        if _is_probed_numeric(other) or isinstance(
+            other, (Boolean, Date, Time, Datetime, Decimal, Categorical, Enum)
+        ):
+            return Utf8()
+        if isinstance(other, Duration):
+            return None  # probed InvalidOperationError, unlike every other temporal
+        return Unknown()
+
+    if _is_probed_numeric(left) and _is_probed_numeric(right):
+        return _numeric_supertype(left, right)
+
+    # Boolean widens into any probed numeric; everything else errors.
+    if isinstance(left, Boolean) or isinstance(right, Boolean):
+        other = right if isinstance(left, Boolean) else left
+        if _is_probed_numeric(other):
+            return other
+        if isinstance(other, (Date, Time, Datetime, Duration, Decimal, Categorical, Enum)):
+            return None  # probed SchemaError
+        return Unknown()
+
+    temporal = (Date, Time, Datetime, Duration)
+    l_temporal, r_temporal = isinstance(left, temporal), isinstance(right, temporal)
+    if l_temporal and r_temporal:
+        if isinstance(left, Date) and isinstance(right, Datetime):
+            return right
+        if isinstance(left, Datetime) and isinstance(right, Date):
+            return left
+        # Equal pairs were handled above; what remains is probed to fail:
+        # Datetime tz mismatch, Date/Time, Time/Datetime and every
+        # Duration/other-temporal pairing.
+        return None
+    if l_temporal or r_temporal:
+        temp, other = (left, right) if l_temporal else (right, left)
+        if _is_probed_numeric(other):
+            if isinstance(temp, Date):
+                return _DATE_NUMERIC_SUPERTYPE.get(type(other))
+            if isinstance(temp, Time):
+                return _TIME_NUMERIC_SUPERTYPE.get(type(other))
+            return _DATETIME_DURATION_NUMERIC_SUPERTYPE.get(type(other))
+        if isinstance(other, (Decimal, Categorical, Enum)):
+            return None  # probed SchemaError
+        return Unknown()
+
+    if isinstance(left, Decimal) or isinstance(right, Decimal):
+        other = right if isinstance(left, Decimal) else left
+        if type(other) in _FLOAT_WIDTH:
+            return Float64()  # probed for both float widths
+        if isinstance(other, (Categorical, Enum)):
+            return None  # probed SchemaError
+        # Decimal + int succeeds with data-dependent precision arithmetic
+        # (Decimal(10,2)+Int8 -> Decimal(10,2) but +Int32 -> Decimal(38,2));
+        # Decimal + Decimal with differing precision/scale is unprobed.
+        return Unknown()
+
+    if isinstance(left, (Categorical, Enum)) or isinstance(right, (Categorical, Enum)):
+        # Utf8 / Null / equal-dtype cases were handled above. Every other
+        # combination — numerics, Categorical x Enum — is a probed SchemaError.
+        return None
+
+    return Unknown()
+
+
+def supertype(left: DataType, right: DataType) -> DataType | None:
+    """Polars' common-supertype relation (probed on polars 1.41.2).
+
+    Used to type ``when/then/otherwise`` branches (#40), ``unpivot`` value
+    columns (#41) and ``shift(fill_value=...)`` results (#43).
 
     Returns:
-        The unified type of then and otherwise branches.
-
-    Raises:
-        TypeError: If condition is not Boolean.
-        TypeUnificationError: If then and otherwise types cannot be unified.
+        - a precise ``DataType`` for probed combinations (a ``Nullable``
+          operand makes the result ``Nullable``);
+        - ``Unknown()`` when either side is Unknown, or when the probed
+          behaviour is too quirky / data-dependent to claim — callers must
+          stay silent;
+        - ``None`` when polars provably fails at runtime ("failed to
+          determine supertype" / InvalidOperationError) — callers may treat
+          this as a guaranteed error.
     """
-    # Validate condition type
-    condition_inner, condition_nullable = _unwrap_nullable(condition)
-    if not isinstance(condition_inner, Boolean):
-        raise TypeError(f"Condition must be Boolean, got {condition}")
+    left_base = left.inner if isinstance(left, Nullable) else left
+    right_base = right.inner if isinstance(right, Nullable) else right
+    # Unknown absorbs everything — checked before Null so that
+    # supertype(Null, Unknown) stays a bare Unknown.
+    if isinstance(left_base, Unknown) or isinstance(right_base, Unknown):
+        return Unknown()
+    # Null + T -> T with the null rows preserved, which polypolarism models
+    # as Nullable[T] (probed; consistent with ``unify_types``).
+    if isinstance(left, Null) and isinstance(right, Null):
+        return Null()
+    if isinstance(left, Null):
+        return Nullable(right_base)
+    if isinstance(right, Null):
+        return Nullable(left_base)
 
-    # Unify then and otherwise types
-    unified = unify_types(then_type, otherwise_type)
+    left_inner, left_nullable = _unwrap_nullable(left)
+    right_inner, right_nullable = _unwrap_nullable(right)
+    result = _supertype_base(left_inner, right_inner)
+    if result is None or isinstance(result, Unknown):
+        return result
+    if left_nullable or right_nullable:
+        return result if isinstance(result, Nullable) else Nullable(result)
+    return result
 
-    # If condition is nullable, result is also nullable
-    # (because when condition is null, the result could be null)
-    if condition_nullable:
-        inner, _ = _unwrap_nullable(unified)
-        return Nullable(inner)
 
-    return unified
+# ---------------------------------------------------------------------------
+# Expr.shift(n, fill_value=...) dtype rules (issue #43)
+#
+# Probed on polars 1.41.2. Expression fills (``fill_value=pl.col(...)...``)
+# follow the supertype matrix exactly. *Literal* fills (bare constants and
+# ``pl.lit(<const>)``) are lenient — polars casts the literal INTO the
+# receiver dtype whenever the receiver can hold it:
+#
+#     shift(Int64,   fill=0)    -> Int64       shift(Date, fill=5)    -> Date
+#     shift(Float32, fill=5)    -> Float32     shift(Time, fill=7)    -> Time
+#     shift(Int8,    fill=5)    -> Int8        shift(Duration, fill=5)-> Duration
+#     shift(Int64,   fill=True) -> Int64       shift(Utf8, fill=5)    -> String
+#     shift(Bool,    fill=5)    -> Int32       shift(Categorical, fill="z") -> Categorical
+#     shift(Int32,   fill=5.5)  -> Float64     shift(Date, fill=5.5)  -> Date
+#     shift(Decimal(10,2), fill=5.5) -> Float64
+#     shift(Int64,   fill="x")  -> String      shift(Date, fill="x")  -> String
+# ---------------------------------------------------------------------------
+
+
+def _shift_literal_fill_base(receiver: DataType, lit: DataType) -> DataType:
+    """Result dtype of a *literal* fill against a bare receiver dtype."""
+    if isinstance(lit, Boolean):
+        # Probed: bool literals coerce into Boolean, numeric and Utf8
+        # receivers alike.
+        return receiver
+    if isinstance(lit, Int64):
+        if isinstance(receiver, Boolean):
+            # Probed: the only receiver that widens instead of absorbing
+            # (Int32 at runtime; polypolarism models int literals as Int64).
+            return Int64()
+        return receiver
+    if isinstance(lit, Float64):
+        if (
+            type(receiver) in _SIGNED_INT_WIDTH
+            or type(receiver) in _UNSIGNED_INT_WIDTH
+            or isinstance(receiver, (Decimal, Boolean))
+        ):
+            # Probed: ints and Decimal promote to Float64 (a float doesn't
+            # fit); Boolean is a runtime ComputeError, modelled silently.
+            return Float64()
+        return receiver
+    if isinstance(lit, Utf8):
+        if isinstance(receiver, (Utf8, Categorical, Enum)):
+            # Probed: the string family absorbs string literals.
+            return receiver
+        merged = supertype(receiver, Utf8())
+        if merged is None or isinstance(merged, Unknown):
+            # No supertype (Duration, List, ...): a probed runtime error —
+            # but claiming one is out of scope here; keep the receiver.
+            return receiver
+        return merged
+    return receiver
+
+
+def infer_shift_fill(receiver: DataType, fill: DataType, *, fill_is_literal: bool) -> DataType:
+    """Result dtype of ``Expr.shift(n, fill_value=...)`` (issue #43).
+
+    With a fill the shifted-in slots are plugged, so the receiver's own
+    nullability is preserved instead of forcing ``Nullable`` — probed:
+    ``[1, None, 3].shift(1, fill_value=0)`` -> ``[0, 1, None]`` (original
+    nulls keep flowing, no new ones). A ``Nullable`` *expression* fill can
+    plug nulls back in, so it re-adds the wrapper.
+
+    ``fill_is_literal`` selects the probed literal-leniency rules
+    (bare constants / ``pl.lit(<const>)``) over the plain supertype matrix.
+    The caller is responsible for treating a null fill (``fill_value=None``)
+    as "no fill" before calling this.
+    """
+    receiver_inner, receiver_nullable = _unwrap_nullable(receiver)
+    fill_inner, fill_nullable = _unwrap_nullable(fill)
+    if isinstance(receiver_inner, Unknown) or isinstance(fill_inner, Unknown):
+        return Unknown()
+
+    result_nullable = receiver_nullable
+    if fill_is_literal:
+        result = _shift_literal_fill_base(receiver_inner, fill_inner)
+    else:
+        merged = supertype(receiver_inner, fill_inner)
+        # No supertype: a probed runtime error, but flagging it is out of
+        # scope — fall back to the receiver dtype, silently.
+        result = receiver_inner if merged is None else merged
+        result_nullable = receiver_nullable or fill_nullable
+
+    if isinstance(result, Unknown):
+        return Unknown()
+    result_inner, result_already_nullable = _unwrap_nullable(result)
+    if result_nullable or result_already_nullable:
+        return Nullable(result_inner)
+    return result_inner
