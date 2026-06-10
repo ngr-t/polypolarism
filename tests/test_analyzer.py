@@ -6459,3 +6459,263 @@ class TestSortKeyValidation:
         results = analyze_source(source)
         assert results[0].errors == []
         assert results[0].inferred_return_type == FrameType({"a": Int64(), "b": Utf8()})
+
+
+class TestNamespaceReceiverDtype:
+    """Issue #31: namespace accessors validate the receiver dtype (PLY012).
+
+    Verified against polars 1.41.2: ``.str`` rejects every non-String
+    receiver at runtime (Categorical/Enum included: "expected String type,
+    got: cat"), ``.dt`` accepts Date/Datetime/Time/Duration, ``.list`` /
+    ``.arr`` require List/Array, ``.struct`` requires Struct.
+    """
+
+    HEADER = textwrap.dedent(
+        PANDERA_HEADER
+        + """
+            from typing import Annotated
+
+            class In(pa.DataFrameModel):
+                i: int
+                s: str
+                ts: pl.Datetime
+                d: pl.Date
+                t: pl.Time
+                dur: pl.Duration
+                xs: Annotated[pl.List, pl.Int64()]
+                cat: pl.Categorical
+                en: pl.Enum
+                st: pl.Struct
+        """
+    )
+
+    def _analyze(self, expr: str):
+        source = self.HEADER + textwrap.dedent(
+            f"""
+            def f(df: DataFrame[In]):
+                return df.select(({expr}).alias("out"))
+            """
+        )
+        return analyze_source(source)
+
+    @pytest.mark.parametrize(
+        "expr",
+        [
+            'pl.col("i").str.contains("x")',
+            'pl.col("ts").str.contains("x")',
+            # .str on Categorical/Enum raises at runtime ("expected String
+            # type, got: cat/enum") — flagged too.
+            'pl.col("cat").str.to_uppercase()',
+            'pl.col("en").str.len_chars()',
+            'pl.col("i").dt.year()',
+            'pl.col("s").dt.year()',
+            'pl.col("xs").dt.year()',
+            'pl.col("i").list.sum()',
+            'pl.col("s").list.len()',
+            'pl.col("i").arr.sum()',
+            'pl.col("i").struct.field("a")',
+        ],
+    )
+    def test_wrong_receiver_dtype_flags_ply012(self, expr: str):
+        results = self._analyze(expr)
+        assert any("PLY012" in e for e in results[0].errors), (expr, results[0].errors)
+
+    @pytest.mark.parametrize(
+        "expr",
+        [
+            'pl.col("s").str.contains("x")',
+            'pl.col("ts").dt.year()',
+            'pl.col("d").dt.year()',
+            'pl.col("t").dt.hour()',
+            'pl.col("dur").dt.total_seconds()',
+            'pl.col("xs").list.sum()',
+            # polypolarism models polars Array as List, so `.arr` on a List
+            # dtype passes too — the two are statically indistinguishable.
+            'pl.col("xs").arr.sum()',
+            # Bare ``pl.Struct`` parses to Unknown — exempt from validation.
+            'pl.col("st").struct.field("x")',
+            'pl.col("st").str.contains("x")',
+        ],
+    )
+    def test_valid_or_unknown_receiver_passes(self, expr: str):
+        results = self._analyze(expr)
+        assert results[0].errors == [], (expr, results[0].errors)
+
+    def test_single_error_and_output_degrades_to_unknown(self):
+        results = self._analyze('pl.col("i").str.contains("x")')
+        assert len(results[0].errors) == 1, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["out"].dtype == Unknown()
+
+    def test_message_names_namespace_column_and_dtype(self):
+        results = self._analyze('pl.col("i").str.contains("x")')
+        err = results[0].errors[0]
+        assert "PLY012" in err
+        assert ".str" in err
+        assert "'i'" in err
+        assert "Int64" in err
+
+    def test_nullable_valid_receiver_passes(self):
+        """Nullable[Utf8] is still a String column — `.str` is fine."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                s: str = pa.Field(nullable=True)
+
+            def f(df: DataFrame[S]):
+                return df.select(pl.col("s").str.contains("x").alias("out"))
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == [], results[0].errors
+
+    def test_nullable_wrong_receiver_flags_ply012(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                i: int = pa.Field(nullable=True)
+
+            def f(df: DataFrame[S]):
+                return df.select(pl.col("i").str.contains("x").alias("out"))
+            """
+        )
+        results = analyze_source(source)
+        assert any("PLY012" in e for e in results[0].errors), results[0].errors
+
+    def test_open_frame_unknown_receiver_not_flagged(self):
+        """A column missing on an open frame resolves to Unknown — exempt."""
+        frame = FrameType({"id": Int64()}, rest=RowVar("r"))
+        analyzer = _run_body(
+            frame,
+            'out = df.select(pl.col("extra").str.contains("x").alias("m"))',
+        )
+        assert analyzer.errors == []
+
+    def test_unknown_method_on_valid_receiver_still_falls_through(self):
+        """An unrecognised namespace method on a valid receiver stays silent
+        and registers the output as Unknown (pre-existing behaviour)."""
+        results = self._analyze('pl.col("s").str.some_future_method()')
+        assert results[0].errors == [], results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["out"].dtype == Unknown()
+
+    def test_chained_receiver_dtype_is_validated(self):
+        """`.dt` after an aggregation chain sees the chain's result dtype."""
+        results = self._analyze('pl.col("i").max().dt.year()')
+        assert any("PLY012" in e for e in results[0].errors), results[0].errors
+
+    def test_chained_receiver_valid_dtype_passes(self):
+        results = self._analyze('pl.col("ts").max().dt.year()')
+        assert results[0].errors == [], results[0].errors
+
+
+class TestOverKeyValidation:
+    """Issue #32: ``over`` validates partition/order keys exist (PLY001).
+
+    Verified against polars 1.41.2: positional string args, the
+    ``partition_by=`` kwarg and the ``order_by=`` kwarg all resolve strings
+    (and lists of strings) as column names — a missing one raises
+    ColumnNotFoundError at runtime. ``mapping_strategy=`` is a modifier,
+    not a column.
+    """
+
+    HEADER = textwrap.dedent(
+        PANDERA_HEADER
+        + """
+            class In(pa.DataFrameModel):
+                v: float
+                s: str
+                t: int
+        """
+    )
+
+    def _analyze(self, body: str):
+        source = self.HEADER + textwrap.dedent(
+            f"""
+            def f(df: DataFrame[In]):
+                return {body}
+            """
+        )
+        return analyze_source(source)
+
+    def test_missing_literal_key_flags_ply001(self):
+        results = self._analyze('df.select(pl.col("v").sum().over("ghost"))')
+        assert any("PLY001" in e and "ghost" in e for e in results[0].errors)
+
+    def test_existing_literal_key_passes(self):
+        results = self._analyze('df.select(pl.col("v").sum().over("s"))')
+        assert results[0].errors == [], results[0].errors
+
+    def test_varargs_keys_each_checked(self):
+        results = self._analyze('df.select(pl.col("v").sum().over("s", "ghost"))')
+        assert any("PLY001" in e and "ghost" in e for e in results[0].errors)
+
+    def test_multiple_existing_keys_pass(self):
+        results = self._analyze('df.select(pl.col("v").sum().over("s", "t"))')
+        assert results[0].errors == [], results[0].errors
+
+    def test_list_keys_each_checked(self):
+        results = self._analyze('df.select(pl.col("v").sum().over(["s", "ghost"]))')
+        assert any("PLY001" in e and "ghost" in e for e in results[0].errors)
+
+    def test_expr_key_missing_flags_ply001(self):
+        results = self._analyze('df.select(pl.col("v").sum().over(pl.col("ghost")))')
+        assert any("PLY001" in e and "ghost" in e for e in results[0].errors)
+
+    def test_expr_key_existing_passes(self):
+        results = self._analyze('df.select(pl.col("v").sum().over(pl.col("s")))')
+        assert results[0].errors == [], results[0].errors
+
+    def test_order_by_kwarg_missing_flags_ply001(self):
+        results = self._analyze('df.select(pl.col("v").first().over("s", order_by="ghost"))')
+        assert any("PLY001" in e and "ghost" in e for e in results[0].errors)
+
+    def test_order_by_kwarg_existing_passes(self):
+        results = self._analyze('df.select(pl.col("v").first().over("s", order_by="t"))')
+        assert results[0].errors == [], results[0].errors
+
+    def test_order_by_list_each_checked(self):
+        results = self._analyze('df.select(pl.col("v").first().over("s", order_by=["t", "ghost"]))')
+        assert any("PLY001" in e and "ghost" in e for e in results[0].errors)
+
+    def test_partition_by_kwarg_missing_flags_ply001(self):
+        results = self._analyze('df.select(pl.col("v").sum().over(partition_by="ghost"))')
+        assert any("PLY001" in e and "ghost" in e for e in results[0].errors)
+
+    def test_mapping_strategy_kwarg_is_not_a_column(self):
+        results = self._analyze('df.select(pl.col("v").sum().over("s", mapping_strategy="join"))')
+        assert results[0].errors == [], results[0].errors
+
+    def test_non_literal_key_silently_ignored(self):
+        """ExpressionAnalyzer has no constant environment — a Name key is
+        silently ignored rather than risking a false positive."""
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]):
+                key = "ghost"
+                return df.select(pl.col("v").sum().over(key))
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == [], results[0].errors
+
+    def test_open_frame_missing_key_not_flagged(self):
+        frame = FrameType({"id": Int64()}, rest=RowVar("r"))
+        analyzer = _run_body(frame, 'out = df.select(pl.col("id").sum().over("ghost"))')
+        assert analyzer.errors == []
+
+    def test_over_stays_dtype_preserving(self):
+        results = self._analyze('df.select(x=pl.col("v").sum().over("s"))')
+        assert results[0].errors == [], results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["x"].dtype == Float64()
+
+    def test_with_columns_over_missing_flags_ply001(self):
+        """Issue #32 repro shape: with_columns(g=...over("ghost"))."""
+        results = self._analyze('df.with_columns(g=pl.col("v").sum().over("ghost"))')
+        assert any("PLY001" in e and "ghost" in e for e in results[0].errors)

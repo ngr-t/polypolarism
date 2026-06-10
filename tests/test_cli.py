@@ -88,6 +88,22 @@ class TestCheckDirectory:
         assert results[0].passed is False
         assert any("PLY007" in str(e) for e in results[0].errors)
 
+    def test_namespace_wrong_dtype_fixture_fails_with_ply012(self):
+        """Issue #31 fixture: namespace accessors on wrong-dtype columns."""
+        results = check_file(FIXTURES_DIR / "invalid" / "namespace_wrong_dtype.py")
+
+        assert len(results) == 3
+        assert all(r.passed is False for r in results)
+        assert all(any("PLY012" in str(e) for e in r.errors) for r in results)
+
+    def test_over_missing_column_fixture_fails_with_ply001(self):
+        """Issue #32 fixture: over() partition column doesn't exist."""
+        results = check_file(FIXTURES_DIR / "invalid" / "over_missing_column.py")
+
+        assert len(results) == 1
+        assert results[0].passed is False
+        assert any("PLY001" in str(e) and "ghost" in str(e) for e in results[0].errors)
+
 
 class TestCheckWarningFixtures:
     """Files in fixtures/warning produce warnings but still pass type-check."""
