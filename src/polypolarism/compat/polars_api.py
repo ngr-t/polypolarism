@@ -18,8 +18,8 @@ recognizes:
 - ``agg_function_for(name)`` / ``AGG_SHORTHAND_NAMES`` — polars-side
   aggregation name lookup. (The actual signature/inference logic lives
   in ``ops/groupby.py``.)
-- ``METHOD_ALIASES`` + ``canonicalize_method`` — empty rename scaffold
-  for future intra-1.x renames.
+- ``METHOD_ALIASES`` + ``canonicalize_method`` — rename / variant
+  canonicalization applied before dispatch (``select_seq`` → ``select``).
 - ``PolarsProfile`` / ``POLARS_1_X`` — version-conditional behavior
   scaffold (no fields yet).
 
@@ -197,17 +197,22 @@ AGG_SHORTHAND_NAMES: frozenset[str] = frozenset(
 )
 
 
-# Method-name renames within polars 1.x. Empty today — the supported window
-# is the latest two 1.x minors and no rename has happened across that
-# window. The slot exists so that the day a polars minor renames a method,
-# the fix is one entry here rather than touching every dispatch site.
+# Method names that dispatch as another (canonical) method. Two uses:
 #
-# When a rename does ship, an entry like ``"new_name": "canonical_name"``
-# means "if the user wrote new_name (or if it's the rename target —
-# direction depends on which side we want as canonical), treat it as
-# canonical_name during dispatch." See ADR-0001 § Decision item 3 for the
-# policy.
-METHOD_ALIASES: dict[str, str] = {}
+# 1. Renames within polars 1.x — none in the supported window today. The
+#    day a polars minor renames a method, the fix is one entry here rather
+#    than touching every dispatch site. An entry ``"new_name":
+#    "canonical_name"`` means "treat new_name as canonical_name during
+#    dispatch." See ADR-0001 § Decision item 3 for the policy.
+# 2. Schema-equivalent variants — ``select_seq`` / ``with_columns_seq``
+#    differ from ``select`` / ``with_columns`` only in evaluation order
+#    (sequential instead of parallel); the resulting schema is identical,
+#    so they share one inference path (issue #21). Both exist on DataFrame
+#    AND LazyFrame, so no eager/lazy-only classification applies.
+METHOD_ALIASES: dict[str, str] = {
+    "select_seq": "select",
+    "with_columns_seq": "with_columns",
+}
 
 
 # ``pl.col("x").str.<method>(...)`` return types. Boolean predicates,

@@ -368,7 +368,38 @@ def _resolve_selector(node: ast.expr, frame: FrameType) -> list[str] | None:
         return None
     if not isinstance(node.func, ast.Attribute):
         return None
-    if not (isinstance(node.func.value, ast.Name) and node.func.value.id == "cs"):
+    if not isinstance(node.func.value, ast.Name):
+        return None
+
+    # ``pl.all()`` / ``pl.exclude(...)`` are selector-flavored top-level
+    # expressions with the same column-set semantics as ``cs.all()`` /
+    # ``cs.exclude(...)`` (issue #20).
+    if node.func.value.id == "pl":
+        if node.func.attr == "all":
+            # Only the no-arg form selects columns; ``pl.all("col")`` is the
+            # "all values truthy" boolean aggregation — leave it to
+            # expression analysis.
+            if node.args:
+                return None
+            return list(frame.columns.keys())
+        if node.func.attr == "exclude":
+            # String constants and list/tuple-of-string args only; anything
+            # else (variables, dtypes, nested selectors) is unresolvable
+            # here and falls through to expression analysis.
+            excluded: set[str] = set()
+            for arg in node.args:
+                single = _str_constant(arg)
+                multi = _str_list_or_tuple(arg)
+                if single is not None:
+                    excluded.add(single)
+                elif multi is not None:
+                    excluded.update(multi)
+                else:
+                    return None
+            return [c for c in frame.columns if c not in excluded]
+        return None
+
+    if node.func.value.id != "cs":
         return None
     name = node.func.attr
 
@@ -2451,11 +2482,15 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 continue
             # Bare string / list-of-strings column names — the most common
             # polars idiom: ``select("a", "b")`` / ``select(["a", "b"])``.
-            single = _str_constant(arg)
+            # Constant-bound names (``KEY = "a"; select(KEY)``) resolve the
+            # same way (issue #22); an unknown bare ``ast.Name`` is NOT a
+            # constant and falls through to expression analysis (it could
+            # be a frame variable).
+            single = self._const_str(arg)
             if single is not None:
                 self._register_string_selection(single, input_frame, result_columns)
                 continue
-            str_list = _str_list_or_tuple(arg)
+            str_list = self._const_str_list(arg)
             if str_list is not None:
                 for c in str_list:
                     self._register_string_selection(c, input_frame, result_columns)
@@ -2475,7 +2510,8 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 continue
             # ``select(x="a")`` — a bare string in expression position is a
             # column reference (not a Utf8 literal), renamed to the kwarg.
-            col_ref = _str_constant(kw.value)
+            # Constant-bound names (``select(x=KEY)``) resolve too (#22).
+            col_ref = self._const_str(kw.value)
             if col_ref is not None:
                 self._register_string_selection(
                     col_ref, input_frame, result_columns, output_name=kw.arg
@@ -2525,9 +2561,11 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 continue
             # Bare string / list-of-strings — equivalent to ``pl.col(name)``,
             # a re-selection of existing columns. Validate existence (PLY001
-            # on closed frames) but leave the schema unchanged.
-            single = _str_constant(arg)
-            str_list = _str_list_or_tuple(arg)
+            # on closed frames) but leave the schema unchanged. Constant-bound
+            # names resolve the same way (issue #22); an unknown bare
+            # ``ast.Name`` falls through to expression analysis.
+            single = self._const_str(arg)
+            str_list = self._const_str_list(arg)
             if single is not None or str_list is not None:
                 names = [single] if single is not None else str_list
                 assert names is not None
@@ -2556,7 +2594,8 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 continue
             # ``with_columns(x="a")`` — a bare string in expression position
             # is a column reference (not a Utf8 literal), renamed to the kwarg.
-            col_ref = _str_constant(kw.value)
+            # Constant-bound names (``with_columns(x=KEY)``) resolve too (#22).
+            col_ref = self._const_str(kw.value)
             if col_ref is not None:
                 ref_spec = input_frame.columns.get(col_ref)
                 if ref_spec is not None:

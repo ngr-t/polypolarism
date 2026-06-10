@@ -943,3 +943,129 @@ class TestSemiAntiGatherEndToEnd:
         assert len(results) == 1
         assert results[0].passed is False
         assert any("PLY010" in str(e) for e in results[0].errors)
+
+
+class TestIssue21SeqVariantsEndToEnd:
+    """Issue #21 repro: with_columns_seq / select_seq infer like the
+    non-seq forms (schema semantics identical; only evaluation order
+    differs)."""
+
+    ISSUE_SOURCE = textwrap.dedent("""
+        import polars as pl
+        import pandera.polars as pa
+        from pandera.typing.polars import DataFrame
+
+        class In(pa.DataFrameModel):
+            a: int
+            b: int
+            class Config:
+                coerce = True
+
+        class Out(pa.DataFrameModel):
+            a: int
+            c: int
+            class Config:
+                strict = True
+                coerce = True
+
+        def ok_seq_strings(df: DataFrame[In]) -> DataFrame[Out]:
+            return df.with_columns_seq(c=pl.col("a") + pl.col("b")).select_seq("a", "c")
+
+        def ok_seq_exprs(df: DataFrame[In]) -> DataFrame[Out]:
+            return df.with_columns_seq(c=pl.col("a") + pl.col("b")).select_seq(
+                pl.col("a"), pl.col("c")
+            )
+    """)
+
+    def test_issue_21_repro_functions_pass(self):
+        results = check_source(self.ISSUE_SOURCE)
+
+        assert len(results) == 2
+        by_name = {r.function_name: r for r in results}
+        for name in ("ok_seq_strings", "ok_seq_exprs"):
+            assert by_name[name].passed is True, (name, by_name[name].errors)
+
+
+class TestIssue20PlAllExcludeEndToEnd:
+    """Issue #20 repro: pl.all() / pl.exclude(...) inside select(), with
+    the already-working cs.* / with_columns forms as regression guards."""
+
+    ISSUE_SOURCE = textwrap.dedent("""
+        import polars as pl
+        import polars.selectors as cs
+        import pandera.polars as pa
+        from pandera.typing.polars import DataFrame
+
+        class TC(pa.DataFrameModel):
+            a: int
+            b: int
+            name: str
+            class Config:
+                coerce = True
+
+        class AB(pa.DataFrameModel):
+            a: int
+            b: int
+            class Config:
+                strict = True
+                coerce = True
+
+        def sel_all(df: DataFrame[TC]) -> DataFrame[TC]:
+            return df.select(pl.all())
+
+        def sel_exclude(df: DataFrame[TC]) -> DataFrame[AB]:
+            return df.select(pl.exclude("name"))
+
+        def sel_cs(df: DataFrame[TC]) -> DataFrame[AB]:
+            return df.select(cs.numeric())
+
+        def with_cols_all(df: DataFrame[TC]) -> DataFrame[TC]:
+            return df.with_columns(pl.all())
+    """)
+
+    def test_issue_20_repro_functions_pass(self):
+        results = check_source(self.ISSUE_SOURCE)
+
+        assert len(results) == 4
+        by_name = {r.function_name: r for r in results}
+        for name in ("sel_all", "sel_exclude", "sel_cs", "with_cols_all"):
+            assert by_name[name].passed is True, (name, by_name[name].errors)
+
+
+class TestIssue22SelectConstantEndToEnd:
+    """Issue #22 repro: select(KEY) with a module-level constant infers
+    the same schema as the literal form, satisfying a strict Out."""
+
+    ISSUE_SOURCE = textwrap.dedent("""
+        import polars as pl
+        import pandera.polars as pa
+        from pandera.typing.polars import DataFrame
+
+        class In(pa.DataFrameModel):
+            a: int
+            b: int
+            class Config:
+                coerce = True
+
+        class OutA(pa.DataFrameModel):
+            a: int
+            class Config:
+                strict = True
+                coerce = True
+
+        KEY = "a"
+
+        def ok_select_var(df: DataFrame[In]) -> DataFrame[OutA]:
+            return df.select(KEY)
+
+        def ok_select_seq_var(df: DataFrame[In]) -> DataFrame[OutA]:
+            return df.select_seq(KEY)
+    """)
+
+    def test_issue_22_repro_functions_pass(self):
+        results = check_source(self.ISSUE_SOURCE)
+
+        assert len(results) == 2
+        by_name = {r.function_name: r for r in results}
+        for name in ("ok_select_var", "ok_select_seq_var"):
+            assert by_name[name].passed is True, (name, by_name[name].errors)

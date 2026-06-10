@@ -5150,3 +5150,333 @@ class TestGatherEvery:
         ft = results[0].inferred_return_type
         assert ft == FrameType({"id": Int64(), "value": Float64()})
         assert ft is not None and ft.is_lazy is True
+
+
+class TestSeqVariants:
+    """#21: select_seq / with_columns_seq behave like select / with_columns."""
+
+    def test_select_seq_string_args(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                a: int
+                b: str
+                c: pl.Float64
+
+            def f(df: DataFrame[S]):
+                return df.select_seq("a", "b")
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        assert results[0].inferred_return_type == FrameType({"a": Int64(), "b": Utf8()})
+
+    def test_select_seq_expr_args(self):
+        frame = FrameType({"a": Int64(), "b": Int64()})
+        analyzer = _run_body(frame, 'out = df.select_seq(pl.col("a"), pl.col("b"))')
+        assert analyzer.errors == []
+        assert analyzer.var_types["out"] == FrameType({"a": Int64(), "b": Int64()})
+
+    def test_with_columns_seq_kwarg_expr(self):
+        frame = FrameType({"a": Int64(), "b": Int64()})
+        analyzer = _run_body(frame, 'out = df.with_columns_seq(c=pl.col("a") + pl.col("b"))')
+        assert analyzer.errors == []
+        assert analyzer.var_types["out"] == FrameType({"a": Int64(), "b": Int64(), "c": Int64()})
+
+    def test_seq_chain(self):
+        frame = FrameType({"a": Int64(), "b": Int64()})
+        analyzer = _run_body(
+            frame,
+            'out = df.with_columns_seq(c=pl.col("a") + pl.col("b")).select_seq("a", "c")',
+        )
+        assert analyzer.errors == []
+        assert analyzer.var_types["out"] == FrameType({"a": Int64(), "c": Int64()})
+
+    def test_seq_variants_fire_no_eager_lazy_errors(self):
+        """Both methods exist on DataFrame AND LazyFrame — no PLY030/PLY031."""
+        eager = FrameType({"a": Int64()})
+        lazy = FrameType({"a": Int64()}, is_lazy=True)
+        for frame in (eager, lazy):
+            analyzer = _run_body(frame, 'out = df.select_seq("a")')
+            assert analyzer.errors == []
+            analyzer = _run_body(frame, "out = df.with_columns_seq(b=pl.col('a'))")
+            assert analyzer.errors == []
+
+    def test_select_seq_preserves_laziness(self):
+        frame = FrameType({"a": Int64()}, is_lazy=True)
+        analyzer = _run_body(frame, 'out = df.select_seq("a")')
+        assert analyzer.var_types["out"].is_lazy is True
+
+    def test_select_seq_missing_column_errors(self):
+        frame = FrameType({"a": Int64()})
+        analyzer = _run_body(frame, 'out = df.select_seq("ghost")')
+        assert any("ghost" in e for e in analyzer.errors)
+
+
+class TestPlAllExcludeSelectors:
+    """#20: pl.all() / pl.exclude(...) resolve like cs.* selectors."""
+
+    @staticmethod
+    def _resolve(expr: str, frame: FrameType):
+        import ast
+
+        from polypolarism.analyzer import _resolve_selector
+
+        return _resolve_selector(ast.parse(expr, mode="eval").body, frame)
+
+    def _frame(self) -> FrameType:
+        return FrameType({"a": Int64(), "b": Int64(), "name": Utf8()})
+
+    def test_pl_all_no_args_resolves_to_all_columns(self):
+        assert self._resolve("pl.all()", self._frame()) == ["a", "b", "name"]
+
+    def test_pl_all_with_arg_is_not_a_selector(self):
+        # ``pl.all("x")`` is the boolean "all values truthy" aggregation,
+        # not a selector — it must fall through to expression analysis.
+        assert self._resolve('pl.all("a")', self._frame()) is None
+
+    def test_pl_exclude_string_arg(self):
+        assert self._resolve('pl.exclude("name")', self._frame()) == ["a", "b"]
+
+    def test_pl_exclude_varargs(self):
+        assert self._resolve('pl.exclude("a", "name")', self._frame()) == ["b"]
+
+    def test_pl_exclude_list_arg(self):
+        assert self._resolve('pl.exclude(["a", "b"])', self._frame()) == ["name"]
+
+    def test_pl_exclude_non_literal_arg_is_not_resolved(self):
+        assert self._resolve("pl.exclude(some_var)", self._frame()) is None
+
+    def test_pl_all_on_open_frame_returns_known_columns(self):
+        frame = FrameType({"id": Int64()}, rest=RowVar("r"))
+        assert self._resolve("pl.all()", frame) == ["id"]
+
+    def test_select_pl_all(self):
+        frame = FrameType({"a": Int64(), "name": Utf8()})
+        analyzer = _run_body(frame, "out = df.select(pl.all())")
+        assert analyzer.errors == []
+        assert analyzer.var_types["out"] == FrameType({"a": Int64(), "name": Utf8()})
+
+    def test_select_pl_exclude(self):
+        frame = FrameType({"a": Int64(), "b": Int64(), "name": Utf8()})
+        analyzer = _run_body(frame, "out = df.select(pl.exclude('name'))")
+        assert analyzer.errors == []
+        assert analyzer.var_types["out"] == FrameType({"a": Int64(), "b": Int64()})
+
+    def test_with_columns_pl_exclude_keeps_schema(self):
+        frame = FrameType({"a": Int64(), "name": Utf8()})
+        analyzer = _run_body(frame, "out = df.with_columns(pl.exclude('name'))")
+        assert analyzer.errors == []
+        assert analyzer.var_types["out"] == FrameType({"a": Int64(), "name": Utf8()})
+
+    def test_drop_pl_exclude(self):
+        frame = FrameType({"id": Int64(), "a": Int64(), "b": Int64()})
+        analyzer = _run_body(frame, "out = df.drop(pl.exclude('id'))")
+        assert analyzer.errors == []
+        assert analyzer.var_types["out"] == FrameType({"id": Int64()})
+
+
+class TestSelectConstantResolution:
+    """#22: constant-bound column names resolve in select / with_columns."""
+
+    def test_select_module_constant(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            KEY = "a"
+
+            class S(pa.DataFrameModel):
+                a: int
+                b: str
+
+            def f(df: DataFrame[S]):
+                return df.select(KEY)
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        assert results[0].inferred_return_type == FrameType({"a": Int64()})
+
+    def test_select_module_constant_list(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            COLS = ["a", "b"]
+
+            class S(pa.DataFrameModel):
+                a: int
+                b: str
+                c: pl.Float64
+
+            def f(df: DataFrame[S]):
+                return df.select(COLS)
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        assert results[0].inferred_return_type == FrameType({"a": Int64(), "b": Utf8()})
+
+    def test_select_local_constant_shadows_module_constant(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            KEY = "ghost"
+
+            class S(pa.DataFrameModel):
+                a: int
+                b: str
+
+            def f(df: DataFrame[S]):
+                KEY = "b"
+                return df.select(KEY)
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        assert results[0].inferred_return_type == FrameType({"b": Utf8()})
+
+    def test_select_kwarg_constant_is_renamed_column_reference(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            KEY = "a"
+
+            class S(pa.DataFrameModel):
+                a: int
+                b: str
+
+            def f(df: DataFrame[S]):
+                return df.select(x=KEY)
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        assert results[0].inferred_return_type == FrameType({"x": Int64()})
+
+    def test_select_missing_column_via_constant_errors(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            KEY = "ghost"
+
+            class S(pa.DataFrameModel):
+                a: int
+
+            def f(df: DataFrame[S]):
+                return df.select(KEY)
+        """
+        )
+        results = analyze_source(source)
+        assert any("PLY001" in str(e) and "ghost" in str(e) for e in results[0].errors)
+
+    def test_select_unknown_name_still_falls_through(self):
+        """A bare Name that is NOT a constant (e.g. a frame variable) keeps
+        going to expression analysis — no false PLY001."""
+        frame = FrameType({"a": Int64()})
+        analyzer = _run_body(frame, "out = df.select(mystery)")
+        assert analyzer.errors == []
+
+    def test_with_columns_constant_keeps_schema(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            KEY = "a"
+
+            class S(pa.DataFrameModel):
+                a: int
+                b: str
+
+            def f(df: DataFrame[S]):
+                return df.with_columns(KEY)
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        assert results[0].inferred_return_type == FrameType({"a": Int64(), "b": Utf8()})
+
+    def test_with_columns_missing_constant_errors(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            KEY = "ghost"
+
+            class S(pa.DataFrameModel):
+                a: int
+
+            def f(df: DataFrame[S]):
+                return df.with_columns(KEY)
+        """
+        )
+        results = analyze_source(source)
+        assert any("PLY001" in str(e) and "ghost" in str(e) for e in results[0].errors)
+
+    def test_with_columns_kwarg_constant_is_column_reference(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            KEY = "a"
+
+            class S(pa.DataFrameModel):
+                a: int
+                b: str
+
+            def f(df: DataFrame[S]):
+                return df.with_columns(x=KEY)
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["x"].dtype == Int64()
+        assert ft.columns["a"].dtype == Int64()
+
+    def test_select_seq_constant_cross_feature(self):
+        """#21 x #22: the seq variant resolves constants too."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            KEY = "a"
+
+            class S(pa.DataFrameModel):
+                a: int
+                b: str
+
+            def f(df: DataFrame[S]):
+                return df.select_seq(KEY)
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        assert results[0].inferred_return_type == FrameType({"a": Int64()})
+
+    def test_real_world_recon_pattern(self):
+        """Issue #22's surfacing pattern: a renamed-select via a constant
+        feeding a full join keyed on the same constant."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            RECON_KEY = "txn_id"
+
+            class GL(pa.DataFrameModel):
+                txn_id: int
+                amount: pl.Float64
+
+            class Sub(pa.DataFrameModel):
+                txn_id: int
+                sub_amount: pl.Float64
+
+            def recon(gl: DataFrame[GL], sub: DataFrame[Sub]):
+                return gl.select(RECON_KEY, gl_amount=pl.col("amount")).join(
+                    sub, on=RECON_KEY, how="full"
+                )
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert "txn_id" in ft.columns
+        assert "gl_amount" in ft.columns
+        assert "sub_amount" in ft.columns
