@@ -161,6 +161,21 @@ class TestFrameType:
         )
         assert ft.columns["score"].dtype == Nullable(Float64())
 
+    def test_frame_type_coerce_defaults_false(self):
+        ft = FrameType({"id": Int64()})
+        assert ft.coerce is False
+
+    def test_frame_type_coerce_stored(self):
+        ft = FrameType({"id": Int64()}, coerce=True)
+        assert ft.coerce is True
+
+    def test_frame_type_coerce_excluded_from_eq(self):
+        # Like ``is_lazy``, ``coerce`` must not participate in __eq__ so
+        # shape-equality assertions keep working.
+        coercing = FrameType({"id": Int64()}, coerce=True)
+        plain = FrameType({"id": Int64()})
+        assert coercing == plain
+
 
 class TestDataTypeStr:
     """Test string representation of types."""

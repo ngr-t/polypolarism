@@ -429,12 +429,20 @@ class FrameType:
     keep working — laziness is enforced explicitly in the function-call
     argument check, the declared-vs-inferred return-type check, and the
     eager-only / lazy-only method dispatch.
+
+    ``coerce`` mirrors Pandera's ``class Config: coerce = True``: at
+    validation time pandera casts coercible dtypes instead of rejecting
+    them. Like ``is_lazy`` it is excluded from ``__eq__`` for the same
+    reason — coercion is consulted explicitly in the declared-vs-inferred
+    dtype check (``checker.py``) and the function-argument check
+    (``analyzer._is_frame_subtype``).
     """
 
     columns: dict[str, ColumnSpec]
     strict: bool
     rest: RowVar | None  # For future row polymorphism extension
     is_lazy: bool
+    coerce: bool
 
     def __init__(
         self,
@@ -442,6 +450,7 @@ class FrameType:
         strict: bool = False,
         rest: RowVar | None = None,
         is_lazy: bool = False,
+        coerce: bool = False,
     ) -> None:
         normalized: dict[str, ColumnSpec] = {}
         if columns:
@@ -459,6 +468,7 @@ class FrameType:
         self.strict = strict
         self.rest = rest
         self.is_lazy = is_lazy
+        self.coerce = coerce
 
     def has_column(self, name: str) -> bool:
         """Check if a column exists."""

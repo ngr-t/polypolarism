@@ -178,6 +178,57 @@ class TestConfig:
         schema_s = registry.get("S")
         assert schema_s is not None
         assert schema_s.strict is False
+        assert schema_s.coerce is False
+
+    def test_coerce_true(self):
+        registry = _collect(
+            """
+            import pandera.polars as pa
+
+            class S(pa.DataFrameModel):
+                id: int
+
+                class Config:
+                    coerce = True
+            """
+        )
+        schema = registry.get("S")
+        assert schema is not None
+        assert schema.coerce is True
+
+    def test_coerce_false_explicit(self):
+        registry = _collect(
+            """
+            import pandera.polars as pa
+
+            class S(pa.DataFrameModel):
+                id: int
+
+                class Config:
+                    coerce = False
+            """
+        )
+        schema = registry.get("S")
+        assert schema is not None
+        assert schema.coerce is False
+
+    def test_strict_and_coerce_together(self):
+        registry = _collect(
+            """
+            import pandera.polars as pa
+
+            class S(pa.DataFrameModel):
+                id: int
+
+                class Config:
+                    strict = True
+                    coerce = True
+            """
+        )
+        schema = registry.get("S")
+        assert schema is not None
+        assert schema.strict is True
+        assert schema.coerce is True
 
 
 class TestInheritance:
@@ -236,6 +287,25 @@ class TestInheritance:
         assert child is not None
         assert child.strict is True
 
+    def test_coerce_inherited(self):
+        registry = _collect(
+            """
+            import pandera.polars as pa
+
+            class Parent(pa.DataFrameModel):
+                id: int
+
+                class Config:
+                    coerce = True
+
+            class Child(Parent):
+                name: str
+            """
+        )
+        child = registry.get("Child")
+        assert child is not None
+        assert child.coerce is True
+
     def test_grandchild_chain(self):
         registry = _collect(
             """
@@ -273,6 +343,22 @@ class TestToFrameType:
         assert ft is not None
         assert ft.strict is True
         assert ft.columns["id"] == ColumnSpec(Int64(), required=True)
+
+    def test_to_frame_type_passes_coerce(self):
+        registry = _collect(
+            """
+            import pandera.polars as pa
+
+            class S(pa.DataFrameModel):
+                id: int
+
+                class Config:
+                    coerce = True
+            """
+        )
+        ft = registry.to_frame_type("S")
+        assert ft is not None
+        assert ft.coerce is True
 
     def test_unknown_schema_returns_none(self):
         registry = _collect("")

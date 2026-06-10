@@ -25,10 +25,11 @@ class Schema:
     name: str
     columns: dict[str, ColumnSpec] = field(default_factory=dict)
     strict: bool = False
+    coerce: bool = False
     bases: list[str] = field(default_factory=list)
 
     def to_frame_type(self) -> FrameType:
-        return FrameType(columns=dict(self.columns), strict=self.strict)
+        return FrameType(columns=dict(self.columns), strict=self.strict, coerce=self.coerce)
 
 
 @dataclass
@@ -127,6 +128,8 @@ def _parse_schema(node: ast.ClassDef, registry: SchemaRegistry) -> Schema:
             schema.columns.setdefault(col_name, col_spec)
         if parent.strict:
             schema.strict = True
+        if parent.coerce:
+            schema.coerce = True
 
     # Parse this class's body.
     for stmt in node.body:
@@ -145,9 +148,9 @@ def _apply_config(schema: Schema, config_node: ast.ClassDef) -> None:
     for stmt in config_node.body:
         if isinstance(stmt, ast.Assign):
             for target in stmt.targets:
-                if isinstance(target, ast.Name) and target.id == "strict":
+                if isinstance(target, ast.Name) and target.id in ("strict", "coerce"):
                     if isinstance(stmt.value, ast.Constant) and isinstance(stmt.value.value, bool):
-                        schema.strict = stmt.value.value
+                        setattr(schema, target.id, stmt.value.value)
 
 
 _PROJECT_MARKERS = ("pyproject.toml", "setup.py", "setup.cfg")
