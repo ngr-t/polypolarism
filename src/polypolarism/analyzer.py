@@ -19,6 +19,7 @@ from polypolarism.compat.polars_api import (
     STR_NAMESPACE_RETURN,
     agg_function_for,
     canonicalize_method,
+    parse_decimal_call,
 )
 from polypolarism.diagnostics import (
     PLW001,
@@ -169,6 +170,12 @@ def _resolve_pl_dtype(node: ast.expr) -> DataType | None:
             if node.func.attr == "List" and node.args:
                 element = _resolve_pl_dtype(node.args[0])
                 return ListT(element if element is not None else Unknown())
+            # ``pl.Decimal(p, s)`` preserves precision/scale (issue #38);
+            # omitted args take polars' defaults. Non-literal args are
+            # unknowable — return unresolved (None) rather than fabricating
+            # the bare default, which would be a false-positive trap.
+            if node.func.attr == "Decimal":
+                return parse_decimal_call(node)
             base = _PL_DTYPE_NAME_MAP.get(node.func.attr)
             if isinstance(base, Datetime):
                 tz: str | None = None

@@ -28,14 +28,13 @@ from __future__ import annotations
 import ast
 
 from polypolarism.compat.pandera_api import FIELD_CALLABLE_NAME
-from polypolarism.compat.polars_api import DTYPE_NAME_MAP
+from polypolarism.compat.polars_api import DTYPE_NAME_MAP, parse_decimal_call
 from polypolarism.types import (
     Boolean,
     ColumnSpec,
     DataType,
     Date,
     Datetime,
-    Decimal,
     Duration,
     Float64,
     Int64,
@@ -167,11 +166,13 @@ def _parse_plain_dtype(node: ast.expr) -> DataType | None:
             return List(inner if inner is not None else Unknown())
         if _is_pl_attr(node.func, "Struct"):
             return _parse_struct_call(node)
-        # ``pl.Decimal(precision, scale)`` preserves its arguments. Other
+        # ``pl.Decimal(precision, scale)`` preserves its arguments (shared
+        # parser in compat; omitted args take polars' defaults). Non-literal
+        # args fall through to the bare ``pl.Decimal`` default below. Other
         # parametrized dtypes (Datetime, Duration, ...) drop arguments
         # today — see DTYPE_NAME_MAP comment in compat.
         if _is_pl_attr(node.func, "Decimal"):
-            decimal_dt = _parse_decimal_call(node)
+            decimal_dt = parse_decimal_call(node)
             if decimal_dt is not None:
                 return decimal_dt
         return _parse_plain_dtype(node.func)
@@ -197,35 +198,6 @@ def _parse_struct_call(node: ast.Call) -> DataType:
         inner = _parse_plain_dtype(v)
         fields[k.value] = inner if inner is not None else Unknown()
     return Struct(fields)
-
-
-def _parse_decimal_call(node: ast.Call) -> DataType | None:
-    """Parse ``pl.Decimal(precision, scale)`` into ``Decimal(p, s)``.
-
-    Returns ``None`` if the args aren't simple integer literals (we don't
-    yet trace variable bindings into dtype constructors).
-    """
-    precision = _int_arg(node, position=0, name="precision")
-    scale = _int_arg(node, position=1, name="scale")
-    if precision is None and scale is None and not node.args and not node.keywords:
-        # Bare ``pl.Decimal()`` — use the default.
-        return DTYPE_NAME_MAP["Decimal"]
-    if precision is None or scale is None:
-        return None
-    return Decimal(precision, scale)
-
-
-def _int_arg(call: ast.Call, *, position: int, name: str) -> int | None:
-    """Extract an integer arg from ``call`` by position or keyword."""
-    if position < len(call.args):
-        node = call.args[position]
-        if isinstance(node, ast.Constant) and isinstance(node.value, int):
-            return node.value
-    for kw in call.keywords:
-        if kw.arg == name and isinstance(kw.value, ast.Constant):
-            if isinstance(kw.value.value, int):
-                return kw.value.value
-    return None
 
 
 def _is_optional(node: ast.expr) -> bool:

@@ -7377,3 +7377,58 @@ class TestUniqueSubsetValidation:
         results = analyze_source(source)
         assert results[0].errors == []
         assert results[0].inferred_return_type == FrameType({"a": Int64(), "b": Utf8()})
+
+
+class TestDecimalCastPrecisionScale:
+    """Issue #38: ``cast(pl.Decimal(p, s))`` preserves precision/scale.
+
+    Ground truth (polars 1.41.2): ``pl.col("x").cast(pl.Decimal(10, 2))``
+    produces ``Decimal(precision=10, scale=2)``; omitted args take polars'
+    defaults (precision=38, scale=0).
+    """
+
+    def _frame(self) -> FrameType:
+        return FrameType({"x": Int64(), "n": Nullable(Int64())})
+
+    def _cast_dtype(self, target: str):
+        analyzer = _run_body(self._frame(), f"out = df.select(d=pl.col('x').cast({target}))")
+        assert analyzer.errors == [], analyzer.errors
+        return analyzer.var_types["out"].columns["d"].dtype
+
+    def test_positional_args_preserved(self):
+        assert self._cast_dtype("pl.Decimal(10, 2)") == Decimal(10, 2)
+
+    def test_keyword_args_preserved(self):
+        assert self._cast_dtype("pl.Decimal(precision=10, scale=2)") == Decimal(10, 2)
+
+    def test_precision_only_defaults_scale(self):
+        assert self._cast_dtype("pl.Decimal(10)") == Decimal(10, 0)
+
+    def test_scale_only_defaults_precision(self):
+        assert self._cast_dtype("pl.Decimal(scale=2)") == Decimal(38, 2)
+
+    def test_bare_call_uses_polars_defaults(self):
+        assert self._cast_dtype("pl.Decimal()") == Decimal(38, 0)
+
+    def test_bare_attribute_uses_polars_defaults(self):
+        assert self._cast_dtype("pl.Decimal") == Decimal(38, 0)
+
+    def test_non_literal_args_degrade_to_unknown(self):
+        # ``pl.Decimal(p, s)`` with variable args: claiming the bare default
+        # would be a false-positive trap — the cast target is unresolved and
+        # the column degrades to Unknown (still registered, never an error).
+        analyzer = _run_body(self._frame(), "out = df.select(d=pl.col('x').cast(pl.Decimal(p, s)))")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["d"].dtype == Unknown()
+
+    def test_nullable_receiver_wrapper_preserved(self):
+        analyzer = _run_body(
+            self._frame(), "out = df.select(d=pl.col('n').cast(pl.Decimal(10, 2)))"
+        )
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["d"].dtype == Nullable(Decimal(10, 2))
+
+    def test_frame_level_dict_cast_preserved(self):
+        analyzer = _run_body(self._frame(), "out = df.cast({'x': pl.Decimal(10, 2)})")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["x"].dtype == Decimal(10, 2)

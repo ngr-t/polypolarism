@@ -1638,3 +1638,60 @@ class TestUniqueSubsetEndToEnd:
 
         assert len(results) == 1
         assert results[0].passed is True, results[0].errors
+
+
+class TestDecimalCastEndToEnd:
+    """Issue #38 repro: a correctly-declared Decimal(10, 2) output must pass."""
+
+    HEADER = textwrap.dedent("""
+        import polars as pl
+        import pandera.polars as pa
+        from pandera.typing.polars import DataFrame
+
+        class XIn(pa.DataFrameModel):
+            x: int
+
+            class Config:
+                coerce = True
+    """)
+
+    def test_decimal_cast_matches_declared_precision_scale(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            class DecOut(pa.DataFrameModel):
+                d: pl.Decimal(10, 2)
+
+                class Config:
+                    strict = True
+                    coerce = True
+
+            @pa.check_types
+            def ok_decimal_cast(df: DataFrame[XIn]) -> DataFrame[DecOut]:
+                return df.select(d=pl.col("x").cast(pl.Decimal(10, 2)))
+        """
+        )
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is True, results[0].errors
+        assert results[0].errors == []
+
+    def test_decimal_cast_with_wrong_scale_still_fails(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            class DecOut(pa.DataFrameModel):
+                d: pl.Decimal(10, 2)
+
+                class Config:
+                    strict = True
+
+            @pa.check_types
+            def bad_decimal_cast(df: DataFrame[XIn]) -> DataFrame[DecOut]:
+                return df.select(d=pl.col("x").cast(pl.Decimal(10, 4)))
+        """
+        )
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is False
+        assert any(isinstance(e, TypeDifference) and e.column == "d" for e in results[0].errors)
