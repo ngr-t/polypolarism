@@ -4000,3 +4000,120 @@ class TestConstantResolution:
         assert ft is not None
         assert ft.columns["a"].dtype == Float64()
         assert ft.columns["b"].dtype == Float64()
+
+
+class TestSemiAntiJoin:
+    """#15: semi/anti joins return the left frame's schema unchanged."""
+
+    @pytest.mark.parametrize("how", ["semi", "anti"])
+    def test_semi_anti_join_keeps_left_schema(self, how: str):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + f"""
+            class A(pa.DataFrameModel):
+                id: int
+                v: pl.Float64
+
+            class B(pa.DataFrameModel):
+                id: int
+                w: str
+
+            def f(a: DataFrame[A], b: DataFrame[B]) -> DataFrame[A]:
+                return a.join(b, on="id", how="{how}")
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft == FrameType({"id": Int64(), "v": Float64()})
+        assert ft is not None and "w" not in ft.columns
+
+    @pytest.mark.parametrize("how", ["semi", "anti"])
+    def test_how_via_module_constant(self, how: str):
+        """`how` is constant-aware: a name bound to 'semi'/'anti' resolves."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + f"""
+            HOW = "{how}"
+
+            class A(pa.DataFrameModel):
+                id: int
+                v: pl.Float64
+
+            class B(pa.DataFrameModel):
+                id: int
+                w: str
+
+            def f(a: DataFrame[A], b: DataFrame[B]) -> DataFrame[A]:
+                return a.join(b, on="id", how=HOW)
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        assert results[0].inferred_return_type == FrameType({"id": Int64(), "v": Float64()})
+
+    def test_semi_join_lazy_receiver_stays_lazy(self):
+        source = textwrap.dedent(
+            """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import LazyFrame
+
+            class A(pa.DataFrameModel):
+                id: int
+                v: pl.Float64
+
+            class B(pa.DataFrameModel):
+                id: int
+
+            def f(a: LazyFrame[A], b: LazyFrame[B]) -> LazyFrame[A]:
+                return a.join(b, on="id", how="semi")
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.is_lazy is True
+
+    @pytest.mark.parametrize("how", ["semi", "anti"])
+    def test_missing_key_still_errors(self, how: str):
+        """Key validation still fires: PLY010 on a missing join key."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + f"""
+            class A(pa.DataFrameModel):
+                id: int
+
+            class B(pa.DataFrameModel):
+                id: int
+
+            def f(a: DataFrame[A], b: DataFrame[B]) -> DataFrame[A]:
+                return a.join(b, on="missing", how="{how}")
+        """
+        )
+        results = analyze_source(source)
+        assert any("PLY010" in e for e in results[0].errors), results[0].errors
+
+    def test_multi_key_semi_join(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class A(pa.DataFrameModel):
+                x: int
+                y: str
+                a: pl.Float64
+
+            class B(pa.DataFrameModel):
+                x: int
+                y: str
+
+            def f(a: DataFrame[A], b: DataFrame[B]) -> DataFrame[A]:
+                return a.join(b, on=["x", "y"], how="semi")
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        assert results[0].inferred_return_type == FrameType(
+            {"x": Int64(), "y": Utf8(), "a": Float64()}
+        )

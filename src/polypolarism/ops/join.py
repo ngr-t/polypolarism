@@ -14,7 +14,7 @@ class JoinError(Exception):
     pass
 
 
-JoinHow = Literal["inner", "left", "right", "full"]
+JoinHow = Literal["inner", "left", "right", "full", "semi", "anti"]
 
 
 def _get_base_type(dtype: DataType) -> DataType:
@@ -62,9 +62,10 @@ def infer_join(
         on: Column name(s) to join on (same name in both frames)
         left_on: Column name(s) in left frame to join on
         right_on: Column name(s) in right frame to join on
-        how: Join type ('inner', 'left', 'right', 'full')
+        how: Join type ('inner', 'left', 'right', 'full', 'semi', 'anti')
         suffix: Suffix appended to right-side columns whose name collides
-            with a left-side column (polars default: '_right')
+            with a left-side column (polars default: '_right'; irrelevant
+            for 'semi'/'anti', which add no right-side columns)
 
     Returns:
         FrameType representing the result of the join
@@ -109,6 +110,11 @@ def infer_join(
                 f"right '{right_key}' is {right_key_type}"
             )
         right_key_types[right_key] = right_key_type
+
+    # Semi/anti joins only filter rows: the result is exactly the left
+    # frame's schema — no right columns, no nullability changes.
+    if how in ("semi", "anti"):
+        return FrameType(columns=dict(left.columns), strict=left.strict, rest=left.rest)
 
     # Build result columns
     result_columns: dict[str, DataType] = {}

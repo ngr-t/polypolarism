@@ -135,9 +135,10 @@ JOIN_HOW_VALUES: frozenset[str] = frozenset(
 )
 
 # Subset of ``how`` values where the analyzer infers a column-shape result
-# (vs. ``cross`` / ``semi`` / ``anti`` which have specific shape rules
-# handled elsewhere). Kept as a tuple for use in ``Literal[...]`` typing.
-JOIN_HOW_INFERRED: tuple[str, ...] = ("inner", "left", "right", "full")
+# via ``ops/join.infer_join`` — ``semi`` / ``anti`` return the left frame's
+# schema unchanged. Only ``cross`` is not inferred yet. Kept as a tuple for
+# use in ``Literal[...]`` typing.
+JOIN_HOW_INFERRED: tuple[str, ...] = ("inner", "left", "right", "full", "semi", "anti")
 
 
 def join_left_nullable(how: str) -> bool:

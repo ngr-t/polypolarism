@@ -2030,7 +2030,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 if cand is not None:
                     suffix = cand
 
-        if how == "inner" or how == "left" or how == "right" or how == "full":
+        if how in ("inner", "left", "right", "full", "semi", "anti"):
             valid_how: JoinHow = how
         else:
             return None
