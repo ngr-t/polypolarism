@@ -19,6 +19,7 @@ PLY007 = "PLY007"  # sort: column not found
 PLY008 = "PLY008"  # filter: predicate dtype is not Boolean
 PLY009 = "PLY009"  # binary operation between incompatible dtypes (arithmetic, comparison, is_in)
 PLY013 = "PLY013"  # cast between structurally incompatible dtypes
+PLY015 = "PLY015"  # duplicate output column name in select/with_columns
 
 # Join
 PLY010 = "PLY010"  # join key error (missing or dtype mismatch)

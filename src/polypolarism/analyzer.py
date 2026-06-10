@@ -40,6 +40,7 @@ from polypolarism.diagnostics import (
     PLY011,
     PLY012,
     PLY013,
+    PLY015,
     PLY020,
     PLY021,
     PLY022,
@@ -3189,27 +3190,50 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         input_frame: FrameType,
         result_columns: dict[str, DataType],
         output_name: str | None = None,
-    ) -> None:
+    ) -> str | None:
         """Resolve a bare string column name in ``select`` — equivalent to
         ``pl.col(name)``. Missing names error on closed frames (PLY001);
         on an open frame the column may exist among the unknown extras,
         so it is selected as ``Unknown``.
 
         ``output_name`` overrides the result column name for the kwarg
-        form: ``select(x="a")`` selects column ``a`` under the name ``x``."""
+        form: ``select(x="a")`` selects column ``a`` under the name ``x``.
+
+        Returns the output column name actually registered, or ``None``
+        when the name was missing on a closed frame (PLY001 emitted)."""
         spec = input_frame.columns.get(name)
         if spec is not None:
             result_columns[output_name or name] = spec.dtype
-        elif input_frame.rest is not None:
+            return output_name or name
+        if input_frame.rest is not None:
             result_columns[output_name or name] = Unknown()
-        else:
+            return output_name or name
+        self.errors.append(
+            tag(
+                PLY001,
+                f"Column '{name}' not found. Available columns: {list(input_frame.columns.keys())}",
+            )
+        )
+        return None
+
+    def _track_output_name(self, name: str, seen: set[str], call_name: str) -> None:
+        """Record one output column produced by a ``select`` / ``with_columns``
+        call; a repeated name WITHIN the same call is a guaranteed runtime
+        duplicate-name error (issue #36). ``with_columns`` overwriting a
+        pre-existing input column is legal, so callers seed ``seen`` with
+        only the names this call produced — never the input columns.
+        """
+        if name in seen:
             self.errors.append(
                 tag(
-                    PLY001,
-                    f"Column '{name}' not found. Available columns: "
-                    f"{list(input_frame.columns.keys())}",
+                    PLY015,
+                    f"duplicate output column '{name}' in {call_name} — "
+                    f"polars rejects duplicate output names at runtime; "
+                    f"rename one with `.alias(...)`",
                 )
             )
+        else:
+            seen.add(name)
 
     def _infer_select_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
         """Infer type of .select() call."""
@@ -3217,6 +3241,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             input_frame, warnings=self.warnings, registry=self.registry
         )
         result_columns: dict[str, DataType] = {}
+        # Output names produced by THIS call — a repeat is a runtime
+        # DuplicateError (issue #36). Registration keeps the last dtype.
+        seen_outputs: set[str] = set()
 
         for arg in node.args:
             sel = _resolve_selector(arg, input_frame)
@@ -3225,6 +3252,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     spec = input_frame.columns.get(c)
                     if spec is not None:
                         result_columns[c] = spec.dtype
+                        self._track_output_name(c, seen_outputs, "select")
                 continue
             plural = self._resolve_plural_col(arg)
             if plural is not None:
@@ -3235,6 +3263,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                         # unknown extras — select it as Unknown.
                         if input_frame.rest is not None:
                             result_columns[c] = Unknown()
+                            self._track_output_name(c, seen_outputs, "select")
                             continue
                         self.errors.append(
                             tag(
@@ -3245,6 +3274,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                         )
                         continue
                     result_columns[c] = spec.dtype
+                    self._track_output_name(c, seen_outputs, "select")
                 continue
             # Bare string / list-of-strings column names — the most common
             # polars idiom: ``select("a", "b")`` / ``select(["a", "b"])``.
@@ -3254,20 +3284,26 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             # be a frame variable).
             single = self._const_str(arg)
             if single is not None:
-                self._register_string_selection(single, input_frame, result_columns)
+                registered = self._register_string_selection(single, input_frame, result_columns)
+                if registered is not None:
+                    self._track_output_name(registered, seen_outputs, "select")
                 continue
             str_list = self._const_str_list(arg)
             if str_list is not None:
                 for c in str_list:
-                    self._register_string_selection(c, input_frame, result_columns)
+                    registered = self._register_string_selection(c, input_frame, result_columns)
+                    if registered is not None:
+                        self._track_output_name(registered, seen_outputs, "select")
                 continue
             name, dtype = expr_analyzer.analyze_select_expr(arg)
             if name and dtype:
                 result_columns[name] = dtype
+                self._track_output_name(name, seen_outputs, "select")
             elif name:
                 # Named output whose dtype is uninferable — register it as
                 # Unknown so later references resolve (issue #8).
                 result_columns[name] = Unknown()
+                self._track_output_name(name, seen_outputs, "select")
 
         # Kwarg form ``select(name=expr)`` — polars treats it as
         # ``expr.alias("name")``. Same for ``with_columns``.
@@ -3279,15 +3315,18 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             # Constant-bound names (``select(x=KEY)``) resolve too (#22).
             col_ref = self._const_str(kw.value)
             if col_ref is not None:
-                self._register_string_selection(
+                registered = self._register_string_selection(
                     col_ref, input_frame, result_columns, output_name=kw.arg
                 )
+                if registered is not None:
+                    self._track_output_name(registered, seen_outputs, "select")
                 continue
             _, dtype = expr_analyzer.analyze_select_expr(kw.value)
             if dtype is not None:
                 result_columns[kw.arg] = dtype
             else:
                 result_columns[kw.arg] = Unknown()
+            self._track_output_name(kw.arg, seen_outputs, "select")
 
         self.errors.extend(expr_analyzer.errors)
 
@@ -3303,12 +3342,20 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         expr_analyzer = ExpressionAnalyzer(
             input_frame, warnings=self.warnings, registry=self.registry
         )
+        # Output names produced by THIS call — a repeat within the call is a
+        # runtime duplicate-name error (issue #36). Collision with a
+        # pre-existing input column is NOT an error (overwrite semantics),
+        # so the set starts empty rather than seeded with the input columns.
+        seen_outputs: set[str] = set()
 
         for arg in node.args:
             sel = _resolve_selector(arg, input_frame)
             if sel is not None:
                 # cs.* selectors in with_columns are a no-op type-wise (re-include
-                # existing columns). Skip — keep the existing entries.
+                # existing columns) — but each re-included name is still an
+                # output of this call for duplicate detection.
+                for c in sel:
+                    self._track_output_name(c, seen_outputs, "with_columns")
                 continue
             plural = self._resolve_plural_col(arg)
             if plural is not None:
@@ -3324,6 +3371,8 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                                 f"{list(input_frame.columns.keys())}",
                             )
                         )
+                        continue
+                    self._track_output_name(c, seen_outputs, "with_columns")
                 continue
             # Bare string / list-of-strings — equivalent to ``pl.col(name)``,
             # a re-selection of existing columns. Validate existence (PLY001
@@ -3344,14 +3393,18 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                                 f"{list(input_frame.columns.keys())}",
                             )
                         )
+                        continue
+                    self._track_output_name(c, seen_outputs, "with_columns")
                 continue
             name, dtype = expr_analyzer.analyze_select_expr(arg)
             if name and dtype:
                 result_columns[name] = dtype
+                self._track_output_name(name, seen_outputs, "with_columns")
             elif name:
                 # Named output whose dtype is uninferable — register it as
                 # Unknown so later references resolve (issue #8).
                 result_columns[name] = Unknown()
+                self._track_output_name(name, seen_outputs, "with_columns")
 
         # Kwarg form ``with_columns(name=expr)`` — polars treats it as
         # ``expr.alias("name")``.
@@ -3376,12 +3429,15 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                             f"{list(input_frame.columns.keys())}",
                         )
                     )
+                    continue
+                self._track_output_name(kw.arg, seen_outputs, "with_columns")
                 continue
             _, dtype = expr_analyzer.analyze_select_expr(kw.value)
             if dtype is not None:
                 result_columns[kw.arg] = dtype
             else:
                 result_columns[kw.arg] = Unknown()
+            self._track_output_name(kw.arg, seen_outputs, "with_columns")
 
         self.errors.extend(expr_analyzer.errors)
 

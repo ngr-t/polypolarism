@@ -121,6 +121,14 @@ class TestCheckDirectory:
         assert results[0].passed is False
         assert any("PLY013" in str(e) for e in results[0].errors)
 
+    def test_duplicate_output_fixture_fails_with_ply015(self):
+        """Issue #36 fixture: two select outputs share the name 'a'."""
+        results = check_file(FIXTURES_DIR / "invalid" / "duplicate_output.py")
+
+        assert len(results) == 1
+        assert results[0].passed is False
+        assert any("PLY015" in str(e) for e in results[0].errors)
+
 
 class TestCheckWarningFixtures:
     """Files in fixtures/warning produce warnings but still pass type-check."""

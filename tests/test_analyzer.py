@@ -7250,3 +7250,84 @@ class TestCastImpossibleFrameLevel:
         analyzer = _run_body(self._frame(), "out = df.cast({'u': pl.Int64})")
         assert analyzer.errors == [], analyzer.errors
         assert analyzer.var_types["out"].columns["u"].dtype == Int64()
+
+
+class TestDuplicateOutputColumns:
+    """Issue #36: duplicate output names within one select/with_columns call.
+
+    polars raises DuplicateError (select) / ComputeError (with_columns) at
+    runtime when two expressions of the same call produce the same output
+    name. Overwriting a pre-existing input column in ``with_columns`` is
+    legal (that's its whole point) — only intra-call repeats are flagged.
+    Probed against polars 1.41.2.
+    """
+
+    def _frame(self) -> FrameType:
+        return FrameType({"a": Int64(), "b": Float64()})
+
+    def test_select_alias_collides_with_plain_col(self):
+        analyzer = _run_body(self._frame(), 'out = df.select(pl.col("a"), pl.col("b").alias("a"))')
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY015" in analyzer.errors[0]
+        assert "'a'" in analyzer.errors[0]
+        assert "select" in analyzer.errors[0]
+
+    def test_select_duplicate_keeps_last_dtype(self):
+        analyzer = _run_body(self._frame(), 'out = df.select(pl.col("a"), pl.col("b").alias("a"))')
+        # Registration keeps the last dtype so downstream stays sane.
+        assert analyzer.var_types["out"].columns["a"].dtype == Float64()
+
+    def test_select_duplicate_bare_strings(self):
+        analyzer = _run_body(self._frame(), 'out = df.select("a", "a")')
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY015" in analyzer.errors[0]
+
+    def test_select_selector_collides_with_string(self):
+        analyzer = _run_body(self._frame(), 'out = df.select(cs.all(), "a")')
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY015" in analyzer.errors[0]
+
+    def test_select_kwarg_collides_with_positional(self):
+        analyzer = _run_body(self._frame(), "out = df.select(pl.col('a'), a=pl.lit(1))")
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY015" in analyzer.errors[0]
+
+    def test_select_kwarg_string_rename_collides(self):
+        analyzer = _run_body(self._frame(), "out = df.select('a', a='b')")
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY015" in analyzer.errors[0]
+
+    def test_select_plural_col_overlaps_single(self):
+        analyzer = _run_body(self._frame(), 'out = df.select(pl.col("a", "b"), pl.col("a"))')
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY015" in analyzer.errors[0]
+
+    def test_select_distinct_outputs_no_error(self):
+        analyzer = _run_body(self._frame(), 'out = df.select(pl.col("a"), pl.col("b").alias("c"))')
+        assert analyzer.errors == [], analyzer.errors
+
+    def test_with_columns_intra_call_duplicate(self):
+        analyzer = _run_body(
+            self._frame(), 'out = df.with_columns(pl.col("a"), pl.col("b").alias("a"))'
+        )
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY015" in analyzer.errors[0]
+        assert "with_columns" in analyzer.errors[0]
+
+    def test_with_columns_overwrite_existing_is_legal(self):
+        analyzer = _run_body(self._frame(), "out = df.with_columns(a=pl.lit(1))")
+        assert analyzer.errors == [], analyzer.errors
+
+    def test_with_columns_alias_overwrite_existing_is_legal(self):
+        analyzer = _run_body(self._frame(), 'out = df.with_columns(pl.col("b").alias("a"))')
+        assert analyzer.errors == [], analyzer.errors
+
+    def test_with_columns_selector_collides_with_expr(self):
+        analyzer = _run_body(self._frame(), 'out = df.with_columns(cs.all(), pl.col("a"))')
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY015" in analyzer.errors[0]
+
+    def test_with_columns_string_collides_with_kwarg(self):
+        analyzer = _run_body(self._frame(), "out = df.with_columns('a', a=pl.lit(1))")
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY015" in analyzer.errors[0]
