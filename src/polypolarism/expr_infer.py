@@ -459,9 +459,14 @@ def _supertype_base(left: DataType, right: DataType) -> DataType | None:
             return Float64()  # probed for both float widths
         if isinstance(other, (Categorical, Enum)):
             return None  # probed SchemaError
-        # Decimal + int succeeds with data-dependent precision arithmetic
-        # (Decimal(10,2)+Int8 -> Decimal(10,2) but +Int32 -> Decimal(38,2));
-        # Decimal + Decimal with differing precision/scale is unprobed.
+        # The supertype lattice is genuinely width-dependent for
+        # Decimal x int — probed: when/then(Decimal(10,2), Int8) keeps
+        # Decimal(10,2) but Int32 widens to Decimal(38,2) — so these
+        # cells stay Unknown, and Decimal x Decimal with differing
+        # precision/scale is unprobed here. NOTE this deliberately
+        # differs from the binary-OPERATOR path (issue #52,
+        # ``analyzer._decimal_arith``), where ``+ - * /`` always
+        # materialize Decimal(38, scale).
         return Unknown()
 
     if isinstance(left, (Categorical, Enum)) or isinstance(right, (Categorical, Enum)):
