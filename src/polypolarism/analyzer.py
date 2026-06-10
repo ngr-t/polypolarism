@@ -45,9 +45,11 @@ from polypolarism.diagnostics import (
 )
 from polypolarism.expr_infer import (
     ColumnNotFoundError,
+    TypePromotionError,
     TypeUnificationError,
     infer_col,
     infer_lit,
+    promote_types,
     unify_types,
 )
 from polypolarism.ops.groupby import (
@@ -92,6 +94,7 @@ from polypolarism.types import (
     Int32,
     Int64,
     Int128,
+    Null,
     Nullable,
     RowVar,
     Struct,
@@ -164,6 +167,26 @@ def _resolve_pl_dtype(node: ast.expr) -> DataType | None:
                 return Datetime(tz=tz)
             return base
     return None
+
+
+def _base_is_unknown(dtype: DataType) -> bool:
+    """True when the dtype (after Nullable unwrap) is Unknown."""
+    inner = dtype.inner if isinstance(dtype, Nullable) else dtype
+    return isinstance(inner, Unknown)
+
+
+def _wrap_nullable_if_any(result: DataType, operands: list[DataType]) -> DataType:
+    """Wrap ``result`` in Nullable when any operand is Nullable (or Null).
+
+    Elementwise operations propagate nulls: if any input value can be
+    null, the output value can be null (``null > 0`` is null, ``1 + null``
+    is null, ...). Already-Nullable results are returned unchanged.
+    """
+    if isinstance(result, Nullable):
+        return result
+    if any(isinstance(t, (Nullable, Null)) for t in operands):
+        return Nullable(result)
+    return result
 
 
 def _wrap_like(receiver: DataType, new_inner: DataType) -> DataType:
@@ -870,13 +893,36 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             self._validate_subexpr(inner_node.operand)
             return alias, Boolean()
 
-        # Arithmetic binary operations like pl.col("x") * 2
+        # Arithmetic binary operations like pl.col("x") * 2. Both operands
+        # are resolved (keeping the missing-column error side-effects) and
+        # combined with polars' promotion rules.
         if isinstance(inner_node, ast.BinOp):
-            # For binary ops, try to infer the type from the left operand
             left_name, left_type = self.analyze_select_expr(inner_node.left)
-            if left_type:
-                output_name = alias if alias else left_name
-                return output_name, left_type
+            _, right_type = self.analyze_select_expr(inner_node.right)
+            output_name = alias if alias else left_name
+            resolved = [t for t in (left_type, right_type) if t is not None]
+
+            if isinstance(inner_node.op, ast.Div):
+                # polars true division always yields Float64, even for
+                # int/int (issue #14) — ``//`` is the dtype-preserving one.
+                if any(_base_is_unknown(t) for t in resolved):
+                    return output_name, Unknown()
+                if resolved:
+                    return output_name, _wrap_nullable_if_any(Float64(), resolved)
+                # Neither operand resolved — fall through so the output is
+                # registered as Unknown downstream.
+            elif left_type is not None and right_type is not None:
+                try:
+                    return output_name, promote_types(left_type, right_type)
+                except TypePromotionError:
+                    # Non-numeric arithmetic (e.g. Utf8 + Utf8 concat):
+                    # keep the left operand's dtype, but nullability from
+                    # either side still propagates.
+                    return output_name, _wrap_nullable_if_any(left_type, resolved)
+            elif resolved:
+                # Only one operand resolved — use its type (the historical
+                # take-left behaviour, generalised to either side).
+                return output_name, resolved[0]
 
         # Method-chain on a column expression (is_null, fill_null, std, abs, ...)
         chain_result = self._analyze_method_chain(inner_node)

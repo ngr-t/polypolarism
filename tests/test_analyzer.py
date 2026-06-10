@@ -4039,3 +4039,104 @@ class TestBareConstantLiterals:
         out = analyzer.var_types["out"]
         assert list(out.columns) == ["name"]
         assert out.columns["name"].dtype == Utf8()
+
+
+class TestArithmeticBinOpInference:
+    """Issue #14: binary arithmetic uses polars promotion rules, not left-type.
+
+    True division ``/`` always yields Float64 (int/int included); floor
+    division ``//`` keeps the integer dtype; other ops promote numerically
+    and propagate Nullable from either operand.
+    """
+
+    def _frame(self) -> FrameType:
+        return FrameType(
+            {
+                "a": Int64(),
+                "b": Int64(),
+                "f": Float64(),
+                "n": Nullable(Int64()),
+                "u": Unknown(),
+                "s": Utf8(),
+                "t": Nullable(Utf8()),
+            }
+        )
+
+    # -- true division ------------------------------------------------------
+
+    def test_int_truediv_int_is_float64(self):
+        analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('a') / pl.col('b'))")
+        assert analyzer.var_types["out"].columns["r"].dtype == Float64()
+
+    def test_int_truediv_int_literal_is_float64(self):
+        analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('a') / 2)")
+        assert analyzer.var_types["out"].columns["r"].dtype == Float64()
+
+    def test_float_truediv_float_is_float64(self):
+        analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('f') / pl.col('f'))")
+        assert analyzer.var_types["out"].columns["r"].dtype == Float64()
+
+    def test_truediv_nullable_operand_is_nullable_float64(self):
+        analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('a') / pl.col('n'))")
+        assert analyzer.var_types["out"].columns["r"].dtype == Nullable(Float64())
+
+    def test_truediv_unknown_operand_is_unknown(self):
+        analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('a') / pl.col('u'))")
+        assert analyzer.var_types["out"].columns["r"].dtype == Unknown()
+
+    def test_truediv_one_resolved_operand_is_float64(self):
+        """A single resolved operand is enough — / yields Float64 regardless."""
+        analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('a') / helper())")
+        assert analyzer.var_types["out"].columns["r"].dtype == Float64()
+
+    def test_truediv_no_resolved_operands_registers_unknown(self):
+        analyzer = _run_body(self._frame(), "out = df.select(r=helper() / other())")
+        assert analyzer.var_types["out"].columns["r"].dtype == Unknown()
+
+    # -- floor division and other arithmetic --------------------------------
+
+    def test_int_floordiv_int_stays_int64(self):
+        analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('a') // pl.col('b'))")
+        assert analyzer.var_types["out"].columns["r"].dtype == Int64()
+
+    def test_int_plus_float_promotes_to_float64(self):
+        analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('a') + pl.col('f'))")
+        assert analyzer.var_types["out"].columns["r"].dtype == Float64()
+
+    def test_int_plus_float_literal_promotes_to_float64(self):
+        analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('a') + 2.5)")
+        assert analyzer.var_types["out"].columns["r"].dtype == Float64()
+
+    def test_int_plus_nullable_int_is_nullable_int64(self):
+        """Issue #18 (arithmetic side): Nullable propagates through +."""
+        analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('a') + pl.col('n'))")
+        assert analyzer.var_types["out"].columns["r"].dtype == Nullable(Int64())
+
+    def test_unknown_plus_int_is_unknown(self):
+        analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('u') + 1)")
+        assert analyzer.var_types["out"].columns["r"].dtype == Unknown()
+
+    def test_only_left_resolved_keeps_left_type(self):
+        analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('a') + helper())")
+        assert analyzer.var_types["out"].columns["r"].dtype == Int64()
+
+    def test_only_right_resolved_keeps_right_type(self):
+        analyzer = _run_body(self._frame(), "out = df.select(r=helper() + pl.col('a'))")
+        assert analyzer.var_types["out"].columns["r"].dtype == Int64()
+
+    def test_output_name_defaults_to_left_column(self):
+        analyzer = _run_body(self._frame(), "out = df.select(pl.col('a') / pl.col('b'))")
+        out = analyzer.var_types["out"]
+        assert list(out.columns) == ["a"]
+        assert out.columns["a"].dtype == Float64()
+
+    # -- string concat fallback ---------------------------------------------
+
+    def test_utf8_concat_keeps_utf8(self):
+        """Utf8 + Utf8 is concat — promotion fails, left type wins."""
+        analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('s') + pl.col('s'))")
+        assert analyzer.var_types["out"].columns["r"].dtype == Utf8()
+
+    def test_utf8_concat_with_nullable_operand_is_nullable_utf8(self):
+        analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('s') + pl.col('t'))")
+        assert analyzer.var_types["out"].columns["r"].dtype == Nullable(Utf8())
