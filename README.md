@@ -476,7 +476,7 @@ Warning codes:
 | `PLW004` | lambda / inline callable used where its return dtype is unknowable |
 | `PLW005` | `pivot()` output schema is data-dependent; bind to a `DataFrame[Schema]` variable |
 | `PLW006` | `DataFrame[X]` / `LazyFrame[X]` annotation references a schema the analyzer cannot resolve |
-| `PLW007` | method not modeled by polypolarism — the result dtype degrades to `Unknown`; pin it with `.cast(...)` or a schema validation (a `.cast(...)` directly after the call retracts the warning) |
+| `PLW007` | method not modeled by polypolarism. Expression/namespace methods: the result dtype degrades to `Unknown`; pin it with `.cast(...)` or a schema validation (a `.cast(...)` directly after the call retracts the warning). Frame methods probed to return a DataFrame/LazyFrame: the frame untracks; wrap the call in `Schema.validate(...)` (which retracts the warning). Terminal frame methods (`to_dicts`, `write_*`, `height`, ...) legitimately return non-frames and stay silent |
 | `PLW010` | detected polars / pandera version is below the supported floor (see [Supported versions](#supported-versions)) |
 
 JSON output (`--format json`) emits warnings as `severity: "warning"`

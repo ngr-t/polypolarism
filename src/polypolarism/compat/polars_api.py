@@ -9,7 +9,8 @@ recognizes:
   by Call form in dispatch sites; ``DECIMAL_DEFAULT`` is the bare
   ``pl.Decimal`` fallback.
 - ``IDENTITY_FRAME_METHODS`` / ``LAZY_ONLY_METHODS`` /
-  ``EAGER_ONLY_METHODS`` — frame method classification.
+  ``EAGER_ONLY_METHODS`` / ``EAGER_FRAME_RETURNING_METHODS`` /
+  ``LAZY_FRAME_RETURNING_METHODS`` — frame method classification.
 - ``STR_NAMESPACE_RETURN`` / ``DT_NAMESPACE_RETURN`` /
   ``DT_NAMESPACE_PRESERVING`` / ``LIST_NAMESPACE_PRESERVING`` /
   ``LIST_NAMESPACE_ELEMENT_RETURN`` / ``BIN_NAMESPACE_RETURN`` /
@@ -853,6 +854,179 @@ EAGER_ONLY_METHODS: frozenset[str] = frozenset(
         "transpose",
         "partition_by",
         "n_unique",
+    }
+)
+
+
+# Frame methods probed to RETURN a frame (DataFrame or LazyFrame), one set
+# per receiver class. Consumed by the analyzer's frame-method dispatch
+# fall-through (backlog N-3): an unmodeled method in the receiver's set
+# means schema tracking silently dies — PLW007. Names NOT in the set stay
+# silent: terminal methods (``to_dicts``, ``write_*``, ``item``,
+# ``height``, ...) legitimately return non-frames, and unknown names
+# (typos, plugin namespaces) are unknowable (conservative). Modeled
+# methods also appear here — they are dispatched before the fall-through,
+# so the sets stay a pure probe artifact that can be regenerated
+# mechanically.
+#
+# Probed (polars 1.41.2): enumerated the public callables of
+# ``pl.DataFrame`` / ``pl.LazyFrame`` (``dir()`` minus underscore names,
+# properties skipped) and kept exactly those whose
+# ``inspect.signature`` return annotation is the bare ``DataFrame`` /
+# ``LazyFrame`` / ``pl.DataFrame`` token. Union-typed returns
+# (``sink_csv -> LazyFrame | None``, ``collect -> DataFrame |
+# InProcessQuery``, ``glimpse -> str | DataFrame | None``) and generics
+# (``pipe -> T``) are excluded — they are not unconditionally
+# frame-returning. Spot-checked by execution: ``df.interpolate`` /
+# ``df.transpose`` / ``df.sql`` / ``df.count`` / ``df.clear`` /
+# ``lf.describe`` (a DataFrame!) / ``lf.fetch`` / ``lf.pipe_with_schema``
+# all return the annotated frame class; ``df.glimpse`` returns str.
+EAGER_FRAME_RETURNING_METHODS: frozenset[str] = frozenset(
+    {
+        "approx_n_unique",
+        "bottom_k",
+        "cast",
+        "clear",
+        "clone",
+        "corr",
+        "count",
+        "describe",
+        "deserialize",
+        "drop",
+        "drop_nans",
+        "drop_nulls",
+        "explode",
+        "extend",
+        "fill_nan",
+        "fill_null",
+        "filter",
+        "gather",
+        "gather_every",
+        "head",
+        "hstack",
+        "insert_column",
+        "interpolate",
+        "join",
+        "join_asof",
+        "join_where",
+        "lazy",
+        "limit",
+        "map_columns",
+        "map_rows",
+        "match_to_schema",
+        "max",
+        "mean",
+        "median",
+        "melt",
+        "merge_sorted",
+        "min",
+        "null_count",
+        "pivot",
+        "product",
+        "quantile",
+        "rechunk",
+        "remove",
+        "rename",
+        "replace_column",
+        "reverse",
+        "sample",
+        "select",
+        "select_seq",
+        "set_sorted",
+        "shift",
+        "shrink_to_fit",
+        "slice",
+        "sort",
+        "sql",
+        "std",
+        "sum",
+        "tail",
+        "to_dummies",
+        "top_k",
+        "transpose",
+        "unique",
+        "unnest",
+        "unpivot",
+        "unstack",
+        "update",
+        "upsample",
+        "var",
+        "vstack",
+        "with_columns",
+        "with_columns_seq",
+        "with_row_count",
+        "with_row_index",
+    }
+)
+
+LAZY_FRAME_RETURNING_METHODS: frozenset[str] = frozenset(
+    {
+        "approx_n_unique",
+        "bottom_k",
+        "cache",
+        "cast",
+        "clear",
+        "clone",
+        "count",
+        "describe",
+        "deserialize",
+        "drop",
+        "drop_nans",
+        "drop_nulls",
+        "explode",
+        "fetch",
+        "fill_nan",
+        "fill_null",
+        "filter",
+        "first",
+        "gather",
+        "gather_every",
+        "head",
+        "inspect",
+        "interpolate",
+        "join",
+        "join_asof",
+        "join_where",
+        "last",
+        "lazy",
+        "limit",
+        "map_batches",
+        "match_to_schema",
+        "max",
+        "mean",
+        "median",
+        "melt",
+        "merge_sorted",
+        "min",
+        "null_count",
+        "pipe_with_schema",
+        "pivot",
+        "quantile",
+        "remove",
+        "rename",
+        "reverse",
+        "select",
+        "select_seq",
+        "set_sorted",
+        "shift",
+        "sink_iceberg",
+        "slice",
+        "sort",
+        "sql",
+        "std",
+        "sum",
+        "tail",
+        "top_k",
+        "unique",
+        "unnest",
+        "unpivot",
+        "update",
+        "var",
+        "with_columns",
+        "with_columns_seq",
+        "with_context",
+        "with_row_count",
+        "with_row_index",
     }
 )
 

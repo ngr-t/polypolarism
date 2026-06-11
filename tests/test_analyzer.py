@@ -11344,3 +11344,125 @@ class TestUnmodeledMethodWarning:
         # warning emitted for the receiver chain is retracted.
         result = self._frame('df.select(pl.col("a").peak_max().cast(pl.Int64))')
         assert not any("PLW007" in w for w in result.warnings), result.warnings
+
+
+class TestUnmodeledFrameMethodWarning:
+    """Backlog N-3: an unmodeled FRAME method on a tracked receiver
+    silently untracks the variable — every downstream check dies quietly.
+    PLW007 fires only for methods probed (polars 1.41.2) to return a
+    DataFrame/LazyFrame, because only then does schema tracking silently
+    die; terminal methods (``to_dicts``, ``write_*``, ``height``, ...)
+    legitimately return non-frames and stay silent, as do unknown names
+    (typos, plugin namespaces — conservative).
+
+    Probed (polars 1.41.2): ``interpolate`` exists on both DataFrame and
+    LazyFrame, returns a frame, and polypolarism does not model it — the
+    canonical unmodeled frame-returning call here.
+    """
+
+    HEADER = textwrap.dedent(
+        PANDERA_HEADER
+        + """
+            class In(pa.DataFrameModel):
+                a: int
+                b: str
+        """
+    )
+
+    def _returning(self, body: str):
+        source = self.HEADER + textwrap.dedent(
+            f"""
+            def f(df: DataFrame[In]):
+                return {body}
+            """
+        )
+        return analyze_source(source)[0]
+
+    def _plw007(self, result):
+        return [w for w in result.warnings if "PLW007" in w]
+
+    def test_unmodeled_frame_returning_method_warns_plw007(self):
+        result = self._returning("df.interpolate()")
+        assert result.errors == [], result.errors
+        warnings = self._plw007(result)
+        assert len(warnings) == 1, result.warnings
+        assert ".interpolate()" in warnings[0], warnings
+
+    def test_terminal_method_does_not_warn(self):
+        # ``to_dicts`` returns list[dict] — tracking a frame schema past it
+        # is meaningless, so there is nothing to warn about.
+        result = self._returning("df.to_dicts()")
+        assert result.errors == [], result.errors
+        assert self._plw007(result) == [], result.warnings
+
+    def test_unknown_method_name_stays_silent(self):
+        # Typos / plugin namespaces are unknowable — stay conservative.
+        result = self._returning("df.not_a_real_frame_method()")
+        assert self._plw007(result) == [], result.warnings
+
+    def test_modeled_methods_do_not_warn(self):
+        result = self._returning('df.select(pl.col("a")).filter(pl.col("a") > 0).head(5)')
+        assert result.errors == [], result.errors
+        assert self._plw007(result) == [], result.warnings
+
+    def test_untracked_receiver_does_not_warn(self):
+        # The degradation happened upstream (unknown variable) — warning on
+        # the method call would blame the wrong place.
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]):
+                mystery = load_other()
+                return mystery.interpolate()
+            """
+        )
+        result = analyze_source(source)[0]
+        assert self._plw007(result) == [], result.warnings
+
+    def test_lazy_receiver_uses_the_lazyframe_probe_set(self):
+        result = self._returning("df.lazy().interpolate()")
+        assert result.errors == [], result.errors
+        assert len(self._plw007(result)) == 1, result.warnings
+
+    def test_wrong_side_method_gets_the_eager_lazy_error_only(self):
+        # ``transpose`` is eager-only: the lazy receiver already gets a
+        # precise PLY030 — piling a "not modeled" warning on top of the
+        # error would be noise (the lazy probe set does not contain it).
+        result = self._returning("df.lazy().transpose()")
+        assert any("PLY030" in e for e in result.errors), result.errors
+        assert self._plw007(result) == [], result.warnings
+
+    def test_one_warning_per_chain(self):
+        # After the first unmodeled call the variable is untracked; the
+        # second call sees no FrameType receiver and stays silent.
+        result = self._returning("df.interpolate().fill_null(0)")
+        assert len(self._plw007(result)) == 1, result.warnings
+
+    def test_agg_chain_does_not_double_fire(self):
+        # ``.group_by(...).agg(...)`` analyzes the grouped receiver twice
+        # (once for laziness, once inside _infer_agg_call) — the warning
+        # must still fire once per source call.
+        result = self._returning('df.interpolate().group_by("a").agg(pl.col("a").sum())')
+        assert len(self._plw007(result)) == 1, result.warnings
+
+    def test_validate_wrapping_the_call_retracts_the_warning(self):
+        # ``Schema.validate(...)`` immediately retypes the result — exactly
+        # the repair PLW007 recommends — so wrapping the unmodeled call
+        # retracts the warning (frame-level analog of the expression-level
+        # cast retraction).
+        result = self._returning("In.validate(df.interpolate())")
+        assert result.errors == [], result.errors
+        assert self._plw007(result) == [], result.warnings
+
+    def test_validate_on_a_later_statement_keeps_the_warning(self):
+        # Between the unmodeled call and the validate the variable really
+        # was untracked — the warning at the degradation point stands.
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]) -> DataFrame[In]:
+                out = df.interpolate()
+                return In.validate(out)
+            """
+        )
+        result = analyze_source(source)[0]
+        assert result.errors == [], result.errors
+        assert len(self._plw007(result)) == 1, result.warnings
