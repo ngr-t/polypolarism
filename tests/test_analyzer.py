@@ -12639,7 +12639,13 @@ class TestOpenFrameOperations:
         assert results[0].errors == [], results[0].errors
         inferred = results[0].inferred_return_type
         assert inferred is not None and inferred.rest is not None
-        assert isinstance(inferred.columns["v"].dtype, Nullable)
+        # The right column's NAME is pinned, but with an open left frame
+        # its dtype is conditional on a left-rest collision (polars would
+        # suffix the right column away) — Unknown, not the right dtype
+        # (issue #79).
+        v_dtype = inferred.columns["v"].dtype
+        v_base = v_dtype.inner if isinstance(v_dtype, Nullable) else v_dtype
+        assert isinstance(v_base, Unknown), v_dtype
 
     def test_selector_keeps_select_result_open(self):
         analyzer = _run_body(
@@ -13085,3 +13091,217 @@ class TestSchemaDefinitionErrors:
         results = analyze_source(source)
         assert len(results) == 1
         assert not any("PLY041" in e for e in results[0].errors), results[0].errors
+
+
+class TestOpenFrameNegativeKnowledge:
+    """Issue #78: ``drop`` / ``rename`` create PROVABLE absence on open
+    frames — conditional on reaching the next line, exactly the ADR-0006
+    conditionality. A later reference to the removed/old name is a
+    guaranteed ColumnNotFoundError, so it must flag; reintroducing the
+    name clears the mark."""
+
+    def test_use_after_drop_flags(self):
+        source = textwrap.dedent(
+            """
+            import polars as pl
+
+            def use_after_drop(df: pl.DataFrame) -> pl.DataFrame:
+                return df.drop("a").select(pl.col("a"))
+            """
+        )
+        results = analyze_source(source)
+        assert len(results) == 1
+        assert any("'a'" in str(e) for e in results[0].errors), results[0].errors
+
+    def test_use_old_name_after_rename_flags(self):
+        source = textwrap.dedent(
+            """
+            import polars as pl
+
+            def use_old(df: pl.DataFrame) -> pl.DataFrame:
+                return df.rename({"a": "b"}).select(pl.col("a"))
+            """
+        )
+        results = analyze_source(source)
+        assert len(results) == 1
+        assert any("'a'" in str(e) for e in results[0].errors), results[0].errors
+
+    def test_new_name_after_rename_is_fine(self):
+        source = textwrap.dedent(
+            """
+            import polars as pl
+
+            def use_new(df: pl.DataFrame) -> pl.DataFrame:
+                return df.rename({"a": "b"}).select(pl.col("b"))
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == [], results[0].errors
+
+    def test_with_columns_reintroduction_clears_absence(self):
+        source = textwrap.dedent(
+            """
+            import polars as pl
+
+            def reintroduce(df: pl.DataFrame) -> pl.DataFrame:
+                return df.drop("a").with_columns(a=pl.lit(1)).select(pl.col("a") + 1)
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == [], results[0].errors
+
+    def test_rename_swap_does_not_mark_reused_target(self):
+        # rename({"a": "b", "c": "a"}) — 'a' is renamed away AND reused as
+        # a target: it still exists afterwards.
+        source = textwrap.dedent(
+            """
+            import polars as pl
+
+            def swap(df: pl.DataFrame) -> pl.DataFrame:
+                return df.rename({"a": "b", "c": "a"}).select(pl.col("a"))
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == [], results[0].errors
+
+    def test_double_drop_flags_second(self):
+        # The second drop("a") is a guaranteed ColumnNotFoundError
+        # (polars drop is strict by default).
+        source = textwrap.dedent(
+            """
+            import polars as pl
+
+            def double(df: pl.DataFrame) -> pl.DataFrame:
+                return df.drop("a").drop("a")
+            """
+        )
+        results = analyze_source(source)
+        assert any("PLY002" in str(e) for e in results[0].errors), results[0].errors
+
+    def test_cast_of_absent_column_flags(self):
+        source = textwrap.dedent(
+            """
+            import polars as pl
+
+            def cast_gone(df: pl.DataFrame) -> pl.DataFrame:
+                return df.drop("a").cast({"a": pl.Int64})
+            """
+        )
+        results = analyze_source(source)
+        assert any("PLY004" in str(e) for e in results[0].errors), results[0].errors
+
+    def test_declared_return_missing_absent_column_fails(self):
+        # Checker side: a declared column that is provably absent from the
+        # open inferred frame is a real MissingColumn, not a leniency.
+        source = textwrap.dedent(
+            """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+
+            class Out(pa.DataFrameModel):
+                a: int
+
+            def gone(df: pl.DataFrame) -> DataFrame[Out]:
+                return df.drop("a")
+            """
+        )
+        from polypolarism.checker import check_source
+
+        results = check_source(source)
+        assert len(results) == 1
+        assert not results[0].passed
+        assert any("a" in str(e) and "Missing" in str(e) for e in results[0].errors), results[
+            0
+        ].errors
+
+    def test_join_key_provably_absent_flags(self):
+        source = textwrap.dedent(
+            """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+
+            class Right(pa.DataFrameModel):
+                k: int
+
+            def bad_key(df: pl.DataFrame, other: DataFrame[Right]) -> pl.DataFrame:
+                return df.drop("k").join(other, on="k")
+            """
+        )
+        results = analyze_source(source)
+        assert any("'k'" in str(e) for e in results[0].errors), results[0].errors
+
+
+class TestOpenLeftJoinCollision:
+    """Issue #79: joining a closed right frame onto an OPEN left frame —
+    a right-side pin is conditional on no collision in the left rest
+    (polars suffixes the RIGHT column away), so its dtype degrades to
+    Unknown; collisions with PINNED left columns stay deterministic."""
+
+    def _analyze(self, body: str):
+        source = textwrap.dedent(
+            f"""
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+
+            class KZ(pa.DataFrameModel):
+                k: pl.Int64
+                z: pl.Int64
+
+            def f(df: pl.DataFrame, g: DataFrame[KZ]) -> pl.DataFrame:
+                return {body}
+            """
+        )
+        results = analyze_source(source)
+        assert len(results) == 1
+        return results[0]
+
+    def test_right_pin_on_open_left_does_not_manufacture_proof(self):
+        # The issue's repro: if df happens to carry z: String, pl.col("z")
+        # is the LEFT column and .str succeeds — no proof, no error.
+        result = self._analyze('df.join(g, on="k").select(pl.col("z").str.to_uppercase())')
+        assert result.errors == [], result.errors
+
+    def test_right_column_name_still_pinned_as_unknown(self):
+        result = self._analyze('df.join(g, on="k")')
+        inferred = result.inferred_return_type
+        assert inferred is not None and inferred.rest is not None
+        assert "z" in inferred.columns
+        z_dtype = inferred.columns["z"].dtype
+        base = z_dtype.inner if isinstance(z_dtype, Nullable) else z_dtype
+        assert isinstance(base, Unknown), z_dtype
+
+    def test_closed_left_keeps_the_genuine_proof(self):
+        source = textwrap.dedent(
+            """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+
+            class KOnly(pa.DataFrameModel):
+                k: pl.Int64
+
+                class Config:
+                    strict = True
+
+            class KZ(pa.DataFrameModel):
+                k: pl.Int64
+                z: pl.Int64
+
+            def f(a: DataFrame[KOnly], g: DataFrame[KZ]) -> pl.DataFrame:
+                return a.join(g, on="k").select(pl.col("z").str.to_uppercase())
+            """
+        )
+        results = analyze_source(source)
+        assert any("PLY012" in str(e) for e in results[0].errors), results[0].errors
+
+    def test_pinned_left_collision_stays_deterministic(self):
+        # The left frame PINS z (via with_columns), so the right z is
+        # deterministically suffixed to z_right with its precise dtype.
+        result = self._analyze('df.with_columns(z=pl.lit("s")).join(g, on="k")')
+        inferred = result.inferred_return_type
+        assert inferred is not None
+        assert inferred.columns["z"].dtype == Utf8()
+        assert inferred.columns["z_right"].dtype == Int64()

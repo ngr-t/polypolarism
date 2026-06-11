@@ -322,7 +322,10 @@ def check_function(analysis: FunctionAnalysis) -> CheckResult:
         inferred_spec = inferred.columns.get(col_name)
         if inferred_spec is None:
             if declared_spec.required:
-                if inferred.rest is None:
+                # ``lacks`` is provable absence: a closed frame without
+                # the column, or an open frame that removed it via
+                # drop/rename (negative knowledge, issue #78).
+                if inferred.lacks(col_name):
                     errors.append(MissingColumn(col_name, declared_spec.dtype))
                 else:
                     leniency.append(f"column '{col_name}': not provably absent (open frame)")

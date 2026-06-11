@@ -52,6 +52,24 @@ def _as_key_list(value: str | list[str]) -> list[str]:
     return list(value)
 
 
+def _right_pin_dtype(dtype: DataType, left: FrameType, *, collides_with_pin: bool) -> DataType:
+    """Dtype claimable for a right-side column pinned into the join result.
+
+    Issue #79: with an OPEN left frame, a right column that does NOT
+    collide with a pinned left name may still collide with one of the
+    left ``rest``'s unknown extras — polars would then suffix the RIGHT
+    column away and the unsuffixed name would be the LEFT column, dtype
+    unknown. The name itself provably exists in the output either way,
+    but its dtype is conditional — claim ``Unknown`` instead of
+    manufacturing a proof. Collisions with PINNED left names are
+    deterministic (the suffix is decided), so those keep the precise
+    dtype; a closed left frame keeps every pin precise.
+    """
+    if left.rest is not None and not collides_with_pin:
+        return Unknown()
+    return dtype
+
+
 def infer_join(
     left: FrameType,
     right: FrameType,
@@ -92,6 +110,14 @@ def infer_join(
     # the other side's names (suffixing) cannot be tracked.
     result_rest = left.rest or right.rest
 
+    # Negative knowledge survives a join (issue #78): a name provably
+    # lacking on BOTH sides cannot appear in the output (suffixed names
+    # are new spellings; reintroductions are pinned and subtracted by the
+    # FrameType constructor).
+    result_absent = {
+        name for name in (left.absent | right.absent) if left.lacks(name) and right.lacks(name)
+    }
+
     # Cross joins take no keys: the result is simply all left columns plus
     # all right columns (suffixed on collision), with dtypes unchanged and
     # no nullability introduced.
@@ -103,8 +129,10 @@ def infer_join(
         }
         for col_name, col_spec in right.columns.items():
             final_name = f"{col_name}{suffix}" if col_name in result_columns else col_name
-            result_columns[final_name] = col_spec.dtype
-        return FrameType(columns=result_columns, rest=result_rest)
+            result_columns[final_name] = _right_pin_dtype(
+                col_spec.dtype, left, collides_with_pin=final_name != col_name
+            )
+        return FrameType(columns=result_columns, rest=result_rest, absent=result_absent)
 
     # Determine join keys (each key pair is validated independently).
     if on is not None:
@@ -133,13 +161,14 @@ def infer_join(
     for left_key, right_key in zip(left_keys, right_keys, strict=True):
         left_key_type = left.get_column_type(left_key)
         if left_key_type is None:
-            if left.rest is None:
+            if left.lacks(left_key):
+                # Closed frame, or provably removed on an open one (#78).
                 raise JoinError(f"Column '{left_key}' not found in left frame")
             left_key_type = Unknown()
 
         right_key_type = right.get_column_type(right_key)
         if right_key_type is None:
-            if right.rest is None:
+            if right.lacks(right_key):
                 raise JoinError(f"Column '{right_key}' not found in right frame")
             right_key_type = Unknown()
 
@@ -153,7 +182,9 @@ def infer_join(
     # Semi/anti joins only filter rows: the result is exactly the left
     # frame's schema — no right columns, no nullability changes.
     if how in ("semi", "anti"):
-        return FrameType(columns=dict(left.columns), strict=left.strict, rest=left.rest)
+        return FrameType(
+            columns=dict(left.columns), strict=left.strict, rest=left.rest, absent=left.absent
+        )
 
     # polars coalesces the key columns by default for inner/left/right
     # equi-joins, but NOT for full joins (both keys are kept, the right
@@ -199,7 +230,12 @@ def infer_join(
         else:
             result_columns[col_name] = col_type
 
-    # Add right columns
+    # Add right columns. With an open left frame an unsuffixed pin's
+    # dtype is conditional on no left-rest collision (issue #79) — the
+    # NAME provably exists in the output either way (as the right column,
+    # or as the left's colliding column), but the dtype degrades to
+    # Unknown; the join-kind nullability wrap is skipped for degraded
+    # pins (it belongs to the right-column world only).
     for col_name, col_spec in right.columns.items():
         if col_name in drop_right_keys:
             continue
@@ -210,10 +246,9 @@ def infer_join(
         if col_name in result_columns:
             final_name = f"{col_name}{suffix}"
 
-        # Apply nullability
-        if right_nullable:
-            result_columns[final_name] = _make_nullable(col_type)
-        else:
-            result_columns[final_name] = col_type
+        pinned = _right_pin_dtype(col_type, left, collides_with_pin=final_name != col_name)
+        if right_nullable and not isinstance(pinned, Unknown):
+            pinned = _make_nullable(pinned)
+        result_columns[final_name] = pinned
 
-    return FrameType(columns=result_columns, rest=result_rest)
+    return FrameType(columns=result_columns, rest=result_rest, absent=result_absent)

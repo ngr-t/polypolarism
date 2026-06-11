@@ -1888,7 +1888,9 @@ def _is_frame_subtype(actual: FrameType, expected: FrameType) -> bool:
     for col_name, expected_spec in expected.columns.items():
         actual_spec = actual.columns.get(col_name)
         if actual_spec is None:
-            if expected_spec.required and actual.rest is None:
+            # ``lacks``: closed-and-missing, or provably removed on an
+            # open frame (negative knowledge, issue #78).
+            if expected_spec.required and actual.lacks(col_name):
                 return False
             continue
         if expected_spec.required and not actual_spec.required:
@@ -5414,6 +5416,17 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             result_columns[output_name or name] = spec.dtype
             return output_name or name
         if input_frame.rest is not None:
+            if name in input_frame.absent:
+                # Negative knowledge (issue #78): removed by an earlier
+                # drop/rename — a guaranteed runtime miss.
+                self.errors.append(
+                    tag(
+                        PLY001,
+                        f"Column '{name}' not found — it was removed earlier "
+                        f"in this chain (drop/rename)",
+                    )
+                )
+                return None
             result_columns[output_name or name] = Unknown()
             return output_name or name
         self.errors.append(
@@ -5699,6 +5712,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             columns=result_columns,
             strict=input_frame.strict,
             rest=input_frame.rest or (RowVar("name") if has_opaque_outputs else None),
+            # The constructor subtracts pinned names, so columns this call
+            # (re)introduced clear their absence marks (issue #78).
+            absent=input_frame.absent,
         )
 
     # -- frame methods --------------------------------------------------
@@ -5734,13 +5750,34 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         result_columns = dict(input_frame.columns)
         for name in targets:
             if name not in result_columns:
-                # On an open frame the column may exist among the unknown
-                # extras — dropping it is a no-op for the tracked schema.
                 if input_frame.rest is None:
                     self.errors.append(tag(PLY002, f"drop: column '{name}' not found"))
+                elif name in input_frame.absent:
+                    # Negative knowledge (issue #78): the column was
+                    # already removed — polars drop (strict by default)
+                    # raises ColumnNotFoundError on every execution.
+                    self.errors.append(
+                        tag(
+                            PLY002,
+                            f"drop: column '{name}' not found — it was removed "
+                            f"earlier in this chain (drop/rename)",
+                        )
+                    )
+                # Otherwise: the column may exist among the open frame's
+                # unknown extras — dropping it is a no-op for the tracked
+                # schema (but it is provably gone afterwards, see below).
                 continue
             del result_columns[name]
-        return FrameType(columns=result_columns, strict=input_frame.strict, rest=input_frame.rest)
+        # Issue #78: every enumerable drop target is provably absent
+        # afterwards — even targets that were never pinned (they may have
+        # existed among the extras; either way the name is gone).
+        absent = input_frame.absent | set(targets) if input_frame.rest is not None else None
+        return FrameType(
+            columns=result_columns,
+            strict=input_frame.strict,
+            rest=input_frame.rest,
+            absent=absent,
+        )
 
     def _infer_rename_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
         if not node.args or not isinstance(node.args[0], ast.Dict):
@@ -5763,13 +5800,36 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         for old, new in mapping.items():
             if old not in input_frame.columns:
                 if input_frame.rest is not None:
+                    if old in input_frame.absent:
+                        # Negative knowledge (issue #78): renaming a
+                        # provably removed column always raises.
+                        self.errors.append(
+                            tag(
+                                PLY003,
+                                f"rename: column '{old}' not found — it was "
+                                f"removed earlier in this chain (drop/rename)",
+                            )
+                        )
+                        continue
                     # The source may exist among the open frame's unknown
                     # extras — assume the rename succeeded (ADR-0006) and
                     # pin the target name.
                     result_columns.setdefault(new, ColumnSpec(dtype=Unknown()))
                     continue
                 self.errors.append(tag(PLY003, f"rename: column '{old}' not found"))
-        return FrameType(columns=result_columns, strict=input_frame.strict, rest=input_frame.rest)
+        # Issue #78: a renamed-away old name is provably absent afterwards
+        # — unless some other entry renames INTO it (a swap). Rename
+        # targets are provably present, clearing any stale marks.
+        absent = None
+        if input_frame.rest is not None:
+            gone = set(mapping.keys()) - set(mapping.values())
+            absent = (input_frame.absent | gone) - set(mapping.values())
+        return FrameType(
+            columns=result_columns,
+            strict=input_frame.strict,
+            rest=input_frame.rest,
+            absent=absent,
+        )
 
     def _infer_cast_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
         if not node.args:
@@ -5791,6 +5851,17 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             spec = result_columns.get(col)
             if spec is None:
                 if input_frame.rest is not None:
+                    if col in input_frame.absent:
+                        # Negative knowledge (issue #78): casting a
+                        # provably removed column always raises.
+                        self.errors.append(
+                            tag(
+                                PLY004,
+                                f"cast: column '{col}' not found — it was removed "
+                                f"earlier in this chain (drop/rename)",
+                            )
+                        )
+                        continue
                     # The column may exist among the open frame's unknown
                     # extras — assume the cast succeeded (ADR-0006); its
                     # dtype is now exactly the target.
@@ -5816,7 +5887,12 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 dtype=_wrap_like(spec.dtype, target),
                 required=spec.required,
             )
-        return FrameType(columns=result_columns, strict=input_frame.strict, rest=input_frame.rest)
+        return FrameType(
+            columns=result_columns,
+            strict=input_frame.strict,
+            rest=input_frame.rest,
+            absent=input_frame.absent,
+        )
 
     def _infer_drop_nulls_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
         # subset can be passed positionally or as keyword
@@ -5851,7 +5927,12 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             for s in subset:
                 if s not in input_frame.columns:
                     self.errors.append(tag(PLY005, f"drop_nulls: column '{s}' not found"))
-        return FrameType(columns=result_columns, strict=input_frame.strict, rest=input_frame.rest)
+        return FrameType(
+            columns=result_columns,
+            strict=input_frame.strict,
+            rest=input_frame.rest,
+            absent=input_frame.absent,
+        )
 
     def _collect_concat_frames(self, list_node: ast.expr) -> list[FrameType] | None:
         """Resolve a list/tuple-of-frames argument used by ``pl.concat([...])``."""
@@ -6030,7 +6111,12 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             if outer_nullable:
                 elem_dtype = Nullable(elem_dtype)
             result_columns[col] = ColumnSpec(dtype=elem_dtype, required=spec.required)
-        return FrameType(columns=result_columns, strict=input_frame.strict, rest=input_frame.rest)
+        return FrameType(
+            columns=result_columns,
+            strict=input_frame.strict,
+            rest=input_frame.rest,
+            absent=input_frame.absent,
+        )
 
     def _infer_unpivot_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
         index: list[str] = []
@@ -6208,7 +6294,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             name: ColumnSpec(dtype=UInt32(), required=spec.required)
             for name, spec in input_frame.columns.items()
         }
-        return FrameType(columns, rest=input_frame.rest, is_lazy=input_frame.is_lazy)
+        return FrameType(
+            columns, rest=input_frame.rest, is_lazy=input_frame.is_lazy, absent=input_frame.absent
+        )
 
     def _infer_upsample_call(self, input_frame: FrameType, node: ast.Call) -> FrameType:
         """``df.upsample(time_column, every=..., group_by=...)`` (issue #74).
@@ -6247,7 +6335,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 columns[name] = spec
             else:
                 columns[name] = ColumnSpec(dtype=Nullable(spec.dtype), required=spec.required)
-        return FrameType(columns, rest=input_frame.rest, is_lazy=input_frame.is_lazy)
+        return FrameType(
+            columns, rest=input_frame.rest, is_lazy=input_frame.is_lazy, absent=input_frame.absent
+        )
 
     def _infer_join_where_call(self, input_frame: FrameType, node: ast.Call) -> FrameType:
         """``df.join_where(other, *predicates)`` — degrade, don't guess (issue #74).
@@ -6459,7 +6549,12 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 self.errors.append(tag(PLY006, f"with_row_index: column '{name}' already exists"))
                 continue
             result_columns[col_name] = spec
-        return FrameType(columns=result_columns, strict=input_frame.strict, rest=input_frame.rest)
+        return FrameType(
+            columns=result_columns,
+            strict=input_frame.strict,
+            rest=input_frame.rest,
+            absent=input_frame.absent,
+        )
 
 
 def _extract_function_signature(

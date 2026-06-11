@@ -93,6 +93,14 @@ def infer_col(column_name: str, frame: FrameType) -> DataType:
     dtype = frame.get_column_type(column_name)
     if dtype is None:
         if frame.rest is not None:
+            if column_name in frame.absent:
+                # Negative knowledge (issue #78): the column was provably
+                # removed earlier in the chain (drop / rename) — a
+                # guaranteed runtime ColumnNotFoundError.
+                raise ColumnNotFoundError(
+                    f"Column '{column_name}' not found — it was removed earlier "
+                    f"in this chain (drop/rename)"
+                )
             return Unknown()
         available = list(frame.columns.keys())
         raise ColumnNotFoundError(

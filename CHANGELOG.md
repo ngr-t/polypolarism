@@ -119,6 +119,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Open frames carry negative knowledge (issue #78, amending ADR-0006):
+  `drop("a")` / `rename({"a": "b"})` mark `a` as PROVABLY absent — a
+  later reference to it (expressions, `select`, a second `drop`, `cast`,
+  `drop_nulls` subsets, join keys) is a guaranteed runtime
+  ColumnNotFoundError and now errors, instead of being resurrected by
+  the open frame's row variable. Reintroducing the name
+  (`with_columns(a=...)`, a rename target, the join's other side) clears
+  the mark; rename swaps (`{"a": "b", "c": "a"}`) are handled; a
+  declared return column that was provably removed is a real
+  MissingColumn instead of an open-frame leniency. Selector-based drops
+  keep assumption semantics (unenumerable).
+- Open-left join pins no longer manufacture proofs (issue #79, amending
+  ADR-0006): joining a closed right frame onto an OPEN left frame pins
+  each right column's NAME (it provably exists — as the right column,
+  or as the left's colliding column after polars suffixes the right one
+  away) but degrades its dtype to `Unknown`; downstream diagnostics like
+  `.str` on a right `Int64` pin were not proofs (the code succeeds when
+  the left rest carries that name as String). Collisions with PINNED
+  left columns keep their deterministic suffix and precise dtypes, and
+  the closed-left case keeps every pin precise.
 - Cross-file schema inheritance resolves (issue #76): a class whose base
   is an IMPORTED schema (`from base import WithId` + `class
   Users(WithId)`) was not recognized as a schema at all — functions

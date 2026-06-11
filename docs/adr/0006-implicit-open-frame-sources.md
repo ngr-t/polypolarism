@@ -91,16 +91,32 @@ determines — existence and dtypes of unpinned columns. Discharging
 those assumptions for file-backed sources is C-12b (committed schema
 snapshots read from parquet/IPC footers).
 
+## Amendments
+
+- **Absence tracking ("lacks" constraints)** — implemented (issue #78).
+  `FrameType.absent` carries the open frame's negative knowledge: names
+  provably removed by `drop` / renamed away by `rename` (enumerable
+  targets only; selector-based drops keep assumption semantics). A later
+  reference is a provable error at every lookup site (expressions,
+  select, drop/rename/cast/drop_nulls, join keys, the declared-return
+  missing-column check, frame-argument subtyping); reintroducing the
+  name (`with_columns`, a rename target, a join's other side) clears the
+  mark. `FrameType.lacks(name)` is the shared "provably not a column"
+  predicate.
+- **Open-left join pins are collision-aware** (issue #79). A right-side
+  column pinned into a join result with an OPEN left frame may collide
+  with a left-rest extra at runtime — polars would suffix the *right*
+  column away and the unsuffixed name would be the left column. The name
+  provably exists either way, but the dtype is conditional: it degrades
+  to `Unknown` (no manufactured proofs). Collisions with PINNED left
+  names keep deterministic suffixes and precise dtypes; a closed left
+  frame keeps every pin precise.
+
 ## Future work
 
-- **Absence tracking ("lacks" constraints)**: after `drop("a")` on an
-  open frame, a later reference to `"a"` is provably dead (drop
-  succeeded ⟹ `a` existed ⟹ it is now gone) — needs negative row
-  knowledge the FrameType does not carry yet. Same for `rename`.
 - **Backward narrowing**: `df.select("a")` succeeding implies `df`
   itself has `a` for *subsequent* statements. Currently unobservable
-  (the pin would be `Unknown` and the frame stays open) — revisit if
-  absence tracking lands.
+  (the pin would be `Unknown` and the frame stays open).
 - **`pl.DataFrame(non_literal)`** could produce an open frame instead
   of untracked; left out to keep this slice focused on declared intent
   (annotations) and file sources.

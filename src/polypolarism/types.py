@@ -575,6 +575,17 @@ class FrameType:
     reason — coercion is consulted explicitly in the declared-vs-inferred
     dtype check (``checker.py``) and the function-argument check
     (``analyzer._is_frame_subtype``).
+
+    ``absent`` is the open frame's NEGATIVE knowledge (issue #78,
+    ADR-0006): column names provably not present — removed by ``drop`` /
+    renamed away by ``rename`` — even though ``rest`` says unknown extras
+    may exist. A later reference to an absent name is a guaranteed
+    runtime ColumnNotFoundError (conditional on reaching the line, the
+    ADR's standard), so it is a provable error. Reintroducing the name
+    (``with_columns``, a rename target) clears the mark. Meaningless on
+    closed frames (``rest is None`` — the pinned set is already exact)
+    and always empty there. Excluded from ``__eq__`` like ``is_lazy`` —
+    it is consulted explicitly at the column-lookup sites.
     """
 
     columns: dict[str, ColumnSpec]
@@ -582,6 +593,7 @@ class FrameType:
     rest: RowVar | None  # For future row polymorphism extension
     is_lazy: bool
     coerce: bool
+    absent: frozenset[str]
 
     def __init__(
         self,
@@ -590,6 +602,7 @@ class FrameType:
         rest: RowVar | None = None,
         is_lazy: bool = False,
         coerce: bool = False,
+        absent: frozenset[str] | set[str] | None = None,
     ) -> None:
         normalized: dict[str, ColumnSpec] = {}
         if columns:
@@ -608,6 +621,19 @@ class FrameType:
         self.rest = rest
         self.is_lazy = is_lazy
         self.coerce = coerce
+        # A pinned column trumps a stale absence mark; absence is only
+        # meaningful while the frame is open.
+        if absent and rest is not None:
+            self.absent = frozenset(absent) - normalized.keys()
+        else:
+            self.absent = frozenset()
+
+    def lacks(self, name: str) -> bool:
+        """True when ``name`` is PROVABLY not a column of this frame:
+        unpinned on a closed frame, or marked absent on an open one."""
+        if name in self.columns:
+            return False
+        return self.rest is None or name in self.absent
 
     def has_column(self, name: str) -> bool:
         """Check if a column exists."""
