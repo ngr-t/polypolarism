@@ -1067,6 +1067,42 @@ def _stdvar_ddof_zero(call: ast.Call) -> bool:
     return _int_literal(_call_arg(call, position=0, name="ddof")) == 0
 
 
+def _rolling_min_samples_total(method: str, call: ast.Call) -> bool:
+    """True when a ``rolling_*`` call provably fills every row's window.
+
+    Rows whose window holds fewer than ``min_samples`` (default:
+    ``window_size``) non-null values are null (probed, polars 1.41.2). The
+    window always contains the row itself, so an explicit literal
+    ``min_samples`` of 0/1 — or ``window_size=1`` with min_samples unset —
+    makes the rolling output total on a non-null receiver. ``min_samples``
+    is keyword-only; ``min_periods`` is its deprecated pre-1.21 spelling
+    (still accepted, with a warning). ``window_size`` is the first
+    positional parameter except for ``rolling_quantile(quantile,
+    interpolation, window_size, ...)``. Non-literal values stay
+    conservative (Nullable result).
+    """
+    ms_node = next(
+        (kw.value for kw in call.keywords if kw.arg in ("min_samples", "min_periods")),
+        None,
+    )
+    if ms_node is not None:
+        return _int_literal(ms_node) in (0, 1)
+    ws_position = 2 if method == "rolling_quantile" else 0
+    return _int_literal(_call_arg(call, position=ws_position, name="window_size")) == 1
+
+
+def _rolling_ddof_zero(call: ast.Call) -> bool:
+    """Explicit literal ``ddof=0`` on ``rolling_std``/``rolling_var``.
+
+    Unlike ``Expr.std``/``Expr.var``, the rolling variants take ``ddof``
+    as keyword-only (probed signature, polars 1.41.2). The default
+    ``ddof=1`` is null on 1-sample windows even with ``min_samples=1``;
+    ``ddof=0`` restores totality (1-sample window -> 0.0).
+    """
+    ddof_node = next((kw.value for kw in call.keywords if kw.arg == "ddof"), None)
+    return _int_literal(ddof_node) == 0
+
+
 def _time_zone_arg_dtype(method: str, call_node: ast.Call | None) -> DataType:
     """Result dtype of ``dt.replace_time_zone(...)`` / ``dt.convert_time_zone(...)``
     on a Datetime receiver (issue #50 collateral).
@@ -3048,11 +3084,28 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                     return receiver_name, Nullable(widened)
             return receiver_name, Nullable(inner)
 
-        # Rolling reductions returning Float64.
+        # Rolling reductions returning Float64. Rows whose window holds
+        # fewer than ``min_samples`` (default: window_size) values are null
+        # (probed 1.41.2; issue #57), so the result is Nullable unless the
+        # call provably fills every window (see _rolling_min_samples_total).
+        # rolling_std/rolling_var additionally need an explicit ``ddof=0``:
+        # the default ddof=1 is null on 1-sample windows. String / Null
+        # receivers are accepted by polars but yield an ALL-null Float64
+        # column (probed), so they stay Nullable regardless; a Nullable
+        # receiver stays Nullable too (an all-null window is null even with
+        # min_samples=1).
         if method in self._ROLLING_FLOAT_METHODS and receiver_type is not None:
-            if isinstance(receiver_type, Nullable):
-                return receiver_name, Nullable(Float64())
-            return receiver_name, Float64()
+            inner = receiver_type.inner if isinstance(receiver_type, Nullable) else receiver_type
+            total = _rolling_min_samples_total(method, node)
+            if method in ("rolling_std", "rolling_var"):
+                total = total and _rolling_ddof_zero(node)
+            if (
+                total
+                and not isinstance(receiver_type, Nullable)
+                and not isinstance(inner, (Utf8, Null))
+            ):
+                return receiver_name, Float64()
+            return receiver_name, Nullable(Float64())
 
         # ``rank(method=...)`` — the ranking method decides the dtype: the
         # default "average" returns Float64; the count-based methods return
