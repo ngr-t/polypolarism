@@ -662,3 +662,97 @@ class TestStdlibImportNotFollowed:
         results = check_file(tmp_path / "app.py")
         assert len(results) == 1
         assert results[0].passed, results[0].errors
+
+
+class TestAliasedBaseRepeatImport:
+    """Issue #80: the alias registration lived behind the ``visited``
+    skip in ``_merge_imports`` — a module imported by an EARLIER import
+    statement never got its later statements' aliases registered, so
+    ``from m import Base as B0`` + ``class C(B0)`` resolved only when it
+    was the module's first import statement."""
+
+    def _base_file(self, tmp_path: Path) -> None:
+        _project_marker(tmp_path)
+        _write(
+            tmp_path / "_mod_base.py",
+            """
+            import pandera.polars as pa
+
+
+            class Base(pa.DataFrameModel):
+                id: int
+                x: str
+
+                class Config:
+                    strict = True
+            """,
+        )
+
+    def test_alias_in_second_import_statement_of_same_module(self, tmp_path: Path):
+        self._base_file(tmp_path)
+        source = textwrap.dedent(
+            """
+            from _mod_base import Base
+            from _mod_base import Base as B0
+
+
+            class FromAlias(B0):
+                w: int
+            """
+        )
+        registry = collect_schemas_with_imports(ast.parse(source), tmp_path / "app.py")
+        from_alias = registry.get("FromAlias")
+        assert from_alias is not None
+        assert set(from_alias.columns) == {"id", "x", "w"}
+
+    def test_alias_after_plain_module_import(self, tmp_path: Path):
+        # ``import _mod_base`` (the #68 dotted-key path) does not mark the
+        # file visited for _merge_imports, but mixed forms must not
+        # interfere either way.
+        self._base_file(tmp_path)
+        source = textwrap.dedent(
+            """
+            import _mod_base
+            from _mod_base import Base as B0
+
+
+            class FromAlias(B0):
+                w: int
+            """
+        )
+        registry = collect_schemas_with_imports(ast.parse(source), tmp_path / "app.py")
+        from_alias = registry.get("FromAlias")
+        assert from_alias is not None
+        assert set(from_alias.columns) == {"id", "x", "w"}
+
+    def test_issue_80_end_to_end_violation_detected(self, tmp_path: Path):
+        self._base_file(tmp_path)
+        _write(
+            tmp_path / "app.py",
+            """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+            from _mod_base import Base
+            from _mod_base import Base as B0
+
+
+            class Src(pa.DataFrameModel):
+                a: int
+                b: str
+
+
+            class FromAlias(B0):
+                w: int
+
+
+            def t4_aliased_base(df: DataFrame[Src]) -> DataFrame[FromAlias]:
+                return df.select(id=pl.col("b"), x=pl.col("b"), w=pl.col("a"))
+            """,
+        )
+        results = check_file(tmp_path / "app.py")
+        target = [r for r in results if r.function_name == "t4_aliased_base"]
+        assert len(target) == 1
+        assert not target[0].passed
+        assert any("id" in str(e) for e in target[0].errors), target[0].errors
+        assert not any("PLW006" in str(w) for w in target[0].warnings), target[0].warnings

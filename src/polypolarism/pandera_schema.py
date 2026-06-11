@@ -274,13 +274,20 @@ def _merge_imports(
     registry: SchemaRegistry,
     visited: set[Path],
     imported_trees: list[ast.Module] | None = None,
+    sub_registries: dict[Path, SchemaRegistry | None] | None = None,
 ) -> None:
     """Recursively merge schemas from project-local imports into ``registry``.
 
     Each successfully parsed imported tree is appended to
     ``imported_trees`` (when given) so the cross-file inheritance pass
     (issue #76) can re-scan it against the fully merged registry.
+    ``sub_registries`` caches each file's pass-1 registry per invocation
+    so REPEAT import statements of an already-visited module can still
+    register their alias bindings (issue #80); ``None`` marks a file
+    that failed to parse.
     """
+    if sub_registries is None:
+        sub_registries = {}
     for node in tree.body:
         if not isinstance(node, ast.ImportFrom):
             continue
@@ -291,31 +298,44 @@ def _merge_imports(
             real = resolved.resolve()
         except OSError:
             continue
-        if real in visited:
-            continue
-        visited.add(real)
-        try:
-            sub_source = resolved.read_text()
-            sub_tree = ast.parse(sub_source)
-        except (OSError, UnicodeDecodeError, SyntaxError):
-            continue
-        if imported_trees is not None:
-            imported_trees.append(sub_tree)
+        first_visit = real not in visited
+        if first_visit:
+            visited.add(real)
+            try:
+                sub_source = resolved.read_text()
+                sub_tree = ast.parse(sub_source)
+            except (OSError, UnicodeDecodeError, SyntaxError):
+                sub_registries[real] = None
+                continue
+            if imported_trees is not None:
+                imported_trees.append(sub_tree)
+            sub_registry = collect_schemas(sub_tree)
+            sub_registries[real] = sub_registry
+            for name, schema in sub_registry.schemas.items():
+                registry.schemas.setdefault(name, schema)
+        else:
+            # A module already merged by an EARLIER import statement: the
+            # broad merge and the recursion are done, but THIS statement's
+            # alias bindings still need registering (issue #80 — the skip
+            # used to drop them, breaking ``from m import Base as B0`` +
+            # ``class C(B0)`` whenever m had been imported before).
+            cached = sub_registries.get(real)
+            if cached is None:
+                continue
+            sub_registry = cached
 
-        sub_registry = collect_schemas(sub_tree)
-        for name, schema in sub_registry.schemas.items():
-            registry.schemas.setdefault(name, schema)
         # ``from X import Y as Z`` binds Z — register the alias so both
         # ``DataFrame[Z]`` annotations and ``class C(Z)`` bases resolve
-        # (issue #76).
+        # (issues #76/#80).
         for alias in node.names:
             if alias.asname is not None:
                 target = sub_registry.schemas.get(alias.name)
                 if target is not None:
                     registry.schemas.setdefault(alias.asname, target)
 
-        # Recurse so chains like app -> schemas -> base resolve fully.
-        _merge_imports(sub_tree, resolved, registry, visited, imported_trees)
+        if first_visit:
+            # Recurse so chains like app -> schemas -> base resolve fully.
+            _merge_imports(sub_tree, resolved, registry, visited, imported_trees, sub_registries)
 
 
 def _merge_module_imports(

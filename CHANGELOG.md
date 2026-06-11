@@ -119,6 +119,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Aliased base-class imports resolve regardless of import order (issue
+  #80, boundary of #76): the alias registration lived behind the
+  `visited` skip in the import merger, so `from m import Base as B0` +
+  `class C(B0)` only worked when that was the module's FIRST import
+  statement — any earlier import of `m` dropped the alias, leaving the
+  subclass unregistered and its functions skipped with PLW006. Each
+  file's pass-1 registry is now cached per invocation so repeat import
+  statements still bind their aliases.
+
 - Open frames carry negative knowledge (issue #78, amending ADR-0006):
   `drop("a")` / `rename({"a": "b"})` mark `a` as PROVABLY absent — a
   later reference to it (expressions, `select`, a second `drop`, `cast`,
