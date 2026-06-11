@@ -1,0 +1,6 @@
+pick: FAIL
+  error: Column 'b' has type Float64, but declared type is Int64
+scale: FAIL
+  error: Column 'b' has type Float64, but declared type is Int64
+totals: FAIL
+  error: Column 'b' has type Float64, but declared type is Int64
