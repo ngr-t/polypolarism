@@ -20,7 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - New warning `PLW007`: a method polypolarism does not model on a
   precisely-known receiver now warns that the dtype degrades to
   `Unknown` (one warning per chain; a `.cast(...)` directly after the
-  call retracts it).
+  call retracts it). Frame-level methods probed to return a
+  DataFrame/LazyFrame warn too — the variable silently untracks
+  otherwise — while terminal methods (`to_dicts`, `write_*`, ...) stay
+  silent; wrapping the call in `Schema.validate(...)` retracts the
+  frame-level warning.
 - `arr.eval(...)` inference: `as_list=True` yields `List(body dtype)`,
   `as_list=False`/omitted yields `Array(body dtype)`; the eval body is
   now type-checked in all forms (probed on polars 1.41.2).

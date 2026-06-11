@@ -74,12 +74,15 @@ Status legend: `[ ]` open / `[x]` done / `[-]` deliberately deferred.
   `mean(Float16)` (valid in select → Float16) are falsely flagged.
   CAUTION (probed 1.41.2): `group_by().agg(mean)` on Float16 PANICS in
   rust — any fix must distinguish select vs agg contexts.
-- [ ] **N-3: PLW007 for unmodeled FRAME-level methods.** The B-4 warning
-  covers expression chains and namespaces only. An unmodeled frame method
-  (`df.unknown_method()`) silently untracks the variable. Warning there
-  requires a probed table of terminal methods that legitimately return
-  non-frames (`to_dicts`, `write_*`, `item`, `height`, ...), otherwise
-  every terminal call warns.
+- [x] **N-3: PLW007 for unmodeled FRAME-level methods.** Done 2026-06-11:
+  probed frame-returning sets (`EAGER/LAZY_FRAME_RETURNING_METHODS`,
+  73/66 names from signature return annotations on 1.41.2) gate the
+  warning — terminal methods and unknown names stay silent.
+  `Schema.validate(<unmodeled call>)` retracts the warning (the frame
+  variant of the cast retraction). Per-call-site dedupe prevents
+  double-firing on re-analyzed nodes. Follow-up noted by the
+  implementation: `df.x().pipe(Schema.validate)` does not retract (no
+  evidence of need; revisit if it shows up).
 
 ## C. Long-term (design decisions required)
 

@@ -78,17 +78,42 @@ polypolarism your_module.py
 
 ## Schema declaration
 
-Use Pandera class-based schemas. Field annotations accept Python builtins
-(`int`, `str`, `float`, `bool`), polars dtype classes (`pl.Int64`,
-`pl.Float64`, `pl.UInt32`, ...), `Optional[T]`, and
-`Annotated[pl.List, pl.Int64()]` / `Annotated[pl.Array, pl.Int64(), 3]` /
-`Annotated[pl.Struct, {...}]` (or the equivalent `pl.List(...)` /
-`pl.Array(...)` / `pl.Struct(...)` call forms) for nested types. `List`
-and `Array` are distinct dtypes — polars does not interchange them — and
-the `Array` width is tracked: a declared `pl.Array(pl.Int64, 3)` against
-an inferred width 5 is an error (pandera rejects the mismatch and
-`coerce` cannot repair it). A width the analyzer cannot resolve acts as
-a wildcard.
+Use Pandera class-based schemas (`pa.DataFrameModel`; the legacy
+`SchemaModel` name is also accepted). Every supported field-annotation
+form:
+
+| Form | Example | Parses to |
+|---|---|---|
+| Python builtins | `int`, `str`, `float`, `bool`, `bytes` | `Int64`, `Utf8`, `Float64`, `Boolean`, `Binary` |
+| stdlib temporal, bare | `date`, `datetime`, `timedelta` (via `from datetime import ...`) | `Date`, `Datetime`, `Duration` |
+| stdlib temporal, qualified | `datetime.date`, `dt.datetime`, ... (any non-`pl` prefix) | same as bare |
+| polars dtype classes | `pl.Int8`–`pl.Int128`, `pl.UInt8`–`pl.UInt128`, `pl.Float16/32/64`, `pl.String`/`pl.Utf8`, `pl.Boolean`, `pl.Binary`, `pl.Date`, `pl.Datetime`, `pl.Time`, `pl.Duration`, `pl.Categorical`, `pl.Enum`, `pl.Decimal`, `pl.Null` — with or without `()` | the corresponding dtype |
+| parametrized `Datetime` | `pl.Datetime("us", "UTC")`, `pl.Datetime(time_zone="UTC")` | `Datetime[UTC]` (`time_unit` is not modeled; a non-literal `time_zone` degrades to `Unknown`) |
+| parametrized `Decimal` | `pl.Decimal(20, 4)`, `pl.Decimal(scale=2)` | `Decimal(p, s)`; omitted args take polars' defaults (38, 0) |
+| `Enum` with variants | `pl.Enum(["new", "paid"])` | `Enum` (the variant list is not yet inspected) |
+| `List` call form | `pl.List(pl.Int64)` | `List[Int64]` |
+| `Array` call form | `pl.Array(pl.Int64, 3)`, `pl.Array(pl.Int64, shape=3)`, `pl.Array(pl.Int64, (3,))` | `Array[Int64, 3]` — the width is tracked; a multi-dimensional or non-literal `shape` leaves the width a wildcard |
+| `Struct` call form | `pl.Struct({"a": pl.Utf8, "b": pl.Float64()})` | `Struct{a: Utf8, b: Float64}` |
+| `Annotated` containers | `Annotated[pl.List, pl.Int64()]`, `Annotated[pl.Array, pl.Int64(), 3]`, `Annotated[pl.Struct, {...}]` | same as the call forms |
+| bare containers | `pl.List`, `pl.Array`, `pl.Struct` | `List[Unknown]`, `Array[Unknown]`, `Unknown` (no element/field info) |
+| `Series` wrapper | `Series[T]` (bare or qualified: `pa.typing.Series[T]`, ...) | unwraps to `T` |
+| optional column | `Optional[T]`, `T \| None` | the **column may be absent** (`required=False`) |
+| nullable values | `T = pa.Field(nullable=True)` | `Nullable(T)` — the **values may be null** |
+
+Containers nest arbitrarily (`pl.List(pl.Array(pl.Int8, 4))`,
+`pl.Struct({"xs": pl.List(pl.Int64)})`). `Optional[T]` (column may be
+missing) and `pa.Field(nullable=True)` (values may be null) are
+independent and combine. `List` and `Array` are distinct dtypes — polars
+does not interchange them — and the `Array` width is checked: a declared
+`pl.Array(pl.Int64, 3)` against an inferred width 5 is an error (pandera
+rejects the mismatch and `coerce` cannot repair it).
+
+Frame-level annotations accept `DataFrame[Schema]` and
+`LazyFrame[Schema]`, on function parameters and return types as the
+checked contract, and on local variables (`x: DataFrame[S] = ...`) where
+the annotation is checked against the inferred right-hand side
+(ADR-0005: a pure narrowing assertion warns `PLW008`; an unrelated
+re-interpretation is a `PLY033` error).
 
 ```python
 class Example(pa.DataFrameModel):
