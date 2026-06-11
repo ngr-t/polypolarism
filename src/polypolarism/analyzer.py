@@ -23,8 +23,10 @@ from polypolarism.compat.polars_api import (
     DT_NAMESPACE_PRESERVING,
     DT_NAMESPACE_RETURN,
     DTYPE_NAME_MAP,
+    EAGER_FRAME_RETURNING_METHODS,
     EAGER_ONLY_METHODS,
     IDENTITY_FRAME_METHODS,
+    LAZY_FRAME_RETURNING_METHODS,
     LAZY_ONLY_METHODS,
     LIST_NAMESPACE_ELEMENT_RETURN,
     LIST_NAMESPACE_PRESERVING,
@@ -162,6 +164,8 @@ class AnalysisError(Exception):
 _IDENTITY_FRAME_METHODS = IDENTITY_FRAME_METHODS
 _LAZY_ONLY_METHODS = LAZY_ONLY_METHODS
 _EAGER_ONLY_METHODS = EAGER_ONLY_METHODS
+_EAGER_FRAME_RETURNING_METHODS = EAGER_FRAME_RETURNING_METHODS
+_LAZY_FRAME_RETURNING_METHODS = LAZY_FRAME_RETURNING_METHODS
 
 
 # Map ``pl.<Name>`` attribute references to our DataType. Single source of
@@ -348,13 +352,23 @@ def _base_is_unknown(dtype: DataType) -> bool:
     return isinstance(inner, Unknown)
 
 
-def _unmodeled_method_warning(call_desc: str) -> str:
-    """PLW007 text for an unmodeled method call (backlog B-4).
+def _unmodeled_method_warning(call_desc: str, *, frame: bool = False) -> str:
+    """PLW007 text for an unmodeled method call (backlog B-4 / N-3).
 
-    Emitted only when the receiver dtype was precisely known — the call is
-    the exact point where inference degrades to Unknown and downstream
-    dtype checks weaken.
+    Emitted only when the receiver was precisely known — the call is the
+    exact point where inference gives up and downstream checks weaken.
+    The ``frame`` variant covers frame-level methods, where the whole
+    variable untracks (and a ``.cast(...)`` cannot repair it — only a
+    schema validation can).
     """
+    if frame:
+        return tag(
+            PLW007,
+            f"`{call_desc}` is not modeled by polypolarism — the frame's "
+            f"schema is no longer tracked and downstream checks go silent. "
+            f"Validate the result against a schema "
+            f"(`Schema.validate(...)`) to keep checking precise.",
+        )
     return tag(
         PLW007,
         f"`{call_desc}` is not modeled by polypolarism — the result dtype "
@@ -3791,6 +3805,12 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         # Bare ``Schema.validate(df)`` narrowing only fires at the function's
         # top level. We toggle this off when descending into if/for/while/try.
         self._narrowing_enabled = True
+        # Source positions (lineno, col_offset, method) that already got the
+        # frame-level PLW007 — some call paths analyze the same node twice
+        # (``.group_by(...).agg(...)`` infers the grouped receiver both for
+        # its laziness and inside ``_infer_agg_call``), and the warning must
+        # fire once per source call, not once per analysis.
+        self._warned_frame_calls: set[tuple[int, int, str]] = set()
 
     def _visit_with_narrowing_disabled(self, node: ast.AST) -> None:
         prev = self._narrowing_enabled
@@ -4361,6 +4381,30 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     return self._infer_pivot_call(receiver_type, node)
                 elif method_name in _IDENTITY_FRAME_METHODS:
                     return receiver_type
+                elif method_name in (
+                    _LAZY_FRAME_RETURNING_METHODS
+                    if receiver_type.is_lazy
+                    else _EAGER_FRAME_RETURNING_METHODS
+                ):
+                    # Unmodeled frame-returning method on a tracked receiver:
+                    # the variable silently untracks and every downstream
+                    # check dies quietly — warn (backlog N-3). The probed
+                    # frame-returning gate keeps terminal methods
+                    # (``to_dicts``, ``write_*``, ``height``, ...) and
+                    # unknown names (typos, plugin namespaces) silent; the
+                    # receiver's laziness picks the probe set so a
+                    # wrong-side call (eager-only method on a LazyFrame)
+                    # keeps its precise PLY030/PLY031 without a warning
+                    # piled on top. Deduped per source call: ``.agg()``
+                    # chains analyze the grouped receiver twice (laziness
+                    # probe + _infer_agg_call).
+                    key = (node.lineno, node.col_offset, method_name)
+                    if key not in self._warned_frame_calls:
+                        self._warned_frame_calls.add(key)
+                        self.warnings.append(
+                            _unmodeled_method_warning(f".{method_name}()", frame=True)
+                        )
+                    return None
 
         return None
 
@@ -4400,7 +4444,18 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         ft = self.schema_registry.to_frame_type(schema_node.id)
         if ft is None or not node.args:
             return ft
+        # The validation retypes the result to the schema — exactly the
+        # repair PLW007 recommends — so a PLW007 emitted while analyzing the
+        # wrapped argument (``Schema.validate(df.interpolate())``) is
+        # retracted: the frame-level analog of the expression-level cast
+        # retraction (backlog N-3). A warning fired on an EARLIER statement
+        # stands — between that call and this validate the variable really
+        # was untracked.
+        warnings_before_arg = len(self.warnings)
         arg_type = self._infer_expr_type(node.args[0])
+        self.warnings[warnings_before_arg:] = [
+            w for w in self.warnings[warnings_before_arg:] if not w.startswith(f"[{PLW007}]")
+        ]
         if arg_type is not None:
             ft.is_lazy = arg_type.is_lazy
         return ft

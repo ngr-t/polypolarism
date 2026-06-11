@@ -111,6 +111,7 @@ Rules with both sides present (valid twin -> invalid twin):
 | struct rename_fields | `struct_rename_fields` | `struct_rename_wrong_dtype` |
 | hstack | `m4_unpivot_and_hstack` | `m4_hstack_wrong_dtype` |
 | unmodeled-method degradation (PLW007) | `unmodeled_method_pinned` (cast retracts the warning) | `warning/unmodeled_method` (a warning, not an error — Unknown passes by design) |
+| unmodeled FRAME method untracks (PLW007) | `unmodeled_frame_method_validated` (validate retracts the warning; terminal `to_dicts` stays silent) | `warning/unmodeled_frame_method` (a warning, not an error — the untracked frame passes by design) |
 
 Intentionally unpaired:
 
