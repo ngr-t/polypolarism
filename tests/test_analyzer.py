@@ -12,6 +12,7 @@ from polypolarism.analyzer import (
 )
 from polypolarism.types import (
     Array,
+    Binary,
     Boolean,
     Categorical,
     Date,
@@ -2939,6 +2940,77 @@ class TestRollingStrictDtypes:
 
     def test_rolling_sum_unknown_receiver_stays_silent(self):
         analyzer = self._run(Unknown(), "rolling_sum")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["c"].dtype == Unknown()
+
+
+class TestNumericElementwiseStrictDtypes:
+    """``round``/``floor``/``ceil``/``clip``/``abs``/``sign``/``neg`` are
+    strictly typed instead of blindly dtype-preserving (issue #62).
+
+    Probed (polars 1.41.2) receiver-dtype matrix — invalid receivers raise
+    InvalidOperationError at runtime, flagged PLY016, output degrades to
+    Unknown:
+
+    - round/floor/ceil: every non-numeric dtype (Utf8, Binary, Boolean,
+      Date, Datetime, Time, Duration, Categorical, Enum, List, Array,
+      Struct, Null); Decimal and all ints/uints/floats are accepted.
+    - clip: "only supports physical numeric types" — rejects Utf8, Binary,
+      Boolean, List, Array, Struct, Null even with matching-dtype literal
+      bounds; temporals / Decimal / Categorical / Enum are physically
+      numeric and accepted.
+    - abs: rejects the round set minus Duration/Decimal (both preserved).
+    - sign: rejects the round set (Duration included); Decimal preserved.
+    - neg: rejects the abs set PLUS every unsigned int and Int128
+      ("`neg` operation not supported for dtype `u128`").
+    - shrink_dtype stays unchecked: deprecated no-op in 1.41.2, accepts
+      every dtype.
+    """
+
+    def _run(self, receiver, call: str):
+        frame = FrameType({"v": receiver})
+        return _run_body(frame, f'out = df.select(c=pl.col("v").{call})')
+
+    @pytest.mark.parametrize(
+        ("call", "receiver"),
+        [
+            ("round(1)", Utf8()),
+            ("round(1)", Boolean()),
+            ("round(1)", Datetime()),
+            ("round(1)", Duration()),
+            ("round(1)", Null()),
+            ("floor()", Utf8()),
+            ("ceil()", ListT(Int64())),
+            ("clip(0, 1)", Utf8()),
+            ("clip(0, 1)", Boolean()),
+            ("clip(0, 1)", Null()),
+            ("abs()", Utf8()),
+            ("abs()", Date()),
+            ("abs()", Binary()),
+            ("sign()", Duration()),
+            ("neg()", UInt32()),
+            ("neg()", UInt64()),
+            ("neg()", Int128()),
+            ("neg()", Categorical()),
+        ],
+        ids=lambda p: str(p),
+    )
+    def test_invalid_receiver_flags_ply016_and_degrades(self, call, receiver):
+        analyzer = self._run(receiver, call)
+        assert len(analyzer.errors) == 1, analyzer.errors
+        err = analyzer.errors[0]
+        method = call.split("(")[0]
+        assert "PLY016" in err and method in err, err
+        assert "InvalidOperationError" in err, err
+        assert analyzer.var_types["out"].columns["c"].dtype == Unknown()
+
+    def test_nullable_invalid_receiver_still_flags(self):
+        analyzer = self._run(Nullable(Utf8()), "round(1)")
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY016" in analyzer.errors[0], analyzer.errors
+
+    def test_unknown_receiver_stays_silent(self):
+        analyzer = self._run(Unknown(), "round(1)")
         assert analyzer.errors == [], analyzer.errors
         assert analyzer.var_types["out"].columns["c"].dtype == Unknown()
 

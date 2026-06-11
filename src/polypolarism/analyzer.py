@@ -2022,6 +2022,81 @@ class ExpressionAnalyzer(ast.NodeVisitor):
     # other accepted receiver keeps its dtype (incl. Int128/UInt128).
     _ROLLING_SUM_INT64_RECEIVERS = (Int8, Int16, UInt8, UInt16)
 
+    # ---- numeric-only elementwise methods (issue #62) -----------------------
+    # Probed (polars 1.41.2) receiver-dtype matrix for the numeric-ish
+    # members of ``_DTYPE_PRESERVING_METHODS``. Receivers listed here raise
+    # InvalidOperationError at runtime (e.g. "rounding ('half_to_even') can
+    # only be used on numeric types") -> PLY016 and the output degrades to
+    # Unknown. Deliberately unlisted:
+    # - round/floor/ceil on Decimal(p, s) -> Decimal(p, s) (preserving;
+    #   floor/ceil are NOT float-only and are int-identity);
+    # - abs/neg on Duration and Decimal -> preserving;
+    # - clip accepts everything physically numeric — temporals, Decimal,
+    #   Categorical and Enum included (probed with numeric AND with
+    #   matching-dtype literal bounds; bare strings bounds are column refs).
+    #   Bound-dtype interactions are out of scope: only receivers that
+    #   reject every bound are flagged;
+    # - sign on floats keeps the float dtype in 1.41.2 (no Int8 cast);
+    # - shrink_dtype: deprecated no-op in 1.41.2, accepts every dtype.
+    _NON_NUMERIC_DTYPES = (
+        Utf8,
+        Binary,
+        Boolean,
+        Date,
+        Datetime,
+        Time,
+        Duration,
+        Categorical,
+        Enum,
+        ListT,
+        Array,
+        Struct,
+        Null,
+    )
+    _ELEMENTWISE_INVALID_RECEIVERS: dict[str, tuple[type[DataType], ...]] = {
+        "round": _NON_NUMERIC_DTYPES,
+        "floor": _NON_NUMERIC_DTYPES,
+        "ceil": _NON_NUMERIC_DTYPES,
+        "clip": (Utf8, Binary, Boolean, ListT, Array, Struct, Null),
+        "abs": (
+            Utf8,
+            Binary,
+            Boolean,
+            Date,
+            Datetime,
+            Time,
+            Categorical,
+            Enum,
+            ListT,
+            Array,
+            Struct,
+            Null,
+        ),
+        "sign": _NON_NUMERIC_DTYPES,
+        # neg additionally rejects EVERY unsigned int and Int128
+        # ("`neg` operation not supported for dtype `u128`" / `i128`).
+        "neg": (
+            Utf8,
+            Binary,
+            Boolean,
+            Date,
+            Datetime,
+            Time,
+            Categorical,
+            Enum,
+            ListT,
+            Array,
+            Struct,
+            Null,
+            UInt8,
+            UInt16,
+            UInt32,
+            UInt64,
+            UInt128,
+            Int128,
+        ),
+    }
+
     # Shift-like methods: receiver dtype, but head positions become NULL.
     _SHIFT_LIKE_METHODS = frozenset({"shift", "diff", "pct_change"})
 
@@ -3197,8 +3272,26 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 return receiver_name, None
             return receiver_name, None
 
-        # Dtype-preserving methods.
+        # Dtype-preserving methods. The numeric-only elementwise members
+        # are strictly typed (issue #62) — see the probed matrix on
+        # ``_ELEMENTWISE_INVALID_RECEIVERS``. An invalid receiver dtype is
+        # a guaranteed runtime InvalidOperationError -> PLY016 and the
+        # output degrades to Unknown; Unknown receivers stay silent.
         if method in self._DTYPE_PRESERVING_METHODS and receiver_type is not None:
+            invalid = self._ELEMENTWISE_INVALID_RECEIVERS.get(method)
+            if invalid is not None:
+                inner = (
+                    receiver_type.inner if isinstance(receiver_type, Nullable) else receiver_type
+                )
+                if isinstance(inner, invalid):
+                    self.errors.append(
+                        tag(
+                            PLY016,
+                            f"{method}: operation not supported for dtype {inner} — "
+                            f"polars raises InvalidOperationError at runtime",
+                        )
+                    )
+                    return receiver_name, None
             return receiver_name, receiver_type
 
         # Cumulative reducers are strictly typed (issue #49) — see the
