@@ -1807,14 +1807,11 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             "neg",
             "shrink_dtype",
             "rechunk",
-            # Window — preserve receiver dtype. (``over`` is absent: its
-            # dtype depends on ``mapping_strategy`` and is handled by a
-            # dedicated branch — issues #32/#45. The cum_* family is
-            # absent too: it is strictly typed — see
-            # ``_CUM_INVALID_RECEIVERS`` below, issue #49.)
-            "rolling_sum",
-            "rolling_min",
-            "rolling_max",
+            # Window methods are absent: ``over``'s dtype depends on
+            # ``mapping_strategy`` (issues #32/#45), the cum_* family is
+            # strictly typed (``_CUM_INVALID_RECEIVERS`` below, issue #49),
+            # and rolling_sum/min/max are strictly typed AND windowed-
+            # nullable (``_ROLLING_INVALID_RECEIVERS`` below, issue #57).
             "set_sorted",
             "reverse",
         }
@@ -1826,9 +1823,11 @@ class ExpressionAnalyzer(ast.NodeVisitor):
     # ("'cum_sum' operation not supported for dtype 'str'") -> PLY016 and
     # the output degrades to Unknown. ``cum_count`` is deliberately absent:
     # it returns UInt32 for EVERY receiver dtype (probed incl. String /
-    # List / Struct / Null) and keeps its own branch. The rolling_* family
-    # is NOT mirrored here — polars accepts e.g. rolling_mean on String
-    # (all-null Float64, probed), so it stays in the silent path.
+    # List / Struct / Null) and keeps its own branch. The Float64-returning
+    # rolling family (rolling_mean & co.) is NOT mirrored here — polars
+    # accepts e.g. rolling_mean on String (all-null Float64, probed), so it
+    # stays in the silent path; rolling_sum/min/max ARE strictly typed —
+    # see ``_ROLLING_INVALID_RECEIVERS`` below (issue #57).
     # Array receivers probed too (issue #53): cum_sum/cum_prod/cum_min/
     # cum_max all raise "operation not supported for dtype array[...]";
     # cum_count is fine (UInt32 for every receiver, Array included).
@@ -1859,6 +1858,36 @@ class ExpressionAnalyzer(ast.NodeVisitor):
     # cum_prod computes in Int64 for every int dtype narrower than UInt64
     # (UInt64 / Int128 / UInt128 keep their dtype); Boolean also -> Int64.
     _CUM_PROD_INT64_RECEIVERS = (Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, Boolean)
+
+    # ---- dtype-carrying rolling reducers (issue #57; deferred from #49) -----
+    # Probed (polars 1.41.2) receiver-dtype matrix for rolling_sum/min/max.
+    # Receivers listed here raise InvalidOperationError at runtime ->
+    # PLY016 and the output degrades to Unknown. rolling_min/max accept
+    # Boolean and the temporals (dtype-preserving); rolling_sum rejects
+    # them all except Boolean (-> UInt32).
+    _ROLLING_INVALID_RECEIVERS: dict[str, tuple[type[DataType], ...]] = {
+        "rolling_sum": (
+            Utf8,
+            Date,
+            Datetime,
+            Time,
+            Duration,
+            Decimal,
+            ListT,
+            Array,
+            Struct,
+            Categorical,
+            Enum,
+            Null,
+        ),
+        "rolling_min": (Utf8, Decimal, ListT, Array, Struct, Categorical, Enum, Null),
+        "rolling_max": (Utf8, Decimal, ListT, Array, Struct, Categorical, Enum, Null),
+    }
+
+    # Probed-valid non-preserving cells: rolling_sum upcasts narrow ints to
+    # Int64 (overflow guard, mirrors cum_sum) and Boolean to UInt32; every
+    # other accepted receiver keeps its dtype (incl. Int128/UInt128).
+    _ROLLING_SUM_INT64_RECEIVERS = (Int8, Int16, UInt8, UInt16)
 
     # Shift-like methods: receiver dtype, but head positions become NULL.
     _SHIFT_LIKE_METHODS = frozenset({"shift", "diff", "pct_change"})
@@ -3106,6 +3135,37 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             ):
                 return receiver_name, Float64()
             return receiver_name, Nullable(Float64())
+
+        # Dtype-carrying rolling reducers (rolling_sum/min/max): strictly
+        # typed receivers — the probed matrix on
+        # ``_ROLLING_INVALID_RECEIVERS`` flags PLY016 and degrades the
+        # output to Unknown (issue #57; the family was deferred in #49).
+        # Valid cells follow the same windowed-nullability rule as the
+        # Float64 family above; rolling_sum upcasts narrow ints to Int64
+        # and Boolean to UInt32 (probed, mirrors cum_sum). Unknown
+        # receivers stay silent.
+        if method in self._ROLLING_INVALID_RECEIVERS and receiver_type is not None:
+            inner = receiver_type.inner if isinstance(receiver_type, Nullable) else receiver_type
+            if isinstance(inner, Unknown):
+                return receiver_name, receiver_type
+            if isinstance(inner, self._ROLLING_INVALID_RECEIVERS[method]):
+                self.errors.append(
+                    tag(
+                        PLY016,
+                        f"{method}: operation not supported for dtype {inner} — "
+                        f"polars raises InvalidOperationError at runtime",
+                    )
+                )
+                return receiver_name, None
+            result_inner: DataType = inner
+            if method == "rolling_sum":
+                if isinstance(inner, self._ROLLING_SUM_INT64_RECEIVERS):
+                    result_inner = Int64()
+                elif isinstance(inner, Boolean):
+                    result_inner = UInt32()
+            if isinstance(receiver_type, Nullable) or not _rolling_min_samples_total(method, node):
+                return receiver_name, Nullable(result_inner)
+            return receiver_name, result_inner
 
         # ``rank(method=...)`` — the ranking method decides the dtype: the
         # default "average" returns Float64; the count-based methods return

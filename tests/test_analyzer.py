@@ -2604,6 +2604,8 @@ class TestM5Over:
 class TestM5Rolling:
     @pytest.mark.parametrize("method", ["rolling_sum", "rolling_min", "rolling_max"])
     def test_rolling_preserve_methods(self, method: str):
+        # Dtype-preserving on Float64, but the default min_samples
+        # (= window_size) leaves leading nulls (probed; issue #57).
         source = textwrap.dedent(
             PANDERA_HEADER
             + f"""
@@ -2618,7 +2620,7 @@ class TestM5Rolling:
         assert results[0].has_errors is False, results[0].errors
         ft = results[0].inferred_return_type
         assert ft is not None
-        assert ft.columns["v"].dtype == Float64()
+        assert ft.columns["v"].dtype == Nullable(Float64())
 
     @pytest.mark.parametrize(
         "method",
@@ -2768,6 +2770,123 @@ class TestM5RollingNullability:
         ft = results[0].inferred_return_type
         assert ft is not None
         assert ft.columns["m"].dtype == Nullable(Float64())
+
+
+class TestRollingStrictDtypes:
+    """``rolling_sum``/``rolling_min``/``rolling_max`` are strictly typed
+    instead of blindly dtype-preserving (issue #57; #49 deferred this family).
+
+    Probed (polars 1.41.2) receiver-dtype matrix:
+
+    - invalid receivers raise InvalidOperationError at runtime — flagged
+      PLY016, output degrades to Unknown:
+        rolling_sum:      Utf8, Date, Datetime, Time, Duration, Decimal,
+                          List, Array, Struct, Categorical, Enum, Null
+        rolling_min/max:  Utf8, Decimal, List, Array, Struct, Categorical,
+                          Enum, Null  (temporals and Boolean are accepted)
+    - probed-valid non-preserving cells (mirrors cum_sum's overflow guard):
+        rolling_sum: Int8/Int16/UInt8/UInt16 -> Int64, Boolean -> UInt32
+    - every other probed cell preserves the receiver dtype
+      (Int32/Int64/UInt32/UInt64/Int128/UInt128/Float32/Float64; plus
+      Boolean/Date/Datetime/Time/Duration for rolling_min/max).
+    - nullability follows the rolling-window rule (issue #57): Nullable
+      unless an explicit literal min_samples<=1 / window_size=1 fills
+      every window; a Nullable receiver always stays Nullable.
+    """
+
+    def _run(self, receiver, method: str, call: str = "(window_size=3)"):
+        frame = FrameType({"v": receiver})
+        return _run_body(frame, f'out = df.select(c=pl.col("v").{method}{call})')
+
+    @pytest.mark.parametrize(
+        ("method", "receiver"),
+        [
+            ("rolling_sum", Utf8()),
+            ("rolling_sum", Date()),
+            ("rolling_sum", Datetime()),
+            ("rolling_sum", Time()),
+            ("rolling_sum", Duration()),
+            ("rolling_sum", Decimal(10, 2)),
+            ("rolling_sum", Categorical()),
+            ("rolling_sum", Enum()),
+            ("rolling_sum", ListT(Int64())),
+            ("rolling_sum", Array(Int64())),
+            ("rolling_sum", Struct({"x": Int64()})),
+            ("rolling_sum", Null()),
+            ("rolling_min", Utf8()),
+            ("rolling_min", Decimal(10, 2)),
+            ("rolling_min", ListT(Int64())),
+            ("rolling_max", Struct({"x": Int64()})),
+            ("rolling_max", Categorical()),
+            ("rolling_max", Null()),
+        ],
+        ids=lambda p: str(p),
+    )
+    def test_invalid_receiver_flags_ply016_and_degrades(self, method, receiver):
+        analyzer = self._run(receiver, method)
+        assert len(analyzer.errors) == 1, analyzer.errors
+        err = analyzer.errors[0]
+        assert "PLY016" in err and method in err, err
+        assert "InvalidOperationError" in err, err
+        assert analyzer.var_types["out"].columns["c"].dtype == Unknown()
+
+    @pytest.mark.parametrize(
+        ("receiver", "expected"),
+        [
+            (Int8(), Int64()),
+            (Int16(), Int64()),
+            (UInt8(), Int64()),
+            (UInt16(), Int64()),
+            (Boolean(), UInt32()),
+        ],
+        ids=lambda p: str(p),
+    )
+    def test_rolling_sum_widening_cells(self, receiver, expected):
+        analyzer = self._run(receiver, "rolling_sum")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["c"].dtype == Nullable(expected)
+
+    @pytest.mark.parametrize(
+        ("method", "receiver"),
+        [
+            ("rolling_sum", Int32()),
+            ("rolling_sum", UInt64()),
+            ("rolling_sum", Int128()),
+            ("rolling_sum", Float32()),
+            ("rolling_min", Boolean()),
+            ("rolling_min", Date()),
+            ("rolling_min", Int8()),
+            ("rolling_max", Duration()),
+            ("rolling_max", Datetime(tz="UTC")),
+            ("rolling_max", Float64()),
+        ],
+        ids=lambda p: str(p),
+    )
+    def test_dtype_preserving_cells_nullable_by_default(self, method, receiver):
+        analyzer = self._run(receiver, method)
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["c"].dtype == Nullable(receiver)
+
+    def test_rolling_sum_min_samples_one_total(self):
+        analyzer = self._run(Int64(), "rolling_sum", "(window_size=3, min_samples=1)")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["c"].dtype == Int64()
+
+    def test_rolling_min_window_size_one_total(self):
+        analyzer = self._run(Float64(), "rolling_min", "(1)")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["c"].dtype == Float64()
+
+    def test_rolling_sum_nullable_receiver_stays_nullable(self):
+        # min_samples=1 cannot help an all-null window; upcast still applies.
+        analyzer = self._run(Nullable(Int8()), "rolling_sum", "(window_size=3, min_samples=1)")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["c"].dtype == Nullable(Int64())
+
+    def test_rolling_sum_unknown_receiver_stays_silent(self):
+        analyzer = self._run(Unknown(), "rolling_sum")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["c"].dtype == Unknown()
 
 
 class TestM5GroupByDynamic:
