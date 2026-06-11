@@ -14361,3 +14361,86 @@ class TestValidateInputChecking:
         results = analyze_source(source)
         errors = [str(e) for e in results[0].errors]
         assert any("validate" in e and "Utf8" in e for e in errors), errors
+
+
+class TestGroupedAllNullTemporalAggs:
+    """Issue #91 (boundary of #85): std/var/sum on Date/Datetime/Time
+    SUCCEED in grouped contexts (all-null, receiver dtype — probed on
+    1.37.0 through 1.41.2) while raising as whole-frame reductions. The
+    grouped flag was a false positive; it is now an accepted
+    Nullable(receiver) with a PLW012 "provably all-null" advisory.
+    Select-context keeps the PLY011 proof."""
+
+    _SCHEMA = """
+        import typing
+        import polars as pl
+        import pandera.polars as pa
+        from pandera.typing.polars import DataFrame
+
+        class Src(pa.DataFrameModel):
+            g: str
+            t: typing.Annotated[pl.Datetime, "us", None]
+
+            class Config:
+                strict = True
+    """
+
+    def test_grouped_std_datetime_accepted_with_warning(self):
+        source = textwrap.dedent(
+            self._SCHEMA
+            + """
+        def f(df: DataFrame[Src]) -> pl.DataFrame:
+            return df.group_by("g").agg(x=pl.col("t").std())
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == [], results[0].errors
+        assert any("PLW012" in w for w in results[0].warnings), results[0].warnings
+        inferred = results[0].inferred_return_type
+        assert inferred is not None
+        assert inferred.columns["x"].dtype == Nullable(Datetime())
+
+    def test_select_std_datetime_keeps_ply011_proof(self):
+        source = textwrap.dedent(
+            self._SCHEMA
+            + """
+        def f(df: DataFrame[Src]) -> pl.DataFrame:
+            return df.select(pl.col("t").std())
+        """
+        )
+        results = analyze_source(source)
+        assert any("PLY011" in str(e) for e in results[0].errors), results[0].errors
+
+    def test_grouped_sum_datetime_direct_form_warns(self):
+        source = textwrap.dedent(
+            self._SCHEMA
+            + """
+        def f(df: DataFrame[Src]) -> pl.DataFrame:
+            return df.group_by("g").agg(pl.col("t").sum())
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == [], results[0].errors
+        assert any("PLW012" in w for w in results[0].warnings), results[0].warnings
+
+    def test_var_on_duration_still_rejected_both_contexts(self):
+        source = textwrap.dedent(
+            """
+            import typing
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+
+            class Src(pa.DataFrameModel):
+                g: str
+                d: typing.Annotated[pl.Duration, "us"]
+
+                class Config:
+                    strict = True
+
+            def f(df: DataFrame[Src]) -> pl.DataFrame:
+                return df.group_by("g").agg(x=pl.col("d").var())
+            """
+        )
+        results = analyze_source(source)
+        assert any("PLY011" in str(e) for e in results[0].errors), results[0].errors

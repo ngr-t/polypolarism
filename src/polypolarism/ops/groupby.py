@@ -165,6 +165,29 @@ GROUPED_PANIC_CELLS: dict[AggFunction, tuple[type[DataType], ...]] = {
 }
 
 
+# Cells where the GROUPED context silently succeeds with an
+# unconditionally all-null column of the receiver dtype, while the same
+# reduction raises InvalidOperationError as a whole-frame (select)
+# reduction (issue #91; probed identical on polars 1.37.0/1.39.3/1.40.1/
+# 1.41.2). The select-context rejection stays a PLY011 proof; the grouped
+# context accepts with Nullable(receiver) and the analyzer surfaces a
+# PLW012 "provably all-null" advisory.
+GROUPED_ALL_NULL_TEMPORAL: dict[AggFunction, tuple[type[DataType], ...]] = {
+    AggFunction.SUM: (Date, Datetime, Time),
+    AggFunction.STD: (Date, Datetime, Time),
+    AggFunction.VAR: (Date, Datetime, Time),
+}
+
+
+def grouped_agg_always_null(func: AggFunction, dtype: DataType) -> DataType | None:
+    """Result dtype when (func, receiver) is a probed grouped all-null cell
+    (issue #91) — ``Nullable(receiver)``; ``None`` for every other cell."""
+    inner, _ = _unwrap_nullable(dtype)
+    if isinstance(inner, GROUPED_ALL_NULL_TEMPORAL.get(func, ())):
+        return Nullable(inner)
+    return None
+
+
 def grouped_agg_panics(func: AggFunction, dtype: DataType) -> bool:
     """True if ``func`` on ``dtype`` is a probed grouped-context panic cell."""
     inner, _ = _unwrap_nullable(dtype)
@@ -419,6 +442,10 @@ def infer_agg_result_type(
         if func is AggFunction.LIST:
             return List(Unknown())
         return Unknown()
+    if context == "agg":
+        all_null = grouped_agg_always_null(func, input_type)
+        if all_null is not None:
+            return all_null
     if context == "agg" and grouped_agg_panics(func, input_type):
         raise GroupByTypeError(
             f"Cannot apply {func.name.lower()} to type {input_type} in a grouped "

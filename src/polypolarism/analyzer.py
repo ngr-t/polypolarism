@@ -56,6 +56,7 @@ from polypolarism.diagnostics import (
     PLW007,
     PLW008,
     PLW011,
+    PLW012,
     PLY001,
     PLY002,
     PLY003,
@@ -99,6 +100,7 @@ from polypolarism.ops.groupby import (
     AggExpr,
     AggFunction,
     GroupByTypeError,
+    grouped_agg_always_null,
     grouped_agg_panics,
     infer_agg_result_type,
     infer_groupby_result,
@@ -410,6 +412,21 @@ def _base_is_unknown(dtype: DataType) -> bool:
     """True when the dtype (after Nullable unwrap) is Unknown."""
     inner = dtype.inner if isinstance(dtype, Nullable) else dtype
     return isinstance(inner, Unknown)
+
+
+def _all_null_agg_warning(func: AggFunction, receiver: DataType) -> str:
+    """PLW012 text for a probed grouped all-null aggregation cell (issue #91).
+
+    The grouped reduction SUCCEEDS at runtime — unlike its select-context
+    twin, which raises — but every output value is null regardless of the
+    input, which is never what the author meant.
+    """
+    return tag(
+        PLW012,
+        f"{func.name.lower()} on {receiver} in a grouped context always yields "
+        f"an all-null column (probed; the same reduction raises in a plain "
+        f"select) — this is probably not intended",
+    )
 
 
 def _unmodeled_method_warning(call_desc: str, *, frame: bool = False) -> str:
@@ -2963,6 +2980,8 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 except GroupByTypeError as e:
                     self.errors.append(tag(PLY011, str(e)))
                     return col, None  # type: ignore[return-value]
+                if self._in_agg_chain and grouped_agg_always_null(agg_func, col_type):
+                    self.warnings.append(_all_null_agg_warning(agg_func, col_type))
                 return col, result_type
 
         if name == "coalesce":
@@ -4206,6 +4225,8 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             except GroupByTypeError as e:
                 self.errors.append(tag(PLY011, str(e)))
                 return receiver_name, receiver_type
+            if self._in_agg_chain and grouped_agg_always_null(agg_map[method], receiver_type):
+                self.warnings.append(_all_null_agg_warning(agg_map[method], receiver_type))
             # std/var with an explicit literal ``ddof=0`` are total on
             # non-empty input (probed 1.41.2: singleton group -> 0.0), so
             # the Nullable wrap from ``infer_agg_result_type`` is undone;
@@ -5575,6 +5596,15 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         self.errors.extend(expr_analyzer.errors)
 
         try:
+            for agg_expr in agg_exprs:
+                if agg_expr.function is not None and agg_expr.dtype is None:
+                    direct_col_type = input_frame.get_column_type(agg_expr.column)
+                    if direct_col_type is not None and grouped_agg_always_null(
+                        agg_expr.function, direct_col_type
+                    ):
+                        self.warnings.append(
+                            _all_null_agg_warning(agg_expr.function, direct_col_type)
+                        )
             return infer_groupby_result(input_frame, keys, agg_exprs)
         except GroupByTypeError as e:
             self.errors.append(tag(PLY011, str(e)))

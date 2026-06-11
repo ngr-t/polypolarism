@@ -451,10 +451,22 @@ class TestTemporalReceivers:
 
     @pytest.mark.parametrize("func", [AggFunction.SUM, AggFunction.STD, AggFunction.VAR])
     @pytest.mark.parametrize("dtype", [Date(), Datetime(), Datetime(tz="UTC"), Time()], ids=str)
-    def test_sum_std_var_on_non_duration_temporals_raise(self, func, dtype):
+    def test_sum_std_var_on_non_duration_temporals_select_raises(self, func, dtype):
+        # Issue #91: the contexts DIVERGE for these cells — the whole-frame
+        # reduction raises InvalidOperationError (a PLY011 proof) ...
         with pytest.raises(GroupByTypeError) as exc_info:
-            infer_agg_result_type(func, dtype)
+            infer_agg_result_type(func, dtype, context="select")
         assert str(dtype) in str(exc_info.value)
+
+    @pytest.mark.parametrize("func", [AggFunction.SUM, AggFunction.STD, AggFunction.VAR])
+    @pytest.mark.parametrize("dtype", [Date(), Datetime(), Datetime(tz="UTC"), Time()], ids=str)
+    def test_sum_std_var_on_non_duration_temporals_grouped_all_null(self, func, dtype):
+        # ... while the GROUPED context silently succeeds with an
+        # unconditionally all-null column of the receiver dtype (probed
+        # identical on polars 1.37.0 through 1.41.2). The analyzer layers
+        # a PLW012 advisory on top.
+        result = infer_agg_result_type(func, dtype, context="agg")
+        assert result == Nullable(dtype)
 
     @pytest.mark.parametrize("dtype", [Date(), Datetime(), Duration(), Time()], ids=str)
     def test_product_temporal_raises(self, dtype):

@@ -146,6 +146,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Grouped std/var/sum on Date/Datetime/Time are accepted (issue #91,
+  boundary of #85): these cells raise InvalidOperationError as
+  whole-frame reductions — the select-context PLY011 stays a proof — but
+  SUCCEED in grouped contexts with an unconditionally all-null column of
+  the receiver dtype (probed identical on polars 1.37.0-1.41.2). The
+  grouped form now infers `Nullable(receiver)` and surfaces a new
+  `PLW012` advisory ("provably all-null — probably not intended")
+  instead of a PLY011 falsely claiming a runtime raise. `var` on
+  Duration keeps raising in both contexts (probed).
+
 - Validate-result bindings follow pandera's three strict modes (issue
   #88, class and object schemas alike): a `strict=False` validate result
   binds as an OPEN ISLAND — the input's extras provably flow through, so

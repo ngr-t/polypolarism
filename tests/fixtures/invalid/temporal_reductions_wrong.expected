@@ -4,7 +4,7 @@ var_on_duration: FAIL
   error: [PLY011] Cannot apply var to type Duration[ns]: var is not supported for this temporal type at runtime (probed polars 1.41.2)
   error: [PLY040] Could not infer return type
 sum_on_datetime_grouped: FAIL
-  error: [PLY011] Cannot apply sum to type Datetime[ms, UTC]: sum is not supported for this temporal type at runtime (probed polars 1.41.2)
-  error: [PLY040] Could not infer return type
+  error: [PLY040] Column 'total' has type Datetime[ms, UTC]?, but declared type is Datetime[ms, UTC]
+  warning: [PLW012] sum on Datetime[ms, UTC] in a grouped context always yields an all-null column (probed; the same reduction raises in a plain select) — this is probably not intended
 std_on_datetime_select: FAIL
   error: [PLY011] Cannot apply std to type Datetime[ms, UTC]: std is not supported for this temporal type at runtime (probed polars 1.41.2)

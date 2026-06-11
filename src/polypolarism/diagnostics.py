@@ -77,6 +77,8 @@ PLW010 = "PLW010"  # detected polars or pandera version below polypolarism's sup
 
 PLW011 = "PLW011"  # schema field annotation unrecognized; column degrades to Unknown dtype (#77)
 
+PLW012 = "PLW012"  # grouped aggregation provably yields an all-null column (probed; probably a bug) (#91)
+
 
 def tag(code: str, message: str) -> str:
     """Return ``"[CODE] message"``; idempotent if message is already tagged."""
