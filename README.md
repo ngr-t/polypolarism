@@ -475,6 +475,7 @@ Warning codes:
 | `PLW003` | function call to a name that isn't defined in the analysed module |
 | `PLW004` | lambda / inline callable used where its return dtype is unknowable |
 | `PLW005` | `pivot()` output schema is data-dependent; bind to a `DataFrame[Schema]` variable |
+| `PLW006` | `DataFrame[X]` / `LazyFrame[X]` annotation references a schema the analyzer cannot resolve |
 | `PLW010` | detected polars / pandera version is below the supported floor (see [Supported versions](#supported-versions)) |
 
 JSON output (`--format json`) emits warnings as `severity: "warning"`
