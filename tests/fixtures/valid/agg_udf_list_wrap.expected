@@ -1,0 +1,5 @@
+map_elements_listed: OK
+map_batches_listed: OK
+pl_map_groups_listed: OK
+map_batches_custom_aggregation: OK
+native_agg_after_udf: OK

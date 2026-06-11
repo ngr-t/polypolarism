@@ -357,10 +357,15 @@ def _parse_object_columns(
     return None
 
 
-
-
 _OBJECT_SCHEMA_DERIVATIONS: frozenset[str] = frozenset(
-    {"add_columns", "remove_columns", "update_columns", "rename_columns", "set_index", "reset_index"}
+    {
+        "add_columns",
+        "remove_columns",
+        "update_columns",
+        "rename_columns",
+        "set_index",
+        "reset_index",
+    }
 )
 
 
@@ -399,6 +404,7 @@ def _unresolved_object_schema(
         unresolved=True,
         definition_warnings={"<derivation>": detail},
     )
+
 
 def _collect_object_schemas(tree: ast.Module, registry: SchemaRegistry) -> None:
     """Register module-level ``pa.DataFrameSchema`` object-API schemas

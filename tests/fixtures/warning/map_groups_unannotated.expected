@@ -1,0 +1,4 @@
+unannotated: WARN
+  warning: [PLW005] group_by(...).map_groups: the output schema depends on the group function's body, so polypolarism cannot infer it. Assign the result to a `DataFrame[Schema]`-annotated variable to give the analyser a schema to check against.
+escaped: WARN
+  warning: [PLW005] group_by(...).map_groups: the output schema depends on the group function's body, so polypolarism cannot infer it. Assign the result to a `DataFrame[Schema]`-annotated variable to give the analyser a schema to check against.

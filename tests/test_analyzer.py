@@ -4340,6 +4340,116 @@ class TestM7MapElementsReturnDtype:
         assert any("return_dtype" in w for w in f.warnings)
 
 
+class TestAggUdfImplicitListWrap:
+    """UDF expressions inside ``group_by().agg()`` (issue #86).
+
+    A non-aggregating UDF result is implicitly list-aggregated in grouped
+    context (probed identical on polars 1.41.2 and 1.37.0):
+
+    - ``map_elements(f, return_dtype=T)`` -> ``List(T)`` regardless of
+      ``returns_scalar=`` (deprecated since polars 1.32.0 and ignored);
+    - ``map_batches`` / ``pl.map_groups`` -> ``List(T)`` unless
+      ``returns_scalar=True`` (then scalar ``T``);
+    - a native aggregation chained after the UDF reduces as usual;
+    - select/with_columns contexts keep the scalar dtype (covered by
+      TestM7MapElementsReturnDtype).
+    """
+
+    HEADER = textwrap.dedent(
+        PANDERA_HEADER
+        + """
+            class Src(pa.DataFrameModel):
+                g: str
+                v: int
+        """
+    )
+
+    def _inferred(self, body: str):
+        source = self.HEADER + textwrap.dedent(
+            f"""
+            def f(df: DataFrame[Src]):
+                return {body}
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        return results[0], ft
+
+    def test_map_elements_in_agg_is_list_wrapped(self):
+        _, ft = self._inferred(
+            'df.group_by("g").agg(x=pl.col("v").map_elements(lambda v: v * 2.0, return_dtype=pl.Float64))'
+        )
+        assert ft.columns["x"].dtype == ListT(Float64())
+
+    def test_map_elements_returns_scalar_true_is_ignored(self):
+        # ``returns_scalar`` on map_elements is deprecated (1.32.0) and has
+        # no effect — probed on 1.41.2 and 1.37.0: still List(Float64).
+        _, ft = self._inferred(
+            'df.group_by("g").agg(x=pl.col("v").map_elements(lambda v: v * 2.0, return_dtype=pl.Float64, returns_scalar=True))'
+        )
+        assert ft.columns["x"].dtype == ListT(Float64())
+
+    def test_map_batches_in_agg_is_list_wrapped(self):
+        _, ft = self._inferred(
+            'df.group_by("g").agg(x=pl.col("v").map_batches(lambda s: s * 2.0, return_dtype=pl.Float64))'
+        )
+        assert ft.columns["x"].dtype == ListT(Float64())
+
+    def test_map_batches_returns_scalar_true_stays_scalar(self):
+        _, ft = self._inferred(
+            'df.group_by("g").agg(x=pl.col("v").map_batches(lambda s: s.mean(), return_dtype=pl.Float64, returns_scalar=True))'
+        )
+        assert ft.columns["x"].dtype == Float64()
+
+    def test_map_batches_returns_scalar_false_is_list_wrapped(self):
+        _, ft = self._inferred(
+            'df.group_by("g").agg(x=pl.col("v").map_batches(lambda s: s * 2.0, return_dtype=pl.Float64, returns_scalar=False))'
+        )
+        assert ft.columns["x"].dtype == ListT(Float64())
+
+    def test_native_agg_after_udf_reduces_as_usual(self):
+        _, ft = self._inferred(
+            'df.group_by("g").agg(x=pl.col("v").map_elements(lambda v: v * 2.0, return_dtype=pl.Float64).sum())'
+        )
+        assert ft.columns["x"].dtype == Float64()
+
+    def test_alias_form_is_list_wrapped(self):
+        _, ft = self._inferred(
+            'df.group_by("g").agg(pl.col("v").map_elements(lambda v: v * 2.0, return_dtype=pl.Float64).alias("x"))'
+        )
+        assert ft.columns["x"].dtype == ListT(Float64())
+
+    def test_no_return_dtype_fallback_is_list_wrapped_and_warns(self):
+        # The PLW001 receiver-dtype fallback is still a guess, but the
+        # implicit list aggregation applies to it like any other dtype.
+        f, ft = self._inferred(
+            'df.group_by("g").agg(x=pl.col("v").map_elements(lambda v: v * 2.0))'
+        )
+        assert any("PLW001" in w for w in f.warnings)
+        assert ft.columns["x"].dtype == ListT(Int64())
+
+    def test_pl_map_groups_in_agg_is_list_wrapped(self):
+        _, ft = self._inferred(
+            'df.group_by("g").agg(x=pl.map_groups(exprs=["v"], function=lambda ss: ss[0] * 2.0, return_dtype=pl.Float64))'
+        )
+        assert ft.columns["x"].dtype == ListT(Float64())
+
+    def test_pl_map_groups_returns_scalar_true_stays_scalar(self):
+        _, ft = self._inferred(
+            'df.group_by("g").agg(x=pl.map_groups(exprs=["v"], function=lambda ss: ss[0].mean(), return_dtype=pl.Float64, returns_scalar=True))'
+        )
+        assert ft.columns["x"].dtype == Float64()
+
+    def test_pl_map_groups_default_output_name_is_first_expr(self):
+        # Probed: the output column takes the first input expression's name.
+        _, ft = self._inferred(
+            'df.group_by("g").agg(pl.map_groups(exprs=["v"], function=lambda ss: ss[0] * 2.0, return_dtype=pl.Float64))'
+        )
+        assert ft.columns["v"].dtype == ListT(Float64())
+
+
 class TestM7ExternalHelperWarning:
     def test_unknown_function_call_warns(self):
         source = textwrap.dedent(
@@ -5194,6 +5304,70 @@ class TestToDummiesWarning:
         ft = results[0].inferred_return_type
         assert ft is not None
         assert ft.columns["c_a"].dtype == UInt8()
+
+
+class TestGroupByMapGroupsWarning:
+    """``group_by(...).map_groups(fn)`` (issue #87): the output schema
+    depends on the group function's body — statically unknowable, same
+    family as pivot/to_dummies — so it gets the PLW005 annotate-the-result
+    nudge instead of the generic "Could not infer return type".
+    (``GroupBy.apply`` no longer exists on probed polars 1.37.0/1.41.2,
+    so there is no alias to cover.)"""
+
+    HEADER = textwrap.dedent(
+        PANDERA_HEADER
+        + """
+            class Src(pa.DataFrameModel):
+                g: str
+                v: int
+        """
+    )
+
+    def test_map_groups_emits_plw005(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[Src]):
+                return df.group_by("g").map_groups(lambda gdf: gdf.head(1))
+            """
+        )
+        results = analyze_source(source)
+        f = results[0]
+        assert f.errors == [], f.errors
+        assert any("PLW005" in w for w in f.warnings), f.warnings
+        assert any("map_groups" in w and "DataFrame[" in w for w in f.warnings)
+
+    def test_map_groups_lazy_receiver_suggests_lazyframe(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[Src]):
+                return df.lazy().group_by("g").map_groups(lambda gdf: gdf.head(1), schema=None)
+            """
+        )
+        results = analyze_source(source)
+        f = results[0]
+        assert any("PLW005" in w and "LazyFrame[" in w for w in f.warnings), f.warnings
+
+    def test_map_groups_assigned_to_typed_var_uses_annotation(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            class Out(pa.DataFrameModel):
+                g: str
+                v: int
+                n: pl.Int32
+
+            def f(df: DataFrame[Src]) -> DataFrame[Out]:
+                x: DataFrame[Out] = df.group_by("g").map_groups(
+                    lambda gdf: gdf.head(1).with_columns(n=pl.lit(1, dtype=pl.Int32))
+                )
+                return x
+            """
+        )
+        results = analyze_source(source)
+        assert any("PLW005" in w for w in results[0].warnings)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["n"].dtype == Int32()
 
 
 class TestM13LazyFrame:
