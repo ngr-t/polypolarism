@@ -145,9 +145,21 @@ def _value_overrides() -> dict[str, dict[str, pl.Series]]:
             "region": pl.Series(["r1", "r1", "r2", "r2"]),
             "metric": pl.Series(["revenue", "cost", "revenue", "cost"]),
         },
+        # same pivot as the valid twin: generic metric values would make the
+        # return validation fail on *missing* revenue/cost columns instead of
+        # the intended Float64-vs-declared-Int64 dtype mismatch.
+        "invalid/m12_pivot_wrong_declared.py": {
+            "region": pl.Series(["r1", "r1", "r2", "r2"]),
+            "metric": pl.Series(["revenue", "cost", "revenue", "cost"]),
+        },
         # hstack requires equal heights: unpivot of a 3-row frame over two
         # `on` columns yields 6 rows, so the side frame must have 6 rows.
         "valid/m4_unpivot_and_hstack.py": {
+            "label": pl.Series([f"l{i}" for i in range(6)]),
+        },
+        # same height constraint as the valid twin: without it hstack raises a
+        # ShapeError instead of the intended label dtype mismatch.
+        "invalid/m4_hstack_wrong_dtype.py": {
             "label": pl.Series([f"l{i}" for i in range(6)]),
         },
         # str.to_integer/to_time/to_decimal parse column *contents*; generic
