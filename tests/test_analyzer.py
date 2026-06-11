@@ -12,6 +12,7 @@ from polypolarism.analyzer import (
 )
 from polypolarism.types import (
     Array,
+    Binary,
     Boolean,
     Categorical,
     Date,
@@ -2941,6 +2942,197 @@ class TestRollingStrictDtypes:
         analyzer = self._run(Unknown(), "rolling_sum")
         assert analyzer.errors == [], analyzer.errors
         assert analyzer.var_types["out"].columns["c"].dtype == Unknown()
+
+
+class TestNumericElementwiseStrictDtypes:
+    """``round``/``floor``/``ceil``/``clip``/``abs``/``sign``/``neg`` are
+    strictly typed instead of blindly dtype-preserving (issue #62).
+
+    Probed (polars 1.41.2) receiver-dtype matrix — invalid receivers raise
+    InvalidOperationError at runtime, flagged PLY016, output degrades to
+    Unknown:
+
+    - round/floor/ceil: every non-numeric dtype (Utf8, Binary, Boolean,
+      Date, Datetime, Time, Duration, Categorical, Enum, List, Array,
+      Struct, Null); Decimal and all ints/uints/floats are accepted.
+    - clip: "only supports physical numeric types" — rejects Utf8, Binary,
+      Boolean, List, Array, Struct, Null even with matching-dtype literal
+      bounds; temporals / Decimal / Categorical / Enum are physically
+      numeric and accepted.
+    - abs: rejects the round set minus Duration/Decimal (both preserved).
+    - sign: rejects the round set (Duration included); Decimal preserved.
+    - neg: rejects the abs set PLUS every unsigned int and Int128
+      ("`neg` operation not supported for dtype `u128`").
+    - shrink_dtype stays unchecked: deprecated no-op in 1.41.2, accepts
+      every dtype.
+    """
+
+    def _run(self, receiver, call: str):
+        frame = FrameType({"v": receiver})
+        return _run_body(frame, f'out = df.select(c=pl.col("v").{call})')
+
+    @pytest.mark.parametrize(
+        ("call", "receiver"),
+        [
+            ("round(1)", Utf8()),
+            ("round(1)", Boolean()),
+            ("round(1)", Datetime()),
+            ("round(1)", Duration()),
+            ("round(1)", Null()),
+            ("floor()", Utf8()),
+            ("ceil()", ListT(Int64())),
+            ("clip(0, 1)", Utf8()),
+            ("clip(0, 1)", Boolean()),
+            ("clip(0, 1)", Null()),
+            ("abs()", Utf8()),
+            ("abs()", Date()),
+            ("abs()", Binary()),
+            ("sign()", Duration()),
+            ("neg()", UInt32()),
+            ("neg()", UInt64()),
+            ("neg()", Int128()),
+            ("neg()", Categorical()),
+        ],
+        ids=lambda p: str(p),
+    )
+    def test_invalid_receiver_flags_ply016_and_degrades(self, call, receiver):
+        analyzer = self._run(receiver, call)
+        assert len(analyzer.errors) == 1, analyzer.errors
+        err = analyzer.errors[0]
+        method = call.split("(")[0]
+        assert "PLY016" in err and method in err, err
+        assert "InvalidOperationError" in err, err
+        assert analyzer.var_types["out"].columns["c"].dtype == Unknown()
+
+    def test_nullable_invalid_receiver_still_flags(self):
+        analyzer = self._run(Nullable(Utf8()), "round(1)")
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY016" in analyzer.errors[0], analyzer.errors
+
+    def test_unknown_receiver_stays_silent(self):
+        analyzer = self._run(Unknown(), "round(1)")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["c"].dtype == Unknown()
+
+    @pytest.mark.parametrize(
+        ("call", "receiver"),
+        [
+            # round/floor/ceil are int-identity and Decimal-preserving
+            # (probed: round(1) on Decimal(10, 2) keeps precision AND scale).
+            ("round(1)", Decimal(10, 2)),
+            ("round(1)", Float32()),
+            ("round(1)", UInt128()),
+            ("floor()", Decimal(10, 2)),
+            ("ceil()", Int64()),
+            # clip accepts everything physically numeric.
+            ("clip(0, 1)", Date()),
+            ("clip(0, 1)", Duration()),
+            ("clip(0, 1)", Decimal(10, 2)),
+            ("clip(0, 1)", Categorical()),
+            ("clip(0, 1)", Enum()),
+            # abs/neg accept Duration and Decimal (preserving).
+            ("abs()", Duration()),
+            ("abs()", Decimal(10, 2)),
+            ("abs()", UInt128()),
+            # sign keeps the float dtype in 1.41.2 (no Int8 cast).
+            ("sign()", Decimal(10, 2)),
+            ("sign()", Float32()),
+            ("neg()", Duration()),
+            ("neg()", Decimal(10, 2)),
+            # shrink_dtype is a deprecated no-op: any dtype, identity.
+            ("shrink_dtype()", Utf8()),
+        ],
+        ids=lambda p: str(p),
+    )
+    def test_probed_preserving_cells(self, call, receiver):
+        analyzer = self._run(receiver, call)
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["c"].dtype == receiver
+
+    def test_nullable_preserving_keeps_wrapper(self):
+        analyzer = self._run(Nullable(Float64()), "round(1)")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["c"].dtype == Nullable(Float64())
+
+
+class TestFloatReturnStrictDtypes:
+    """The Float64-return family (``log``/``log10``/``log1p``/``exp``/
+    ``sqrt``/``cbrt``/``entropy``) is strictly typed (issue #62).
+
+    Probed (polars 1.41.2) receiver-dtype matrix — the error class varies
+    per cell (InvalidOperationError / ComputeError / rust panic), all
+    flagged PLY016 with output degrading to Unknown:
+
+    - log/log10:   reject Binary, Categorical, Enum, List, Array, Struct
+    - log1p/exp:   reject Binary, List, Array, Struct
+                   (Categorical/Enum are ACCEPTED -> Float64)
+    - sqrt/cbrt:   reject Binary, Categorical, Enum, List, Array, Struct
+    - entropy:     rejects Utf8, Binary, Boolean, List, Array, Struct,
+                   Null but ACCEPTS temporals/Decimal/Categorical/Enum
+
+    Every other accepted receiver — String, Boolean, temporals, Decimal,
+    Null included (polars casts them into Float64 non-strictly) — stays
+    silent and yields Float64; a Float32 receiver keeps Float32 (probed).
+    """
+
+    def _run(self, receiver, call: str):
+        frame = FrameType({"v": receiver})
+        return _run_body(frame, f'out = df.select(c=pl.col("v").{call})')
+
+    @pytest.mark.parametrize(
+        ("call", "receiver"),
+        [
+            ("log()", Categorical()),
+            ("log()", ListT(Int64())),
+            ("log()", Binary()),
+            ("log10()", Enum()),
+            ("log1p()", ListT(Int64())),
+            ("exp()", Struct({"x": Int64()})),
+            ("sqrt()", Categorical()),
+            ("cbrt()", Enum()),
+            ("entropy()", Utf8()),
+            ("entropy()", Boolean()),
+            ("entropy()", Null()),
+            ("entropy()", Array(Int64())),
+        ],
+        ids=lambda p: str(p),
+    )
+    def test_invalid_receiver_flags_ply016_and_degrades(self, call, receiver):
+        analyzer = self._run(receiver, call)
+        assert len(analyzer.errors) == 1, analyzer.errors
+        err = analyzer.errors[0]
+        method = call.split("(")[0]
+        assert "PLY016" in err and method in err, err
+        assert analyzer.var_types["out"].columns["c"].dtype == Unknown()
+
+    @pytest.mark.parametrize(
+        ("call", "receiver"),
+        [
+            # polars casts these receivers into Float64 non-strictly —
+            # accepted at runtime, so they MUST stay silent.
+            ("log()", Utf8()),
+            ("log1p()", Categorical()),
+            ("exp()", Enum()),
+            ("sqrt()", Utf8()),
+            ("entropy()", Categorical()),
+            ("entropy()", Date()),
+        ],
+        ids=lambda p: str(p),
+    )
+    def test_accepted_nonnumeric_receivers_stay_silent(self, call, receiver):
+        analyzer = self._run(receiver, call)
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["c"].dtype == Float64()
+
+    def test_float32_receiver_keeps_float32(self):
+        analyzer = self._run(Float32(), "sqrt()")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["c"].dtype == Float32()
+
+    def test_nullable_float32_keeps_wrapper_and_width(self):
+        analyzer = self._run(Nullable(Float32()), "log()")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["c"].dtype == Nullable(Float32())
 
 
 class TestM5GroupByDynamic:
