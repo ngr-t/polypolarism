@@ -89,6 +89,7 @@ Rules with both sides present (valid twin -> invalid twin):
 | filter predicates | `m1_filter_chain`, `m2_filter_predicates` | `filter_nonbool_predicate`, `m2_filter_unknown_column` |
 | drop/rename/cast | `m1_drop_rename_cast` | `m1_drop_missing`, `m1_rename_unknown`, `cast_impossible`, `cast_column_not_found` |
 | nullability propagation | `m2_fill_null_narrowing` | `null_propagation_nonnull` |
+| coerce limits | `coerce_len_agg` | `coerce_limits` |
 | tz handling | `tz_same_ops` | `tz_mixing` |
 | function-call checking | `function_call_*` | `function_call_{missing_column,type_mismatch,nullable_mismatch,untyped_inference_fail}` |
 | sort/unique/over/drop_nulls keys | `m5_window_and_rolling`, `m1_drop_nulls_and_row_index` | `sort_missing_column`, `unique_missing_subset`, `over_missing_column`, `drop_nulls_subset_not_found`, `with_row_index_collision` |
@@ -109,9 +110,6 @@ Intentionally unpaired:
 - **pivot** — `m12_pivot_annotated` has a warning twin
   (`m12_pivot_unannotated`) but no wrong-declaration invalid twin.
 - **partition_by** — `m14_partition_by` unpaired (wrong element schema).
-- **coerce limits** — `coerce_len_agg` proves coerce *tolerates* numeric
-  differences; no twin proving a non-coercible difference (e.g. Utf8 vs
-  Int64) still fails under `Config.coerce`.
 - **landmark dtypes** — `dtype_enum`, `dtype_float16`, `dtype_int128`,
   `dtype_uint128` prove registration; no wrong-declaration twins.
 - **frame literals / pl constructors** — `frame_literal`,
