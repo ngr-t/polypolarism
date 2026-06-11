@@ -39,6 +39,20 @@ jobs:
           files: ./coverage.xml
           fail_ci_if_error: false
 
+  runtime-diff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies (with runtime group)
+        run: uv sync --dev --group runtime
+
+      - name: Run runtime differential harness
+        run: uv run --group runtime pytest tests/test_runtime_differential.py -v
+
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -47,8 +61,10 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v5
 
+      # The runtime group is included so pyright can resolve the pandera
+      # imports in tests/test_runtime_differential.py.
       - name: Install dependencies
-        run: uv sync --dev
+        run: uv sync --dev --group runtime
 
       - name: Check formatting with ruff
         run: uv run ruff format --check .
