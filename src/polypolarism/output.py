@@ -99,9 +99,7 @@ def function_summaries(analyses) -> list[dict]:
             "name": analysis.name,
             "line": analysis.lineno,
             "end_line": analysis.end_lineno,
-            "params": {
-                name: _frame_summary(ft) for name, ft in analysis.input_types.items()
-            },
+            "params": {name: _frame_summary(ft) for name, ft in analysis.input_types.items()},
             "declared_return": _frame_summary(analysis.declared_return_type),
             "inferred_return": _frame_summary(analysis.inferred_return_type),
         }

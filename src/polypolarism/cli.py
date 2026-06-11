@@ -258,9 +258,7 @@ def _expand_directory_groups(dir_path: Path) -> list[FileResults]:
     """Per-file FileResults for every .py under dir_path."""
     groups: list[FileResults] = []
     for py_file in sorted(dir_path.glob("**/*.py")):
-        results, function_lines, function_end_lines, functions = _check_file_with_locations(
-            py_file
-        )
+        results, function_lines, function_end_lines, functions = _check_file_with_locations(py_file)
         groups.append(
             FileResults(
                 file_path=str(py_file),
@@ -325,8 +323,8 @@ def main(args: list[str] | None = None) -> int:
             return 1
 
         if path.is_file():
-            results, function_lines, function_end_lines, functions = (
-                _check_file_with_locations(path)
+            results, function_lines, function_end_lines, functions = _check_file_with_locations(
+                path
             )
             file_groups.append(
                 FileResults(
