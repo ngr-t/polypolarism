@@ -6160,15 +6160,25 @@ def analyze_function(
     # being silently skipped because of a missing import. Deduplicate to
     # one warning per name.
     for name in dict.fromkeys(unresolved_schemas):
-        warnings.append(
-            tag(
-                PLW006,
+        if "." in name:
+            # Module-qualified reference (``DataFrame[mod.Schema]``) that
+            # didn't resolve through a project-local plain import.
+            module, attr = name.rsplit(".", 1)
+            hint = (
+                f"schema '{name}' referenced in annotation but not found. "
+                f"Qualified references resolve through a top-level "
+                f"`import {module}` of a project-local module defining "
+                f"'{attr}'. Stdlib/third-party imports aren't followed, "
+                f"and nested classes aren't supported."
+            )
+        else:
+            hint = (
                 f"schema '{name}' referenced in annotation but not found. "
                 f"Define it in this module, or import it from a project-local "
                 f"module via `from <module> import {name}`. "
-                f"Stdlib/third-party imports aren't followed.",
+                f"Stdlib/third-party imports aren't followed."
             )
-        )
+        warnings.append(tag(PLW006, hint))
 
     # Analyze function body with registry
     body_analyzer = FunctionBodyAnalyzer(

@@ -62,6 +62,11 @@ def collect_schemas_with_imports(tree: ast.Module, file_path: Path) -> SchemaReg
     file (stdlib, third-party) are skipped silently — only files we can
     actually parse contribute.
 
+    Plain ``import X`` / ``import X.Y as z`` statements register the
+    imported module's schemas under their *qualified* spelling
+    (``X.Schema`` / ``X.Y.Schema`` / ``z.Schema``) so module-qualified
+    annotations like ``DataFrame[X.Schema]`` resolve (issue #68).
+
     Schemas defined in ``tree`` itself take precedence over imports;
     imported schemas only fill names not already present.
     """
@@ -70,6 +75,7 @@ def collect_schemas_with_imports(tree: ast.Module, file_path: Path) -> SchemaReg
     with contextlib.suppress(OSError):
         visited.add(file_path.resolve())
     _merge_imports(tree, file_path, registry, visited)
+    _merge_module_imports(tree, file_path, registry)
     return registry
 
 
@@ -257,6 +263,67 @@ def _merge_imports(
 
         # Recurse so chains like app -> schemas -> base resolve fully.
         _merge_imports(sub_tree, resolved, registry, visited)
+
+
+def _merge_module_imports(
+    tree: ast.Module,
+    current_file: Path,
+    registry: SchemaRegistry,
+) -> None:
+    """Register schemas reachable via plain ``import X`` under dotted keys.
+
+    Design note (issue #68): the registry stays *flat* — a
+    module-qualified annotation ``DataFrame[mod.Schema]`` is resolved by
+    keying the imported module's schemas under the exact dotted path the
+    annotation site spells (``mod.Schema``; for ``import pkg.mod as m``,
+    ``m.Schema``). This mirrors ``_extract_schema_name`` returning the
+    dotted chain as written, and avoids introducing a per-module
+    registry for what is a pure name-resolution concern.
+
+    Only top-level ``import`` statements of the file under analysis are
+    honoured: a plain import inside an *imported* module does not bind a
+    name in the analyzed module at runtime either. Each imported
+    module's own ``from``-imports are still followed so its schemas and
+    re-exports resolve (``mod.ReExported`` works when ``mod`` does
+    ``from base import ReExported`` — faithful to Python attribute
+    access on modules). ``import pkg`` followed by ``pkg.sub.Schema``
+    (attribute access through an un-imported submodule) is *not*
+    resolved and falls through to the PLW006 unresolved-schema warning.
+    """
+    try:
+        current_real = current_file.resolve()
+    except OSError:
+        current_real = current_file
+    for node in tree.body:
+        if not isinstance(node, ast.Import):
+            continue
+        for alias in node.names:
+            resolved = _resolve_module_path(alias.name, current_file)
+            if resolved is None:
+                continue
+            try:
+                real = resolved.resolve()
+            except OSError:
+                continue
+            if real == current_real:
+                continue
+            try:
+                sub_source = resolved.read_text()
+                sub_tree = ast.parse(sub_source)
+            except (OSError, UnicodeDecodeError, SyntaxError):
+                continue
+
+            # Build the imported module's full registry (its own schemas
+            # plus from-import chains), then mount it under the binding
+            # name: the alias if given, else the full dotted module path
+            # (``import pkg.mod`` binds ``pkg`` but use sites spell
+            # ``pkg.mod.Schema``, which is exactly this key).
+            sub_registry = collect_schemas(sub_tree)
+            sub_visited = {real}
+            _merge_imports(sub_tree, resolved, sub_registry, sub_visited)
+            prefix = alias.asname or alias.name
+            for name, schema in sub_registry.schemas.items():
+                registry.schemas.setdefault(f"{prefix}.{name}", schema)
 
 
 def _topo_sort(candidates: dict[str, ast.ClassDef]) -> list[str]:
