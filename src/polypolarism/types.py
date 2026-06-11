@@ -452,6 +452,34 @@ class List(DataType):
         return f"List[{self.inner}]"
 
 
+@dataclass(frozen=True)
+class Array(DataType):
+    """Fixed-size array type (polars ``pl.Array``) with elements of a single type.
+
+    Distinct from :class:`List` (issue #53): polars is strict about the
+    container kind — ``.arr.*`` requires an Array receiver and ``.list.*``
+    requires a List receiver, casts behave differently, and pandera
+    validation rejects one where the other is declared.
+
+    The fixed size (width) is deliberately NOT tracked, consistent with the
+    schema parser ("width ignored"): two ``Array`` dtypes with the same
+    element type compare equal regardless of their runtime widths, so
+    width-mismatch errors (e.g. concatenating ``Array(Int64, 2)`` with
+    ``Array(Int64, 3)``) are out of scope and never flagged.
+    """
+
+    inner: DataType
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, Array) and self.inner == other.inner
+
+    def __hash__(self) -> int:
+        return hash(("Array", self.inner))
+
+    def __str__(self) -> str:
+        return f"Array[{self.inner}]"
+
+
 @dataclass(frozen=True, eq=False)
 class Struct(DataType):
     """Struct type with named fields."""
