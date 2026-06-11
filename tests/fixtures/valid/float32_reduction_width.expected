@@ -1,3 +1,4 @@
 rolling_mean_keeps_float32: OK
 agg_keeps_float32: OK
 select_std_ddof0_keeps_float32: OK
+mean_horizontal_keeps_float32: OK

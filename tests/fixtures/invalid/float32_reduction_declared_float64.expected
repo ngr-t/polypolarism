@@ -5,3 +5,5 @@ agg_declared_float64: FAIL
   error: Column 'med_reading' has type Float32, but declared type is Float64
 select_std_ddof0_declared_float64: FAIL
   error: Column 'spread' has type Float32, but declared type is Float64
+mean_horizontal_declared_float64: FAIL
+  error: Column 'avg' has type Float32, but declared type is Float64

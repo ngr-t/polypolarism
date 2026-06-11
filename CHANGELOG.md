@@ -55,3 +55,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `FrameType.__init__` now formally accepts
   `Mapping[str, ColumnSpec | DataType]`, matching the runtime
   normalization that was already happening in `__post_init__`.
+
+### Fixed
+
+- Float32 width preservation (probed on polars 1.41.2): the float-family
+  reductions (`mean`/`std`/`var`/`median`/`quantile`) keep Float32 on a
+  Float32 receiver in rolling, select and `group_by().agg()` contexts,
+  and `pl.mean_horizontal` returns Float32 when every operand is
+  Float32. Previously all of these claimed Float64, falsely rejecting
+  correct Float32 declarations.

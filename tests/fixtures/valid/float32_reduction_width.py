@@ -58,3 +58,16 @@ class Spread(pa.DataFrameModel):
 
 def select_std_ddof0_keeps_float32(df: DataFrame[Sensor]) -> DataFrame[Spread]:
     return df.select(pl.col("reading").std(ddof=0).alias("spread"))
+
+
+class Averaged(pa.DataFrameModel):
+    avg: pl.Float32
+
+    class Config:
+        strict = True
+
+
+def mean_horizontal_keeps_float32(df: DataFrame[Sensor]) -> DataFrame[Averaged]:
+    # Probed (polars 1.41.2; backlog N-4): Float32 iff every operand is
+    # Float32 — here the single operand list is all-Float32.
+    return df.select(pl.mean_horizontal([pl.col("reading"), pl.col("reading")]).alias("avg"))

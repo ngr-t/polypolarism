@@ -65,10 +65,9 @@ Status legend: `[ ]` open / `[x]` done / `[-]` deliberately deferred.
   (shared `_float_reduction_width`, probed 1.41.2). Float16 deliberately
   NOT width-preserved in rolling (probed: widens to Float64). Spawned
   N-4/N-5 below.
-- [ ] **N-4: mean_horizontal width.** Probed (1.41.2): all-Float32 inputs
-  return Float32; the analyzer returns Float64 unconditionally
-  (`analyzer.py` mean_horizontal handling). Same family as N-2, separate
-  call site.
+- [x] **N-4: mean_horizontal width.** Done 2026-06-11: Float32 iff every
+  operand is Float32 (probed 1.41.2); pinned in the
+  `float32_reduction_width` fixture pair.
 - [ ] **N-5: groupby NUMERIC_TYPES width/coverage gap.** `ops/groupby.py`
   rejects Float16/Int8/Int16/UInt8/UInt16/Int128/UInt128 receivers for
   numeric aggs, so e.g. select-context `mean(Int8)` (valid → Float64) and

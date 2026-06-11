@@ -2585,7 +2585,9 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             inners = [t.inner if isinstance(t, Nullable) else t for t in operands]
             result: DataType
             if name == "mean_horizontal":
-                result = Float64()
+                # Probed (polars 1.41.2; backlog N-4): Float32 iff every
+                # operand is Float32; any other operand widens to Float64.
+                result = Float32() if all(isinstance(t, Float32) for t in inners) else Float64()
             else:
                 result = inners[0]
                 for t in inners[1:]:

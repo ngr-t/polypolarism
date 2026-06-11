@@ -59,3 +59,14 @@ class Spread(pa.DataFrameModel):
 
 def select_std_ddof0_declared_float64(df: DataFrame[Sensor]) -> DataFrame[Spread]:
     return df.select(pl.col("reading").std(ddof=0).alias("spread"))
+
+
+class Averaged(pa.DataFrameModel):
+    avg: pl.Float64  # WRONG: mean_horizontal over all-Float32 -> Float32
+
+    class Config:
+        strict = True
+
+
+def mean_horizontal_declared_float64(df: DataFrame[Sensor]) -> DataFrame[Averaged]:
+    return df.select(pl.mean_horizontal([pl.col("reading"), pl.col("reading")]).alias("avg"))

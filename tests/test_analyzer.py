@@ -4003,6 +4003,45 @@ class TestConcatListAndHorizontal:
         assert ft is not None
         assert ft.columns["out"].dtype == Float64()
 
+    def test_mean_horizontal_all_float32_keeps_width(self):
+        # Probed (polars 1.41.2; backlog N-4): mean_horizontal returns
+        # Float32 iff every operand is Float32; any other operand (int,
+        # Float64) widens the result to Float64.
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                a: pl.Float32
+                b: pl.Float32
+
+            def f(data: DataFrame[S]):
+                return data.select(out=pl.mean_horizontal([pl.col("a"), pl.col("b")]))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["out"].dtype == Float32()
+
+    def test_mean_horizontal_float32_int_mix_widens(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                a: pl.Float32
+                b: int
+
+            def f(data: DataFrame[S]):
+                return data.select(out=pl.mean_horizontal([pl.col("a"), pl.col("b")]))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["out"].dtype == Float64()
+
     def test_mean_horizontal_all_nullable(self):
         source = textwrap.dedent(
             PANDERA_HEADER
