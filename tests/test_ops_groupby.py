@@ -10,6 +10,9 @@ from polypolarism.ops.groupby import (
     infer_groupby_result,
 )
 from polypolarism.types import (
+    Date,
+    Datetime,
+    Duration,
     Float16,
     Float32,
     Float64,
@@ -21,6 +24,7 @@ from polypolarism.types import (
     List,
     Nullable,
     RowVar,
+    Time,
     UInt8,
     UInt16,
     UInt32,
@@ -361,6 +365,118 @@ class TestSmallIntAndLandmarkReceivers:
         agg_exprs = [AggExpr(column="v", function=AggFunction.SUM, alias="total")]
         result = infer_groupby_result(input_frame, ["g"], agg_exprs)
         assert result.columns["total"].dtype == Int64()
+
+
+class TestTemporalReceivers:
+    """Temporal receivers through the reduction matrix (issue #85).
+
+    Probed (polars 1.41.2), identical in select and group_by().agg()
+    contexts unless noted:
+
+    - ``mean``/``median``/``quantile`` on Datetime[unit, tz?] /
+      Duration[unit] / Time preserve the receiver dtype EXACTLY (time unit
+      and tz flow through); on Date they return **Datetime[us]**.
+      Singleton groups produce a value (not null), so only the input's
+      nullability propagates.
+    - ``sum`` and ``std`` on Duration[unit] preserve the unit; std is null
+      on singleton groups (ddof=1) exactly like the numeric form, so it
+      stays always-nullable.
+    - ``var`` on Duration raises InvalidOperationError in BOTH contexts.
+    - ``sum``/``std``/``var`` on Date/Datetime/Time raise
+      InvalidOperationError as whole-frame reductions; in grouped contexts
+      polars instead silently yields an unconditionally all-null column of
+      the receiver dtype — never what the author meant, so both contexts
+      are rejected statically.
+    - ``min``/``max`` preserve the receiver dtype (regression pins).
+    """
+
+    MEAN_LIKE = (AggFunction.MEAN, AggFunction.MEDIAN, AggFunction.QUANTILE)
+    PRESERVED_RECEIVERS = [
+        Datetime(),
+        Datetime(unit="ms"),
+        Datetime(unit="ns", tz="UTC"),
+        Datetime(unit="ms", tz="Asia/Tokyo"),
+        Duration(unit="ms"),
+        Duration(unit="ns"),
+        Time(),
+    ]
+
+    # -- mean/median/quantile: preserve / transform -------------------------
+    @pytest.mark.parametrize("func", MEAN_LIKE, ids=lambda f: f.name)
+    @pytest.mark.parametrize("dtype", PRESERVED_RECEIVERS, ids=str)
+    @pytest.mark.parametrize("context", ["select", "agg"])
+    def test_mean_like_preserves_temporal_receiver(self, func, dtype, context):
+        result = infer_agg_result_type(func, dtype, context=context)
+        assert result == dtype
+
+    @pytest.mark.parametrize("func", MEAN_LIKE, ids=lambda f: f.name)
+    @pytest.mark.parametrize("context", ["select", "agg"])
+    def test_mean_like_on_date_returns_datetime_us(self, func, context):
+        # Probed: mean/median/quantile on Date return Datetime[us] (naive).
+        result = infer_agg_result_type(func, Date(), context=context)
+        assert result == Datetime(unit="us")
+
+    def test_mean_nullable_datetime_propagates_nullability(self):
+        dtype = Nullable(Datetime(unit="ms", tz="UTC"))
+        assert infer_agg_result_type(AggFunction.MEAN, dtype) == dtype
+
+    def test_median_temporal_stays_non_nullable(self):
+        # Probed: median of a non-empty all-non-null group is never null.
+        result = infer_agg_result_type(AggFunction.MEDIAN, Duration(unit="us"))
+        assert result == Duration(unit="us")
+
+    # -- sum/std on Duration ------------------------------------------------
+    @pytest.mark.parametrize("context", ["select", "agg"])
+    def test_sum_duration_preserves_unit(self, context):
+        result = infer_agg_result_type(AggFunction.SUM, Duration(unit="ns"), context=context)
+        assert result == Duration(unit="ns")
+
+    @pytest.mark.parametrize("context", ["select", "agg"])
+    def test_std_duration_preserves_unit_and_is_nullable(self, context):
+        # std keeps the ddof=1 singleton-group rule (issue #60) on Duration
+        # too: probed, a singleton group yields null.
+        result = infer_agg_result_type(AggFunction.STD, Duration(unit="ms"), context=context)
+        assert result == Nullable(Duration(unit="ms"))
+
+    def test_std_nullable_duration_stays_single_nullable(self):
+        result = infer_agg_result_type(AggFunction.STD, Nullable(Duration(unit="ms")))
+        assert result == Nullable(Duration(unit="ms"))
+
+    # -- genuinely-invalid cells keep raising (PLY011) ----------------------
+    @pytest.mark.parametrize("context", ["select", "agg"])
+    def test_var_duration_raises(self, context):
+        with pytest.raises(GroupByTypeError) as exc_info:
+            infer_agg_result_type(AggFunction.VAR, Duration(unit="ms"), context=context)
+        assert "var" in str(exc_info.value).lower()
+
+    @pytest.mark.parametrize("func", [AggFunction.SUM, AggFunction.STD, AggFunction.VAR])
+    @pytest.mark.parametrize("dtype", [Date(), Datetime(), Datetime(tz="UTC"), Time()], ids=str)
+    def test_sum_std_var_on_non_duration_temporals_raise(self, func, dtype):
+        with pytest.raises(GroupByTypeError) as exc_info:
+            infer_agg_result_type(func, dtype)
+        assert str(dtype) in str(exc_info.value)
+
+    @pytest.mark.parametrize("dtype", [Date(), Datetime(), Duration(), Time()], ids=str)
+    def test_product_temporal_raises(self, dtype):
+        # Probed: product raises InvalidOperationError on every temporal
+        # receiver in both contexts.
+        with pytest.raises(GroupByTypeError):
+            infer_agg_result_type(AggFunction.PRODUCT, dtype)
+
+    # -- regression pins ----------------------------------------------------
+    @pytest.mark.parametrize(
+        "dtype", [Date(), Datetime(unit="ns", tz="UTC"), Duration(unit="ms"), Time()], ids=str
+    )
+    def test_min_max_preserve_temporal_receiver(self, dtype):
+        assert infer_agg_result_type(AggFunction.MIN, dtype) == dtype
+        assert infer_agg_result_type(AggFunction.MAX, dtype) == dtype
+
+    def test_infer_groupby_result_accepts_datetime_mean(self):
+        # The issue #85 report's shape: grouped mean on Datetime[us].
+        input_frame = FrameType({"k": Utf8(), "t": Datetime(unit="us")})
+        agg_exprs = [AggExpr(column="t", function=AggFunction.MEAN, alias="mean_t")]
+        result = infer_groupby_result(input_frame, ["k"], agg_exprs)
+        assert result.columns["mean_t"].dtype == Datetime(unit="us")
 
 
 class TestUnknownAggregation:

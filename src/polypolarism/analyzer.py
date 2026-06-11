@@ -4115,7 +4115,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                     context="agg" if self._in_agg_chain else "select",
                 )
             except GroupByTypeError as e:
-                self.errors.append(str(e))
+                self.errors.append(tag(PLY011, str(e)))
                 return receiver_name, receiver_type
             # std/var with an explicit literal ``ddof=0`` are total on
             # non-empty input (probed 1.41.2: singleton group -> 0.0), so

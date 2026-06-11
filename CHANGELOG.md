@@ -146,6 +146,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Temporal receivers are no longer rejected by the reduction matrix
+  (issue #85): `mean`/`median`/`quantile` on `Datetime`/`Duration`/`Time`
+  now preserve the receiver dtype exactly — the time unit AND tz flow
+  through (`mean(Datetime[ms, UTC]) -> Datetime[ms, UTC]`) — and on
+  `Date` return a naive `Datetime[us]`; `sum`/`std` on `Duration`
+  preserve the unit (std keeps the issue-#60 ddof=1 always-nullable
+  rule). All cells probed on polars 1.41.2, identical in select and
+  `group_by().agg()` contexts. The genuinely-invalid cells stay PLY011
+  with a precise message: `var` on `Duration` raises
+  `InvalidOperationError` in both contexts, and `sum`/`std`/`var` on
+  `Date`/`Datetime`/`Time` raise as whole-frame reductions while their
+  grouped forms silently yield an unconditionally all-null column —
+  never what the author meant, so both contexts stay rejected.
+  Expression-level aggregation errors are now tagged `[PLY011]` like
+  every other `GroupByTypeError` site (one path appended untagged).
+
 - Optional (`required=False`) columns are no longer treated as provable
   extras at strict boundaries (issue #84, boundary of #82): a column
   that MAY be absent admits runtime inputs on which the call succeeds,

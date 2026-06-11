@@ -356,6 +356,42 @@ class TestAnalyzeGroupByOperations:
         )
         assert results[0].inferred_return_type == expected
 
+    def test_temporal_mean_preserves_receiver_dtype(self):
+        """Grouped mean on Datetime preserves unit+tz; Duration median keeps
+        the unit (issue #85). Probed on polars 1.41.2."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                k: str
+                ts: pl.Datetime("ms", time_zone="UTC")
+                dur: pl.Duration("ns")
+
+            class Out(pa.DataFrameModel):
+                k: str
+                mean_ts: pl.Datetime("ms", time_zone="UTC")
+                med_dur: pl.Duration("ns")
+
+            def summarize(data: DataFrame[In]) -> DataFrame[Out]:
+                return data.group_by("k").agg(
+                    pl.col("ts").mean().alias("mean_ts"),
+                    pl.col("dur").median().alias("med_dur"),
+                )
+        """
+        )
+
+        results = analyze_source(source)
+
+        assert results[0].errors == []
+        expected = FrameType(
+            {
+                "k": Utf8(),
+                "mean_ts": Datetime(unit="ms", tz="UTC"),
+                "med_dur": Duration(unit="ns"),
+            }
+        )
+        assert results[0].inferred_return_type == expected
+
     def test_detects_groupby_nonexistent_column(self):
         """Detect when group_by uses non-existent column."""
         source = textwrap.dedent(
