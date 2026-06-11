@@ -512,6 +512,8 @@ Warning codes:
 | `PLW007` | method not modeled by polypolarism. Expression/namespace methods: the result dtype degrades to `Unknown`; pin it with `.cast(...)` or a schema validation (a `.cast(...)` directly after the call retracts the warning). Frame methods probed to return a DataFrame/LazyFrame: the frame untracks; wrap the call in `Schema.validate(...)` (which retracts the warning). Terminal frame methods (`to_dicts`, `write_*`, `height`, ...) legitimately return non-frames and stay silent |
 | `PLW008` | a variable annotation *narrows* the inferred schema without runtime backing (ADR-0005) — e.g. non-null over a post-join nullable; assert it with `Schema.validate(...)` or widen the annotation |
 | `PLW010` | detected polars / pandera version is below the supported floor (see [Supported versions](#supported-versions)) |
+| `PLW011` | a schema field annotation polypolarism cannot translate — the column registers as `Unknown` dtype instead of silently vanishing (pandera raises TypeError at first use if the annotation genuinely doesn't resolve) |
+| `PLW012` | a grouped `std`/`var`/`sum` on a Date/Datetime/Time column is probed to yield an unconditionally all-null column (the same reduction raises in a plain select) — accepted, but probably not what you meant |
 
 JSON output (`--format json`) emits warnings as `severity: "warning"`
 diagnostics so editors and CI can route them separately from errors.
