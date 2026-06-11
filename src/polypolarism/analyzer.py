@@ -2681,14 +2681,32 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             if method in ARR_NAMESPACE_RETURN:
                 result = ARR_NAMESPACE_RETURN[method]
             elif method == "eval" and isinstance(receiver_inner, Array):
-                # ``arr.eval(body)`` is length-preserving and keeps the
-                # Array container (probed); ``as_list=True`` (which yields
-                # a List instead) is not modeled — degrade to Unknown.
-                if call_node is not None and any(kw.arg == "as_list" for kw in call_node.keywords):
-                    result = Unknown()
+                # ``arr.eval(body)`` runs ``body`` element-wise like
+                # ``list.eval`` — the body is type-checked with
+                # ``pl.element()`` bound to the element dtype and its
+                # errors bubble up. Probed (polars 1.41.2): the default
+                # keeps the Array container; ``as_list=True`` (keyword-
+                # only, added in polars 1.41 — issue #53) yields
+                # ``List(body dtype)`` instead, for dtype-changing,
+                # aggregating AND length-changing bodies alike (probe:
+                # ``arr.eval(pl.element().filter(...), as_list=True)``
+                # -> List(Int64)). A non-literal ``as_list`` leaves the
+                # container kind unknowable -> Unknown.
+                body_dtype = self._eval_body_dtype(receiver_inner.inner, call_node)
+                element = body_dtype if body_dtype is not None else Unknown()
+                as_list_node = (
+                    next((kw.value for kw in call_node.keywords if kw.arg == "as_list"), None)
+                    if call_node is not None
+                    else None
+                )
+                if as_list_node is None:
+                    result = Array(element)
+                elif isinstance(as_list_node, ast.Constant) and isinstance(
+                    as_list_node.value, bool
+                ):
+                    result = ListT(element) if as_list_node.value else Array(element)
                 else:
-                    body_dtype = self._eval_body_dtype(receiver_inner.inner, call_node)
-                    result = Array(body_dtype if body_dtype is not None else Unknown())
+                    result = Unknown()
             elif method in ARR_NAMESPACE_PRESERVING and receiver_inner is not None:
                 result = receiver_inner
             elif isinstance(receiver_inner, Array):

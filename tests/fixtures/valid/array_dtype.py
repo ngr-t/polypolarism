@@ -5,6 +5,11 @@ Probed return dtypes on polars 1.41.2: ``arr.sum()`` on Array(Int64, n)
 fixed width is lost), ``arr.sort()`` keeps the Array dtype, ``arr.mean()``
 -> Float64. ``explode`` on an Array column yields its element dtype, and
 casting Array -> List is always allowed.
+
+``arr.eval(body)`` keeps the Array container around the body dtype;
+``arr.eval(body, as_list=True)`` (polars 1.41) de-arrays into
+``List(body dtype)`` instead. False-negative twin:
+``invalid/arr_eval_as_list_declared_array``.
 """
 
 import pandera.polars as pa
@@ -53,3 +58,17 @@ class AsList(pa.DataFrameModel):
 
 def array_to_list(df: DataFrame[In]) -> DataFrame[AsList]:
     return df.with_columns(pl.col("q").cast(pl.List(pl.Int64)))
+
+
+class Evaluated(pa.DataFrameModel):
+    id: int
+    doubled: pl.Array(pl.Int64, 4) = pa.Field()
+    labels: pl.List(pl.Utf8) = pa.Field()
+
+
+def eval_array(df: DataFrame[In]) -> DataFrame[Evaluated]:
+    return df.select(
+        "id",
+        doubled=pl.col("q").arr.eval(pl.element() * 2),
+        labels=pl.col("q").arr.eval(pl.element().cast(pl.Utf8), as_list=True),
+    )

@@ -8209,6 +8209,14 @@ class TestArrNamespaceReturns:
             # arr.eval keeps the Array container around the body dtype
             ('pl.col("q").arr.eval(pl.element() * 2)', Array(Int64())),
             ('pl.col("q").arr.eval(pl.element().cast(pl.Utf8))', Array(Utf8())),
+            # as_list=True de-arrays into List around the body dtype —
+            # probed (polars 1.41.2; the arg landed in 1.41, issue #53):
+            # List(body dtype) for dtype-changing, aggregating AND
+            # length-changing bodies alike. Explicit as_list=False keeps
+            # the Array container (same as omitted).
+            ('pl.col("q").arr.eval(pl.element() * 2, as_list=True)', ListT(Int64())),
+            ('pl.col("q").arr.eval(pl.element().cast(pl.Utf8), as_list=True)', ListT(Utf8())),
+            ('pl.col("q").arr.eval(pl.element() * 2, as_list=False)', Array(Int64())),
             # Unrecognised method falls through to Unknown (silent)
             ('pl.col("q").arr.to_struct()', Unknown()),
         ],
@@ -8243,9 +8251,27 @@ class TestArrNamespaceReturns:
         results = analyze_source(source)
         assert any("PLY009" in e for e in results[0].errors), results[0].errors
 
-    def test_arr_eval_as_list_degrades_to_unknown(self):
-        # ``as_list=True`` yields a List at runtime — not modeled, silent.
-        assert self._dtype_of('pl.col("q").arr.eval(pl.element() * 2, as_list=True)') == Unknown()
+    def test_arr_eval_as_list_bad_body_bubbles_error(self):
+        # The body is type-checked for ``as_list=True`` too — the old
+        # Unknown fallback skipped body analysis entirely.
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]):
+                return df.select(
+                    pl.col("q").arr.eval(pl.element() + pl.lit("x"), as_list=True).alias("out")
+                )
+            """
+        )
+        results = analyze_source(source)
+        assert any("PLY009" in e for e in results[0].errors), results[0].errors
+
+    # upgrade trigger: non-literal as_list values gain constant propagation
+    @pytest.mark.imprecision
+    def test_arr_eval_non_literal_as_list_degrades_to_unknown(self):
+        # A non-literal ``as_list`` leaves the container kind (Array vs
+        # List) unknowable — never guess one of the two.
+        expr = 'pl.col("q").arr.eval(pl.element() * 2, as_list=flag)'
+        assert self._dtype_of(expr) == Unknown()
 
 
 class TestContainerAggReturns:
