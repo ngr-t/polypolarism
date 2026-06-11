@@ -76,13 +76,25 @@ def collect_schemas_with_imports(tree: ast.Module, file_path: Path) -> SchemaReg
 
     Schemas defined in ``tree`` itself take precedence over imports;
     imported schemas only fill names not already present.
+
+    Cross-file INHERITANCE (issue #76): a class whose base is an imported
+    schema (``from base import WithId`` + ``class Users(WithId)``) is not
+    recognizable by the per-file pass — the base name is unknown until
+    the imports are merged. A second fixpoint pass
+    (:func:`_collect_inherited_subclasses`) re-scans every parsed tree
+    against the merged registry, so such subclasses (and in-file chains
+    rooted at them, aliased bases, and dotted ``mod.Schema`` bases) parse
+    with the parent's fields merged exactly like the same-file path.
     """
     registry = collect_schemas(tree)
+    own_names = set(registry.schemas)
     visited: set[Path] = set()
     with contextlib.suppress(OSError):
         visited.add(file_path.resolve())
-    _merge_imports(tree, file_path, registry, visited)
+    imported_trees: list[ast.Module] = []
+    _merge_imports(tree, file_path, registry, visited, imported_trees)
     _merge_module_imports(tree, file_path, registry)
+    _collect_inherited_subclasses(tree, imported_trees, registry, own_names)
     return registry
 
 
@@ -132,6 +144,13 @@ def _parse_schema(node: ast.ClassDef, registry: SchemaRegistry) -> Schema:
     for base in node.bases:
         if isinstance(base, ast.Name) and base.id in registry.schemas:
             parent_names.append(base.id)
+        elif isinstance(base, ast.Attribute):
+            # Module-qualified base ``class Users(mod.WithId)`` — resolved
+            # through the dotted keys ``import mod`` registers (issues
+            # #68/#76).
+            dotted = _dotted_base_name(base)
+            if dotted is not None and dotted in registry.schemas:
+                parent_names.append(dotted)
     schema.bases = parent_names
 
     # Merge parent columns first; leftmost base wins on conflicts (Python MRO-ish).
@@ -254,8 +273,14 @@ def _merge_imports(
     current_file: Path,
     registry: SchemaRegistry,
     visited: set[Path],
+    imported_trees: list[ast.Module] | None = None,
 ) -> None:
-    """Recursively merge schemas from project-local imports into ``registry``."""
+    """Recursively merge schemas from project-local imports into ``registry``.
+
+    Each successfully parsed imported tree is appended to
+    ``imported_trees`` (when given) so the cross-file inheritance pass
+    (issue #76) can re-scan it against the fully merged registry.
+    """
     for node in tree.body:
         if not isinstance(node, ast.ImportFrom):
             continue
@@ -274,13 +299,23 @@ def _merge_imports(
             sub_tree = ast.parse(sub_source)
         except (OSError, UnicodeDecodeError, SyntaxError):
             continue
+        if imported_trees is not None:
+            imported_trees.append(sub_tree)
 
         sub_registry = collect_schemas(sub_tree)
         for name, schema in sub_registry.schemas.items():
             registry.schemas.setdefault(name, schema)
+        # ``from X import Y as Z`` binds Z — register the alias so both
+        # ``DataFrame[Z]`` annotations and ``class C(Z)`` bases resolve
+        # (issue #76).
+        for alias in node.names:
+            if alias.asname is not None:
+                target = sub_registry.schemas.get(alias.name)
+                if target is not None:
+                    registry.schemas.setdefault(alias.asname, target)
 
         # Recurse so chains like app -> schemas -> base resolve fully.
-        _merge_imports(sub_tree, resolved, registry, visited)
+        _merge_imports(sub_tree, resolved, registry, visited, imported_trees)
 
 
 def _merge_module_imports(
@@ -332,16 +367,92 @@ def _merge_module_imports(
                 continue
 
             # Build the imported module's full registry (its own schemas
-            # plus from-import chains), then mount it under the binding
-            # name: the alias if given, else the full dotted module path
-            # (``import pkg.mod`` binds ``pkg`` but use sites spell
-            # ``pkg.mod.Schema``, which is exactly this key).
+            # plus from-import chains and cross-file inheritance — issue
+            # #76), then mount it under the binding name: the alias if
+            # given, else the full dotted module path (``import pkg.mod``
+            # binds ``pkg`` but use sites spell ``pkg.mod.Schema``, which
+            # is exactly this key).
             sub_registry = collect_schemas(sub_tree)
+            sub_own = set(sub_registry.schemas)
             sub_visited = {real}
-            _merge_imports(sub_tree, resolved, sub_registry, sub_visited)
+            sub_trees: list[ast.Module] = []
+            _merge_imports(sub_tree, resolved, sub_registry, sub_visited, sub_trees)
+            _collect_inherited_subclasses(sub_tree, sub_trees, sub_registry, sub_own)
             prefix = alias.asname or alias.name
             for name, schema in sub_registry.schemas.items():
                 registry.schemas.setdefault(f"{prefix}.{name}", schema)
+
+
+def _dotted_base_name(node: ast.expr) -> str | None:
+    """Render a ``Name``/``Attribute`` base as ``a.b.c``; ``None`` for
+    anything else. Mirrors ``pandera_annotation._dotted_name`` (not
+    imported — that module imports this one)."""
+    parts: list[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name):
+        return None
+    parts.append(node.id)
+    return ".".join(reversed(parts))
+
+
+def _bases_resolve(node: ast.ClassDef, registry: SchemaRegistry) -> bool:
+    """True when any base marks ``node`` as a schema against the MERGED
+    registry: ``DataFrameModel``/``SchemaModel`` (bare or attribute tail),
+    a registered schema name, or a dotted module-qualified schema key."""
+    for base in node.bases:
+        if isinstance(base, ast.Name):
+            if base.id in _BASE_NAMES or base.id in registry.schemas:
+                return True
+        elif isinstance(base, ast.Attribute):
+            if base.attr in _BASE_NAMES:
+                return True
+            dotted = _dotted_base_name(base)
+            if dotted is not None and dotted in registry.schemas:
+                return True
+    return False
+
+
+def _collect_inherited_subclasses(
+    main_tree: ast.Module,
+    imported_trees: list[ast.Module],
+    registry: SchemaRegistry,
+    own_names: set[str],
+) -> None:
+    """Second pass for cross-file inheritance (issue #76).
+
+    The per-file pass cannot recognize ``class Users(WithId)`` when
+    ``WithId`` is imported — the base name is unknown until the imports
+    are merged. Re-scan every parsed tree against the merged registry and
+    parse the newly recognizable classes (parents merged exactly like the
+    same-file path), repeating to fixpoint so in-file chains rooted at an
+    imported base (``class A(Imported); class B(A)``) resolve too.
+
+    Precedence mirrors runtime name binding: a class defined in the
+    ANALYZED module shadows a same-named schema merged from an import
+    (``own_names`` tracks what the analyzed module itself has defined);
+    classes from imported trees never overwrite existing entries.
+    """
+    changed = True
+    while changed:
+        changed = False
+        for node in main_tree.body:
+            if not isinstance(node, ast.ClassDef) or node.name in own_names:
+                continue
+            if not _bases_resolve(node, registry):
+                continue
+            registry.schemas[node.name] = _parse_schema(node, registry)
+            own_names.add(node.name)
+            changed = True
+        for sub_tree in imported_trees:
+            for node in sub_tree.body:
+                if not isinstance(node, ast.ClassDef) or node.name in registry.schemas:
+                    continue
+                if not _bases_resolve(node, registry):
+                    continue
+                registry.schemas[node.name] = _parse_schema(node, registry)
+                changed = True
 
 
 def _topo_sort(candidates: dict[str, ast.ClassDef]) -> list[str]:

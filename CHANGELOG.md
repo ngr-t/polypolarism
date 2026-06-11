@@ -119,6 +119,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Cross-file schema inheritance resolves (issue #76): a class whose base
+  is an IMPORTED schema (`from base import WithId` + `class
+  Users(WithId)`) was not recognized as a schema at all — functions
+  annotated with it carried no declared type and passed vacuously. A
+  second fixpoint pass re-scans every parsed tree against the merged
+  registry, so such subclasses parse with the parent's fields merged
+  exactly like the same-file path — including in-file chains rooted at
+  an imported base, subclasses living inside imported files, aliased
+  bases (`from base import WithId as M`), and module-qualified bases
+  (`import base` + `class Users(base.WithId)`, via the issue #68 dotted
+  keys). `from X import Y as Z` aliases now also resolve in
+  `DataFrame[Z]` annotations; a local class shadows a same-named
+  imported schema (runtime name-binding precedence). The previously
+  vacuous transitive-import test now asserts the inherited columns are
+  real and that violations against them fail.
 - README documented the runtime-broken `Annotated[pl.Array, pl.Int64(), 3]`
   form; the example now shows the form pandera actually accepts,
   `Annotated[pl.Array, pl.Int64(), 3, None]` (issue #69 — pandera demands

@@ -157,6 +157,11 @@ class TestTransitiveImport:
     """app -> schemas -> base — chain of imports."""
 
     def test_resolves_transitively(self, tmp_path: Path):
+        # Issue #76: this test used to pass VACUOUSLY — ``Users(WithId)``
+        # was not recognized as a schema (its base is imported), so the
+        # function carried no declared type and "passed" with a PLW006
+        # the assertions never inspected. It now checks the inherited
+        # column is genuinely resolved.
         _project_marker(tmp_path)
         _write(
             tmp_path / "base.py",
@@ -193,6 +198,207 @@ class TestTransitiveImport:
         results = check_file(tmp_path / "app.py")
         assert len(results) == 1
         assert results[0].passed, results[0].errors
+        # The resolution must be real, not a PLW006-mediated skip.
+        assert not any("PLW006" in str(w) for w in results[0].warnings), results[0].warnings
+
+    def test_inherited_column_violation_fails(self, tmp_path: Path):
+        # The other half of the vacuity (issue #76): dropping an
+        # INHERITED column must be a provable miss, not a silent pass.
+        _project_marker(tmp_path)
+        _write(
+            tmp_path / "base.py",
+            """
+            import pandera.polars as pa
+
+
+            class WithId(pa.DataFrameModel):
+                user_id: int
+            """,
+        )
+        _write(
+            tmp_path / "app.py",
+            """
+            import polars as pl
+            from pandera.typing.polars import DataFrame
+            from base import WithId
+
+
+            class Users(WithId):
+                name: str
+
+
+            def drops_inherited(df: DataFrame[Users]) -> DataFrame[Users]:
+                return df.select(pl.col("name"))
+            """,
+        )
+        results = check_file(tmp_path / "app.py")
+        assert len(results) == 1
+        assert not results[0].passed
+        assert any("user_id" in str(e) for e in results[0].errors), results[0].errors
+
+
+class TestCrossFileInheritance:
+    """Issue #76: subclasses of IMPORTED schema bases resolve with the
+    parent's fields merged — in the analyzed file, in imported files, and
+    through alias / dotted-base spellings."""
+
+    def _base_file(self, tmp_path: Path) -> None:
+        _project_marker(tmp_path)
+        _write(
+            tmp_path / "base.py",
+            """
+            import pandera.polars as pa
+
+
+            class WithId(pa.DataFrameModel):
+                user_id: int
+
+                class Config:
+                    strict = True
+            """,
+        )
+
+    def test_subclass_in_analyzed_file_merges_imported_parent(self, tmp_path: Path):
+        self._base_file(tmp_path)
+        source = textwrap.dedent(
+            """
+            from base import WithId
+
+
+            class Users(WithId):
+                name: str
+            """
+        )
+        registry = collect_schemas_with_imports(ast.parse(source), tmp_path / "app.py")
+        users = registry.get("Users")
+        assert users is not None
+        assert set(users.columns) == {"user_id", "name"}
+        assert users.strict is True  # Config inherited like the same-file path
+
+    def test_chain_rooted_at_imported_base(self, tmp_path: Path):
+        # class A(Imported); class B(A) — the in-file chain only becomes
+        # recognizable once the imported root is known (fixpoint).
+        self._base_file(tmp_path)
+        source = textwrap.dedent(
+            """
+            from base import WithId
+
+
+            class Accounts(WithId):
+                balance: float
+
+
+            class PremiumAccounts(Accounts):
+                tier: str
+            """
+        )
+        registry = collect_schemas_with_imports(ast.parse(source), tmp_path / "app.py")
+        premium = registry.get("PremiumAccounts")
+        assert premium is not None
+        assert set(premium.columns) == {"user_id", "balance", "tier"}
+
+    def test_aliased_import_base(self, tmp_path: Path):
+        self._base_file(tmp_path)
+        source = textwrap.dedent(
+            """
+            from base import WithId as IdMixin
+
+
+            class Users(IdMixin):
+                name: str
+            """
+        )
+        registry = collect_schemas_with_imports(ast.parse(source), tmp_path / "app.py")
+        users = registry.get("Users")
+        assert users is not None
+        assert set(users.columns) == {"user_id", "name"}
+
+    def test_dotted_module_qualified_base(self, tmp_path: Path):
+        # ``import base`` + ``class Users(base.WithId)`` — the dotted key
+        # machinery from issue #68 must serve base-class lookup too.
+        self._base_file(tmp_path)
+        source = textwrap.dedent(
+            """
+            import base
+
+
+            class Users(base.WithId):
+                name: str
+            """
+        )
+        registry = collect_schemas_with_imports(ast.parse(source), tmp_path / "app.py")
+        users = registry.get("Users")
+        assert users is not None
+        assert set(users.columns) == {"user_id", "name"}
+
+    def test_inheritance_inside_imported_file(self, tmp_path: Path):
+        # The issue's exact shape: the subclass lives in an imported file
+        # whose own base import chains one file further.
+        self._base_file(tmp_path)
+        _write(
+            tmp_path / "schemas.py",
+            """
+            from base import WithId
+
+
+            class Users(WithId):
+                name: str
+            """,
+        )
+        source = "from schemas import Users\n"
+        registry = collect_schemas_with_imports(ast.parse(source), tmp_path / "app.py")
+        users = registry.get("Users")
+        assert users is not None
+        assert set(users.columns) == {"user_id", "name"}
+
+    def test_child_override_wins_over_imported_parent(self, tmp_path: Path):
+        self._base_file(tmp_path)
+        source = textwrap.dedent(
+            """
+            from base import WithId
+
+
+            class Users(WithId):
+                user_id: str
+            """
+        )
+        registry = collect_schemas_with_imports(ast.parse(source), tmp_path / "app.py")
+        users = registry.get("Users")
+        assert users is not None
+        from polypolarism.types import Utf8
+
+        assert users.columns["user_id"].dtype == Utf8()
+
+    def test_local_class_shadows_same_named_import(self, tmp_path: Path):
+        # ``from schemas import ...`` merges schemas.py's Users into the
+        # registry, but the analyzed file defines its OWN Users — at
+        # runtime the local class wins, so the local definition must take
+        # precedence over the merged import.
+        self._base_file(tmp_path)
+        _write(
+            tmp_path / "schemas.py",
+            """
+            import pandera.polars as pa
+
+
+            class Users(pa.DataFrameModel):
+                wrong: float
+            """,
+        )
+        source = textwrap.dedent(
+            """
+            from base import WithId
+            from schemas import Users as _ImportedUsers
+
+
+            class Users(WithId):
+                name: str
+            """
+        )
+        registry = collect_schemas_with_imports(ast.parse(source), tmp_path / "app.py")
+        users = registry.get("Users")
+        assert users is not None
+        assert set(users.columns) == {"user_id", "name"}, users.columns
 
 
 class TestUnresolvedSchemaWarning:
