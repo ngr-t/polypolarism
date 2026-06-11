@@ -10,14 +10,21 @@ from polypolarism.ops.groupby import (
     infer_groupby_result,
 )
 from polypolarism.types import (
+    Float16,
     Float32,
     Float64,
     FrameType,
+    Int8,
+    Int16,
     Int64,
+    Int128,
     List,
     Nullable,
     RowVar,
+    UInt8,
+    UInt16,
     UInt32,
+    UInt128,
     Unknown,
     Utf8,
 )
@@ -217,6 +224,145 @@ class TestFloat32WidthPreservation:
     def test_quantile_float32_returns_float32(self):
         result = infer_agg_result_type(AggFunction.QUANTILE, Float32())
         assert result == Float32()
+
+
+class TestSmallIntAndLandmarkReceivers:
+    """Full numeric receiver matrix (backlog N-5), probed on polars 1.41.2.
+
+    - ``sum``/``product`` upcast sub-32-bit integer receivers
+      (Int8/Int16/UInt8/UInt16) to **Int64** — signed Int64 even for the
+      unsigned receivers — identically in select and group_by().agg().
+    - ``mean``/``std``/``var``/``median``/``quantile`` on every integer
+      receiver (Int8 through UInt128) return Float64.
+    - Float16 keeps its width through EVERY reduction in select context
+      (like Float32), but mean/median/quantile on Float16 and product on
+      UInt128 PANIC in rust inside grouped evaluation (group_by().agg(),
+      over windows) — those cells must raise in context="agg".
+    - Int128/UInt128 sum/product/min/max preserve the receiver width.
+    """
+
+    # -- sub-32-bit integer upcasts (identical in both contexts) ----------
+    @pytest.mark.parametrize("dtype", [Int8(), Int16(), UInt8(), UInt16()])
+    @pytest.mark.parametrize("func", [AggFunction.SUM, AggFunction.PRODUCT])
+    @pytest.mark.parametrize("context", ["select", "agg"])
+    def test_sum_product_small_int_upcasts_to_int64(self, func, dtype, context):
+        result = infer_agg_result_type(func, dtype, context=context)
+        assert result == Int64()
+
+    def test_sum_nullable_small_int_keeps_nullability(self):
+        result = infer_agg_result_type(AggFunction.SUM, Nullable(UInt8()))
+        assert result == Nullable(Int64())
+
+    @pytest.mark.parametrize("dtype", [Int8(), Int16(), UInt8(), UInt16()])
+    def test_mean_small_int_returns_float64(self, dtype):
+        assert infer_agg_result_type(AggFunction.MEAN, dtype) == Float64()
+        assert infer_agg_result_type(AggFunction.MEDIAN, dtype) == Float64()
+        assert infer_agg_result_type(AggFunction.STD, dtype) == Nullable(Float64())
+
+    @pytest.mark.parametrize("dtype", [Int8(), UInt16()])
+    def test_min_max_small_int_preserve_width(self, dtype):
+        assert infer_agg_result_type(AggFunction.MIN, dtype) == dtype
+        assert infer_agg_result_type(AggFunction.MAX, dtype) == dtype
+
+    # -- 128-bit receivers -------------------------------------------------
+    @pytest.mark.parametrize("dtype", [Int128(), UInt128()])
+    def test_sum_128bit_preserves_width(self, dtype):
+        assert infer_agg_result_type(AggFunction.SUM, dtype) == dtype
+
+    @pytest.mark.parametrize("dtype", [Int128(), UInt128()])
+    def test_float_reductions_128bit_return_float64(self, dtype):
+        assert infer_agg_result_type(AggFunction.MEAN, dtype) == Float64()
+        assert infer_agg_result_type(AggFunction.QUANTILE, dtype) == Float64()
+        assert infer_agg_result_type(AggFunction.VAR, dtype) == Nullable(Float64())
+
+    def test_product_int128_preserves_width_both_contexts(self):
+        assert infer_agg_result_type(AggFunction.PRODUCT, Int128(), context="select") == Int128()
+        assert infer_agg_result_type(AggFunction.PRODUCT, Int128(), context="agg") == Int128()
+
+    def test_product_uint128_select_preserves_width(self):
+        result = infer_agg_result_type(AggFunction.PRODUCT, UInt128(), context="select")
+        assert result == UInt128()
+
+    def test_product_uint128_agg_raises(self):
+        # Probed (polars 1.41.2): group_by().agg(product) on UInt128 panics
+        # in rust (SchemaMismatch "Expected list[i64], got u128").
+        with pytest.raises(GroupByTypeError) as exc_info:
+            infer_agg_result_type(AggFunction.PRODUCT, UInt128(), context="agg")
+        assert "product" in str(exc_info.value).lower()
+        assert "panic" in str(exc_info.value).lower()
+
+    # -- Float16 -----------------------------------------------------------
+    @pytest.mark.parametrize(
+        ("func", "expected"),
+        [
+            (AggFunction.SUM, Float16()),
+            (AggFunction.MEAN, Float16()),
+            (AggFunction.MEDIAN, Float16()),
+            (AggFunction.QUANTILE, Float16()),
+            (AggFunction.PRODUCT, Float16()),
+            (AggFunction.MIN, Float16()),
+            (AggFunction.MAX, Float16()),
+            (AggFunction.STD, Nullable(Float16())),
+            (AggFunction.VAR, Nullable(Float16())),
+        ],
+        ids=lambda p: str(p),
+    )
+    def test_float16_select_keeps_width(self, func, expected):
+        # Probed (polars 1.41.2): every select-context reduction on Float16
+        # keeps the half-precision width (like Float32).
+        result = infer_agg_result_type(func, Float16(), context="select")
+        assert result == expected
+
+    @pytest.mark.parametrize(
+        "func", [AggFunction.MEAN, AggFunction.MEDIAN, AggFunction.QUANTILE]
+    )
+    def test_float16_grouped_float_reductions_raise(self, func):
+        # Probed (polars 1.41.2): mean/median/quantile on Float16 panic in
+        # rust in grouped contexts ("not implemented for dtype Float16").
+        with pytest.raises(GroupByTypeError) as exc_info:
+            infer_agg_result_type(func, Float16(), context="agg")
+        assert "Float16" in str(exc_info.value)
+        assert "panic" in str(exc_info.value).lower()
+
+    def test_float16_grouped_panic_applies_to_nullable_receiver(self):
+        with pytest.raises(GroupByTypeError):
+            infer_agg_result_type(AggFunction.MEAN, Nullable(Float16()), context="agg")
+
+    @pytest.mark.parametrize(
+        ("func", "expected"),
+        [
+            (AggFunction.SUM, Float16()),
+            (AggFunction.PRODUCT, Float16()),
+            (AggFunction.STD, Nullable(Float16())),
+            (AggFunction.VAR, Nullable(Float16())),
+            (AggFunction.MIN, Float16()),
+            (AggFunction.MAX, Float16()),
+        ],
+        ids=lambda p: str(p),
+    )
+    def test_float16_grouped_non_panicking_cells_keep_width(self, func, expected):
+        # Probed (polars 1.41.2): sum/product/std/var/min/max on Float16 do
+        # NOT panic in group_by().agg() and keep the receiver width.
+        result = infer_agg_result_type(func, Float16(), context="agg")
+        assert result == expected
+
+    def test_default_context_is_agg(self):
+        # The conservative default: an unspecified context must reject the
+        # guaranteed-crash cells.
+        with pytest.raises(GroupByTypeError):
+            infer_agg_result_type(AggFunction.MEAN, Float16())
+
+    def test_infer_groupby_result_rejects_float16_mean(self):
+        input_frame = FrameType({"g": Utf8(), "v": Float16()})
+        agg_exprs = [AggExpr(column="v", function=AggFunction.MEAN, alias="avg")]
+        with pytest.raises(GroupByTypeError):
+            infer_groupby_result(input_frame, ["g"], agg_exprs)
+
+    def test_infer_groupby_result_accepts_small_int_sum(self):
+        input_frame = FrameType({"g": Utf8(), "v": Int8()})
+        agg_exprs = [AggExpr(column="v", function=AggFunction.SUM, alias="total")]
+        result = infer_groupby_result(input_frame, ["g"], agg_exprs)
+        assert result.columns["total"].dtype == Int64()
 
 
 class TestUnknownAggregation:

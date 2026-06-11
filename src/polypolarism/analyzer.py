@@ -89,6 +89,7 @@ from polypolarism.ops.groupby import (
     AggExpr,
     AggFunction,
     GroupByTypeError,
+    grouped_agg_panics,
     infer_agg_result_type,
     infer_groupby_result,
 )
@@ -1832,6 +1833,13 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         # ``_const_int`` so int-valued call args (rolling min_samples /
         # window_size / ddof) resolve like literals. Empty when standalone.
         self.int_consts: Mapping[str, int] = int_consts if int_consts is not None else {}
+        # True while ``analyze_agg_expr``'s chain fallback re-enters the
+        # expression analyser (backlog N-5): expression-level aggregations
+        # then infer with the grouped ("agg") context, so the probed
+        # grouped-panic cells (e.g. ``mean`` on Float16) are still rejected
+        # inside ``agg(...)`` method chains. False everywhere else —
+        # ``select``/``with_columns`` are whole-frame reductions.
+        self._in_agg_chain = False
 
     def _const_int(self, node: ast.expr | None) -> int | None:
         """Resolve ``node`` to an int: a literal, or a ``Name`` bound to an
@@ -1941,8 +1949,15 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         # etc.) is handled by reusing the expression analyser. We delegate to
         # ``analyze_select_expr`` on the *original* node (it strips the
         # ``.alias(...)`` itself), and turn its (name, dtype) into an
-        # AggExpr with a pre-resolved ``dtype`` override.
-        chain_name, chain_dtype = self.analyze_select_expr(node)
+        # AggExpr with a pre-resolved ``dtype`` override. The flag keeps the
+        # grouped ("agg") inference context alive through the re-entry
+        # (backlog N-5).
+        prev_in_agg = self._in_agg_chain
+        self._in_agg_chain = True
+        try:
+            chain_name, chain_dtype = self.analyze_select_expr(node)
+        finally:
+            self._in_agg_chain = prev_in_agg
         if chain_dtype is not None:
             # Anchor the AggExpr to the deepest pl.col so the column-existence
             # check elsewhere has a sensible source attribution; if there's no
@@ -2543,7 +2558,11 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                     self.errors.append(tag(PLY001, str(e)))
                     return col, None  # type: ignore[return-value]
                 try:
-                    result_type = infer_agg_result_type(agg_func, col_type)
+                    result_type = infer_agg_result_type(
+                        agg_func,
+                        col_type,
+                        context="agg" if self._in_agg_chain else "select",
+                    )
                 except GroupByTypeError as e:
                     self.errors.append(tag(PLY011, str(e)))
                     return col, None  # type: ignore[return-value]
@@ -3414,6 +3433,30 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         # the list) but broadcasts a scalar-per-group expression unchanged.
         # An unknown / non-literal strategy degrades to Unknown.
         if method == "over":
+            # Grouped-context panic cells (backlog N-5): mean/median/quantile
+            # on Float16 and product on UInt128 panic in rust inside ANY
+            # grouped evaluation — over windows included, not just
+            # group_by().agg() (probed, polars 1.41.2). The receiver's dtype
+            # was inferred with the lenient "select" context; re-check the
+            # cell here. Every panic cell is width-preserving, so the
+            # aggregation's output dtype (= ``receiver_type``) equals its
+            # input dtype.
+            if (
+                receiver_type is not None
+                and isinstance(receiver, ast.Call)
+                and isinstance(receiver.func, ast.Attribute)
+            ):
+                over_agg = agg_function_for(receiver.func.attr)
+                if over_agg is not None and grouped_agg_panics(over_agg, receiver_type):
+                    self.errors.append(
+                        tag(
+                            PLY011,
+                            f"over: {receiver.func.attr} on {receiver_type} panics in "
+                            f"rust at runtime in a grouped (window) context — probed "
+                            f"(polars 1.41.2). The same reduction is valid in a plain "
+                            f"select; cast the column to a wider dtype first",
+                        )
+                    )
             key_nodes: list[ast.expr] = list(node.args)
             strategy: str | None = "group_to_rows"
             for kw in node.keywords:
@@ -3679,7 +3722,13 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         }
         if method in agg_map and receiver_type is not None:
             try:
-                result_type = infer_agg_result_type(agg_map[method], receiver_type)
+                result_type = infer_agg_result_type(
+                    agg_map[method],
+                    receiver_type,
+                    # Expression-level aggs are whole-frame reductions unless
+                    # the agg chain fallback re-entered us (backlog N-5).
+                    context="agg" if self._in_agg_chain else "select",
+                )
             except GroupByTypeError as e:
                 self.errors.append(str(e))
                 return receiver_name, receiver_type

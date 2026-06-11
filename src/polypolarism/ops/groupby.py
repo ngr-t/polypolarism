@@ -5,18 +5,26 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum, auto
+from typing import Literal
 
 from polypolarism.types import (
     DataType,
+    Float16,
     Float32,
     Float64,
     FrameType,
+    Int8,
+    Int16,
     Int32,
     Int64,
+    Int128,
     List,
     Nullable,
+    UInt8,
+    UInt16,
     UInt32,
     UInt64,
+    UInt128,
     Unknown,
 )
 from polypolarism.types import (
@@ -80,12 +88,62 @@ class AggExpr:
         return self.alias if self.alias is not None else self.column
 
 
+# The evaluation context of an aggregation expression (backlog N-5):
+# "select" is a whole-frame reduction (``df.select(pl.col("x").mean())``,
+# ``with_columns``); "agg" is grouped evaluation (``group_by().agg()`` and
+# ``Expr.over`` windows). They share one dtype table but differ on the
+# grouped-panic cells below.
+AggContext = Literal["select", "agg"]
+
 # Receiver dtypes accepted by numeric aggregations (sum/mean/std/...).
-# Deliberately a SUBSET of ``types.NUMERIC_DTYPES``: only these widths have
-# probed aggregation signatures (e.g. polars upcasts ``sum(Int8)`` to Int64,
-# which ``_infer_sum``'s type-preserving rule would get wrong). Widening this
-# tuple requires probing the small-int/Float16/128-bit signatures first.
-NUMERIC_TYPES = (Int64, Int32, UInt32, UInt64, Float64, Float32)
+# The full numeric width set: every cell of the
+# {sum, mean, std, var, median, quantile, min, max, product} x width matrix
+# was probed on polars 1.41.2 in both select and group_by().agg() contexts
+# (backlog N-5); the per-function rules and ``GROUPED_PANIC_CELLS`` below
+# carry the probed signatures.
+NUMERIC_TYPES = (
+    Int8,
+    Int16,
+    Int32,
+    Int64,
+    Int128,
+    UInt8,
+    UInt16,
+    UInt32,
+    UInt64,
+    UInt128,
+    Float16,
+    Float32,
+    Float64,
+)
+
+# sum/product upcast sub-32-bit integer receivers to Int64 — SIGNED Int64
+# even for the unsigned receivers. Probed (polars 1.41.2): identical in
+# select and agg contexts; e.g. sum of UInt8 [250, 250] is 500: i64.
+_SMALL_INT_TYPES = (Int8, Int16, UInt8, UInt16)
+
+# Cells that PANIC in rust (pyo3 ``PanicException``, a BaseException — not a
+# catchable polars error class) when evaluated in a grouped context —
+# ``group_by().agg()`` and ``Expr.over`` windows — while the same expression
+# is fine as a whole-frame (select) reduction. Probed (polars 1.41.2):
+#   mean/median/quantile on Float16 -> "not implemented for dtype Float16"
+#   product on UInt128 -> SchemaMismatch panic ("Expected list[i64], got u128")
+# Note the asymmetry: sum/std/var/min/max/product on Float16 do NOT panic.
+# Every panic cell is width-preserving in select context, so callers that
+# only see the aggregation's OUTPUT dtype (the analyzer's ``over`` branch)
+# can check it against this table directly.
+GROUPED_PANIC_CELLS: dict[AggFunction, tuple[type[DataType], ...]] = {
+    AggFunction.MEAN: (Float16,),
+    AggFunction.MEDIAN: (Float16,),
+    AggFunction.QUANTILE: (Float16,),
+    AggFunction.PRODUCT: (UInt128,),
+}
+
+
+def grouped_agg_panics(func: AggFunction, dtype: DataType) -> bool:
+    """True if ``func`` on ``dtype`` is a probed grouped-context panic cell."""
+    inner, _ = _unwrap_nullable(dtype)
+    return isinstance(inner, GROUPED_PANIC_CELLS.get(func, ()))
 
 
 def _is_numeric(dtype: DataType) -> bool:
@@ -102,33 +160,42 @@ def _is_numeric(dtype: DataType) -> bool:
 def _float_reduction_width(inner: DataType) -> DataType:
     """Result width of a float-returning reduction (mean/std/var/median/quantile).
 
-    Probed (polars 1.41.2; backlog N-2): a Float32 receiver returns
-    Float32; every other numeric receiver returns Float64.
+    Probed (polars 1.41.2; backlog N-2/N-5): Float32 and Float16 receivers
+    keep their width; every other numeric receiver (Int8 through UInt128)
+    returns Float64.
     """
-    return Float32() if isinstance(inner, Float32) else Float64()
+    if isinstance(inner, (Float16, Float32)):
+        return inner
+    return Float64()
 
 
 def _infer_sum(dtype: DataType) -> DataType:
-    """sum(T) -> T for numeric types."""
+    """sum(T) -> T for numeric types; sub-32-bit ints upcast to Int64."""
     inner, is_nullable = _unwrap_nullable(dtype)
 
     if not isinstance(inner, NUMERIC_TYPES):
         raise GroupByTypeError(f"Cannot apply sum to type {dtype}: sum requires numeric type")
 
-    # sum preserves the type (Int64 -> Int64, Float64 -> Float64)
+    # Probed (polars 1.41.2; backlog N-5): Int8/Int16/UInt8/UInt16 sum to
+    # Int64 (overflow guard, signed even for unsigned receivers); every
+    # wider int (incl. Int128/UInt128) and float (incl. Float16) preserves
+    # the receiver dtype.
+    if isinstance(inner, _SMALL_INT_TYPES):
+        inner = Int64()
     return _wrap_nullable(inner, is_nullable)
 
 
 def _infer_mean(dtype: DataType) -> DataType:
-    """mean(T) -> Float64 for numeric types; mean(Float32) -> Float32."""
+    """mean(T) -> Float64 for numeric types; mean(Float32/Float16) keeps the width."""
     inner, is_nullable = _unwrap_nullable(dtype)
 
     if not isinstance(inner, NUMERIC_TYPES):
         raise GroupByTypeError(f"Cannot apply mean to type {dtype}: mean requires numeric type")
 
-    # Probed (polars 1.41.2; backlog N-2): a Float32 receiver keeps its
-    # width in both group_by().agg() and select contexts; every other
-    # numeric receiver yields Float64.
+    # Probed (polars 1.41.2; backlog N-2/N-5): Float32 and Float16
+    # receivers keep their width (Float16 in select context only — the
+    # grouped form is a panic cell handled in ``infer_agg_result_type``);
+    # every other numeric receiver yields Float64.
     return _wrap_nullable(_float_reduction_width(inner), is_nullable)
 
 
@@ -198,12 +265,16 @@ def _infer_float_reduction(name: str, *, always_nullable: bool = False):
 
 
 def _infer_product(dtype: DataType) -> DataType:
-    """product(T) -> T for numeric types."""
+    """product(T) -> T for numeric types; sub-32-bit ints upcast to Int64."""
     inner, is_nullable = _unwrap_nullable(dtype)
     if not isinstance(inner, NUMERIC_TYPES):
         raise GroupByTypeError(
             f"Cannot apply product to type {dtype}: product requires numeric type"
         )
+    # Probed (polars 1.41.2; backlog N-5): same sub-32-bit upcast as sum
+    # (UInt8/UInt16 -> signed Int64 too); all other widths preserved.
+    if isinstance(inner, _SMALL_INT_TYPES):
+        inner = Int64()
     return _wrap_nullable(inner, is_nullable)
 
 
@@ -226,13 +297,22 @@ _AGG_INFER_MAP: dict[AggFunction, Callable[[DataType], DataType]] = {
 }
 
 
-def infer_agg_result_type(func: AggFunction, input_type: DataType) -> DataType:
+def infer_agg_result_type(
+    func: AggFunction,
+    input_type: DataType,
+    *,
+    context: AggContext = "agg",
+) -> DataType:
     """
     Infer the result type of an aggregation function applied to a column.
 
     Args:
         func: The aggregation function
         input_type: The type of the input column
+        context: "select" for whole-frame reductions, "agg" for grouped
+            evaluation (group_by().agg(), over windows). Defaults to the
+            conservative "agg", which additionally rejects the probed
+            ``GROUPED_PANIC_CELLS`` (guaranteed rust panics at runtime).
 
     Returns:
         The result type of the aggregation
@@ -250,6 +330,13 @@ def infer_agg_result_type(func: AggFunction, input_type: DataType) -> DataType:
         if func is AggFunction.LIST:
             return List(Unknown())
         return Unknown()
+    if context == "agg" and grouped_agg_panics(func, input_type):
+        raise GroupByTypeError(
+            f"Cannot apply {func.name.lower()} to type {input_type} in a grouped "
+            f"context (group_by().agg() / over window): polars panics in rust at "
+            f"runtime — probed (polars 1.41.2). The same reduction is valid in a "
+            f"plain select; cast the column to a wider dtype before grouping"
+        )
     infer_fn = _AGG_INFER_MAP.get(func)
     if infer_fn is None:
         raise GroupByTypeError(f"Unknown aggregation function: {func}")
@@ -311,7 +398,7 @@ def infer_groupby_result(
         assert col_type is not None  # We just checked has_column
         assert agg_expr.function is not None  # Direct form must carry a function
 
-        result_type = infer_agg_result_type(agg_expr.function, col_type)
+        result_type = infer_agg_result_type(agg_expr.function, col_type, context="agg")
         output_name = agg_expr.output_name
         result_columns[output_name] = result_type
 
