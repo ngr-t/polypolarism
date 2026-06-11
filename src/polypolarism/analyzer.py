@@ -43,6 +43,7 @@ from polypolarism.diagnostics import (
     PLW004,
     PLW005,
     PLW006,
+    PLW007,
     PLY001,
     PLY002,
     PLY003,
@@ -342,6 +343,22 @@ def _base_is_unknown(dtype: DataType) -> bool:
     """True when the dtype (after Nullable unwrap) is Unknown."""
     inner = dtype.inner if isinstance(dtype, Nullable) else dtype
     return isinstance(inner, Unknown)
+
+
+def _unmodeled_method_warning(call_desc: str) -> str:
+    """PLW007 text for an unmodeled method call (backlog B-4).
+
+    Emitted only when the receiver dtype was precisely known — the call is
+    the exact point where inference degrades to Unknown and downstream
+    dtype checks weaken.
+    """
+    return tag(
+        PLW007,
+        f"`{call_desc}` is not modeled by polypolarism — the result dtype "
+        f"degrades to Unknown and downstream dtype checks weaken. Pin the "
+        f"dtype with `.cast(...)` after the call, or validate the frame "
+        f"against a schema, to keep checking precise.",
+    )
 
 
 def _wrap_nullable_if_any(result: DataType, operands: list[DataType]) -> DataType:
@@ -3241,6 +3258,12 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             # whole call node so the dispatcher can look at it.
             ns_result = self._dispatch_namespace_method(ns, method, col_type, node)
             if ns_result is None:
+                # Unmodeled namespace method on a receiver that passed the
+                # dtype-validity gate above: the column silently degrades —
+                # warn (backlog B-4). Unresolved/Unknown receivers stay
+                # silent (the degradation happened upstream).
+                if col_type is not None and not _base_is_unknown(col_type):
+                    self.warnings.append(_unmodeled_method_warning(f".{ns}.{method}()"))
                 return None
             return col_name, ns_result
 
@@ -3253,6 +3276,9 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             if name_result is not None:
                 return name_result
 
+        # Warning watermark: the ``cast`` branch below retracts a PLW007 the
+        # receiver analysis emits when the cast repairs the degradation.
+        warnings_before_receiver = len(self.warnings)
         receiver_result = self.analyze_select_expr(receiver)
         receiver_name, receiver_type = receiver_result
         if receiver_type is None and receiver_name is None:
@@ -3658,13 +3684,25 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 return receiver_name, _wrap_like(receiver_type, target)
             if target is not None:
                 # Receiver dtype was uninferable (e.g. ``.interpolate()``)
-                # but the explicit cast pins the result dtype.
+                # but the explicit cast pins the result dtype. The cast is
+                # exactly the repair PLW007 asks for, so retract any PLW007
+                # the receiver chain just emitted (backlog B-4).
+                self.warnings[warnings_before_receiver:] = [
+                    w
+                    for w in self.warnings[warnings_before_receiver:]
+                    if not w.startswith(f"[{PLW007}]")
+                ]
                 return receiver_name, target
 
         # Unrecognised method on a resolved receiver: it IS a chain on this
         # column, the dtype just can't be inferred. Surface the name so the
         # column stays registered (as Unknown) instead of vanishing from the
-        # tracked schema (issue #8).
+        # tracked schema (issue #8). When the receiver dtype was precisely
+        # known, the degradation is worth a warning (backlog B-4) — an
+        # already-degraded receiver stays silent so one unmodeled call does
+        # not cascade into a warning per chained method.
+        if receiver_type is not None and not _base_is_unknown(receiver_type):
+            self.warnings.append(_unmodeled_method_warning(f".{method}()"))
         return receiver_name, None
 
     def _extract_lit_type(self, node: ast.expr) -> DataType | None:

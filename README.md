@@ -476,6 +476,7 @@ Warning codes:
 | `PLW004` | lambda / inline callable used where its return dtype is unknowable |
 | `PLW005` | `pivot()` output schema is data-dependent; bind to a `DataFrame[Schema]` variable |
 | `PLW006` | `DataFrame[X]` / `LazyFrame[X]` annotation references a schema the analyzer cannot resolve |
+| `PLW007` | method not modeled by polypolarism — the result dtype degrades to `Unknown`; pin it with `.cast(...)` or a schema validation (a `.cast(...)` directly after the call retracts the warning) |
 | `PLW010` | detected polars / pandera version is below the supported floor (see [Supported versions](#supported-versions)) |
 
 JSON output (`--format json`) emits warnings as `severity: "warning"`
@@ -524,7 +525,9 @@ The main constructs whose inference intentionally degrades to `Unknown`:
 - **Unmodeled methods** — a method the analyzer does not model (including
   methods added in polars releases newer than the probed set) yields an
   `Unknown` result rather than a guess. Downstream of such a call, dtype
-  errors are no longer detectable.
+  errors are no longer detectable. When the receiver dtype was precisely
+  known, the degradation is surfaced as `PLW007`; a `.cast(...)` directly
+  after the call both restores precision and retracts the warning.
 - **Value-dependent arguments** — when a result dtype depends on a
   *runtime value* that is not a literal in the source (a dtype passed via
   a variable to `cast`, a non-literal `time_zone=` / `format=` argument,

@@ -24,10 +24,14 @@ Status legend: `[ ]` open / `[x]` done / `[-]` deliberately deferred.
 
 ## B. Mid-term (precision improvements)
 
-- [ ] **B-4: Warn on unsupported/unprobed Polars methods**
-  Methods absent from the dispatch tables silently fall through to
-  Unknown. Add a warning diagnostic (next free PLW code) so drift against
-  new polars releases becomes visible instead of silent.
+- [x] **B-4: Warn on unsupported/unprobed Polars methods**
+  Done 2026-06-11: PLW007 fires at the expression-chain and namespace
+  fall-throughs when the receiver dtype was precisely known (degraded
+  receivers stay silent — no cascade; a `.cast(...)` directly after the
+  call retracts the warning). Frame-level methods deliberately NOT
+  covered: warning there needs a probed terminal-method table
+  (`to_dicts`, `write_*`, `item`, ... legitimately return non-frames) or
+  every terminal call becomes noise — recorded as **N-3** below.
 - [x] **B-5: Rolling-window inference with non-literal args**
   Done 2026-06-11 — see decision notes below. The reported fallback was
   stale (fixed since issue #57); int-constant propagation added for
@@ -53,6 +57,12 @@ Status legend: `[ ]` open / `[x]` done / `[-]` deliberately deferred.
   **Float32** on a Float32 receiver. Affects literal-arg calls too — a
   `Float32` declaration over a Float32 rolling mean is falsely rejected.
   Needs a full float-family receiver probe before fixing.
+- [ ] **N-3: PLW007 for unmodeled FRAME-level methods.** The B-4 warning
+  covers expression chains and namespaces only. An unmodeled frame method
+  (`df.unknown_method()`) silently untracks the variable. Warning there
+  requires a probed table of terminal methods that legitimately return
+  non-frames (`to_dicts`, `write_*`, `item`, `height`, ...), otherwise
+  every terminal call warns.
 
 ## C. Long-term (design decisions required)
 

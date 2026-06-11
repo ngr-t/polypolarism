@@ -108,6 +108,7 @@ Rules with both sides present (valid twin -> invalid twin):
 | plural col | `m9_plural_col`, `plural_col_exprs` | `plural_col_wrong_dtype` |
 | struct rename_fields | `struct_rename_fields` | `struct_rename_wrong_dtype` |
 | hstack | `m4_unpivot_and_hstack` | `m4_hstack_wrong_dtype` |
+| unmodeled-method degradation (PLW007) | `unmodeled_method_pinned` (cast retracts the warning) | `warning/unmodeled_method` (a warning, not an error — Unknown passes by design) |
 
 Intentionally unpaired:
 

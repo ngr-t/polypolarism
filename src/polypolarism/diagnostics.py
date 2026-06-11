@@ -52,6 +52,7 @@ PLW003 = "PLW003"  # function call to a name that isn't in the analysed module
 PLW004 = "PLW004"  # lambda / inline callable used where its return dtype is unknowable
 PLW005 = "PLW005"  # pivot result schema is data-dependent; user should annotate
 PLW006 = "PLW006"  # DataFrame[X] / LazyFrame[X] annotation references an unknown schema
+PLW007 = "PLW007"  # method not modeled by the analyzer; result dtype degrades to Unknown
 
 # Environment / version
 PLW010 = "PLW010"  # detected polars or pandera version below polypolarism's supported floor

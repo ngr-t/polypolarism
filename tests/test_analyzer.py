@@ -11271,3 +11271,76 @@ class TestNameNamespace:
         # expression — ``over(cs.by_name(...))`` is a partition key.
         cols = self._columns('df.select(pl.col("a").sum().over(cs.by_name("b")))')
         assert cols == {"a": Int64()}
+
+
+class TestUnmodeledMethodWarning:
+    """Backlog B-4: an unmodeled method on a precisely-resolved receiver
+    silently degrades the dtype to Unknown — PLW007 makes the degradation
+    visible so drift against new polars releases stops being silent.
+
+    Probed (polars 1.41.2): ``peak_max`` returns Boolean — a real polars
+    method the analyzer does not model, used here as the canonical
+    unmodeled call.
+    """
+
+    HEADER = textwrap.dedent(
+        PANDERA_HEADER
+        + """
+            class In(pa.DataFrameModel):
+                a: int
+                b: str
+        """
+    )
+
+    def _frame(self, body: str):
+        source = self.HEADER + textwrap.dedent(
+            f"""
+            def f(df: DataFrame[In]):
+                return {body}
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == [], results[0].errors
+        return results[0]
+
+    def test_unmodeled_chain_method_warns_plw007(self):
+        result = self._frame('df.select(pl.col("a").peak_max())')
+        assert any("PLW007" in w for w in result.warnings), result.warnings
+
+    def test_unmodeled_namespace_method_warns_plw007(self):
+        result = self._frame('df.select(pl.col("b").str.not_a_real_method(), pl.col("a"))')
+        assert any("PLW007" in w for w in result.warnings), result.warnings
+
+    def test_modeled_methods_do_not_warn(self):
+        result = self._frame('df.select(pl.col("a").sum(), pl.col("b").str.to_uppercase())')
+        assert not any("PLW007" in w for w in result.warnings), result.warnings
+
+    def test_degraded_receiver_does_not_cascade(self):
+        # Only the FIRST unmodeled call warns; the second sees an
+        # already-degraded receiver and stays silent (no warning pile-up).
+        result = self._frame('df.select(pl.col("a").peak_max().also_not_real())')
+        plw007 = [w for w in result.warnings if "PLW007" in w]
+        assert len(plw007) == 1, result.warnings
+
+    def test_unknown_receiver_does_not_warn(self):
+        # A column read off an OPEN frame is already Unknown — warning on
+        # every later call would blame the wrong place. The non-literal
+        # name.prefix opens the frame (output name unknowable), so "mystery"
+        # resolves to Unknown rather than erroring.
+        source = self.HEADER + textwrap.dedent(
+            """
+            P = get_prefix()
+
+            def f(df: DataFrame[In]):
+                return df.select(pl.col("a").name.prefix(P)).select(pl.col("mystery").peak_max())
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == [], results[0].errors
+        assert not any("PLW007" in w for w in results[0].warnings), results[0].warnings
+
+    def test_cast_right_after_unmodeled_call_retracts_the_warning(self):
+        # The explicit cast is exactly the repair PLW007 recommends, so the
+        # warning emitted for the receiver chain is retracted.
+        result = self._frame('df.select(pl.col("a").peak_max().cast(pl.Int64))')
+        assert not any("PLW007" in w for w in result.warnings), result.warnings
