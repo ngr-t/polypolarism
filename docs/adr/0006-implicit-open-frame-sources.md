@@ -112,11 +112,28 @@ snapshots read from parquet/IPC footers).
   names keep deterministic suffixes and precise dtypes; a closed left
   frame keeps every pin precise.
 
+- **Non-strict return schemas bind open at call sites** (issue #81).
+  `strict=False` is pandera's "at least these columns": `check_types`
+  passes the caller's extras through, so the row-polymorphic helper
+  pattern (`∀r. {price|r} → {price,total|r}`) binds its call result as
+  an open frame — the caller keeps using its own columns (dtype
+  degrades to Unknown through the call; pandera cannot share the row
+  variable between input and output). `strict=True` returns stay
+  closed — that closure is what makes select-style proofs possible.
+- **Strict parameter schemas reject provable extras at call sites**
+  (issue #82): a pinned extra column passed into a `strict=True`
+  parameter is flagged (check_types validates arguments); unknown
+  open-frame extras stay lenient.
+
 ## Future work
 
 - **Backward narrowing**: `df.select("a")` succeeding implies `df`
   itself has `a` for *subsequent* statements. Currently unobservable
   (the pin would be `Unknown` and the frame stays open).
+- **Validate-narrowing of non-strict schemas** still binds closed
+  (`Schema.validate(df)` with `strict=False` also passes extras through
+  at runtime) — same false-positive class as issue #81, much larger
+  blast radius; revisit separately.
 - **`pl.DataFrame(non_literal)`** could produce an open frame instead
   of untracked; left out to keep this slice focused on declared intent
   (annotations) and file sources.

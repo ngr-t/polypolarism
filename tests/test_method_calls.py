@@ -169,6 +169,40 @@ class TestMismatchStillDetected:
     function's annotation, we still want a mismatch error."""
 
     def test_inner_returns_wrong_schema(self):
+        # The inner schema is STRICT so its return binds closed and the
+        # mismatch stays provable. (A non-strict inner schema may carry
+        # extra columns through check_types — including Forecast's — so
+        # the call result binds open and the mismatch is genuinely not
+        # provable; issue #81.)
+        results = _check(
+            """
+            class StrictSales(pa.DataFrameModel):
+                sku: str
+                qty: int
+
+                class Config:
+                    strict = True
+
+
+            class Loader:
+                def _load(self) -> DataFrame[StrictSales]:
+                    df = pl.read_parquet("x.parquet")
+                    return cast(DataFrame[StrictSales], StrictSales.validate(df))
+
+                def run(self) -> DataFrame[Forecast]:
+                    return self._load()       # returns StrictSales, declared Forecast
+            """
+        )
+        # Loader._load and Loader.run should both be checked. _load passes,
+        # run fails with a column/schema mismatch.
+        run_result = next(r for r in results if r.function_name == "run")
+        assert not run_result.passed
+
+    def test_nonstrict_inner_schema_passes_with_leniency(self):
+        # The issue #81 counterpart of the strict case above: a
+        # non-strict inner return may legitimately carry the outer
+        # schema's columns among its extras, so the mismatch is not
+        # provable — the check records open-frame leniency instead.
         results = _check(
             """
             class Loader:
@@ -177,13 +211,14 @@ class TestMismatchStillDetected:
                     return cast(DataFrame[Sales], Sales.validate(df))
 
                 def run(self) -> DataFrame[Forecast]:
-                    return self._load()       # returns Sales, declared Forecast
+                    return self._load()
             """
         )
-        # Loader._load and Loader.run should both be checked. _load passes,
-        # run fails with a column/schema mismatch.
         run_result = next(r for r in results if r.function_name == "run")
-        assert not run_result.passed
+        assert run_result.passed
+        assert any("not provably absent" in note for note in run_result.leniency), (
+            run_result.leniency
+        )
 
 
 class TestUnknownMethodFallsThrough:

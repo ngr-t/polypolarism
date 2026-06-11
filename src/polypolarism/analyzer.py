@@ -1119,6 +1119,31 @@ def _set_lazy(result: FrameType | None, lazy: bool) -> FrameType | None:
     return result
 
 
+def _call_result_frame(declared: FrameType | None, source_name: str) -> FrameType | None:
+    """The FrameType a call site binds for a callee's declared return.
+
+    A ``strict=False`` return schema is pandera's "at least these
+    columns": the callee may preserve arbitrary caller columns (the
+    row-polymorphic helper pattern) and ``check_types`` passes them
+    through — so the call result is an OPEN frame (issue #81). The
+    pandera-expressible signature cannot share the row variable between
+    parameter and return, so the caller's extra columns degrade to
+    Unknown through the call rather than keeping their dtypes.
+    ``strict=True`` returns stay closed — that closure is what makes
+    select-style proofs possible. Always a fresh FrameType so downstream
+    laziness stamping never mutates the registry's cached signature.
+    """
+    if declared is None:
+        return None
+    return FrameType(
+        columns=dict(declared.columns),
+        strict=declared.strict,
+        rest=None if declared.strict else RowVar(source_name),
+        is_lazy=declared.is_lazy,
+        coerce=declared.coerce,
+    )
+
+
 def _is_cast_func(node: ast.expr) -> bool:
     """Recognise ``cast`` (from ``typing import cast``) and ``typing.cast``.
 
@@ -4426,7 +4451,8 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         method_info = self.class_registry.get_method(receiver_class, method_name)
         if method_info is None or method_info.signature is None:
             return None
-        return method_info.signature.return_type
+        # Non-strict return schemas bind open at call sites (issue #81).
+        return _call_result_frame(method_info.signature.return_type, method_name)
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
         """Handle annotated assignments like: df: DataFrame[Schema] = expr."""
@@ -5070,7 +5096,19 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                                 f"Argument '{param_name}' column '{col_name}' has type "
                                 f"{actual_col_dtype} but expected {expected_col_dtype}"
                             )
-            return sig.return_type
+                    # Strict parameter schemas reject undeclared columns at
+                    # runtime (issue #82) — a PINNED extra is provable even
+                    # on an open argument frame; unknown open-frame extras
+                    # stay lenient (not provable).
+                    if expected_type.strict:
+                        for col_name, actual_spec in arg_type.columns.items():
+                            if col_name not in expected_type.columns:
+                                self.errors.append(
+                                    f"Argument '{param_name}' has extra column "
+                                    f"'{col_name}' ({actual_spec.dtype}) but the "
+                                    f"parameter schema is strict"
+                                )
+            return _call_result_frame(sig.return_type, func_name)
 
         # Untyped function - analyze body with propagated argument types
         return self._analyze_untyped_function(func_info, arg_types)

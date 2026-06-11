@@ -13305,3 +13305,203 @@ class TestOpenLeftJoinCollision:
         assert inferred is not None
         assert inferred.columns["z"].dtype == Utf8()
         assert inferred.columns["z_right"].dtype == Int64()
+
+
+class TestOpenReturnSchemaCallSites:
+    """Issue #81: a function whose declared return schema is strict=False
+    is pandera's "at least these columns" — check_types passes the
+    caller's extra columns through (row polymorphism), so the call-site
+    result binds as an OPEN frame. strict=True returns stay closed."""
+
+    _HELPER = """
+        import polars as pl
+        import pandera.polars as pa
+        from pandera.typing.polars import DataFrame
+
+        class HasPrice(pa.DataFrameModel):
+            price: float
+
+            class Config:
+                strict = False
+                coerce = True
+
+        class HasPriceTotal(pa.DataFrameModel):
+            price: float
+            total: float
+
+            class Config:
+                strict = False
+                coerce = True
+
+        class WideSales(pa.DataFrameModel):
+            sku: str
+            price: float
+
+            class Config:
+                strict = True
+                coerce = True
+
+        def add_total(df: DataFrame[HasPrice]) -> DataFrame[HasPriceTotal]:
+            return df.with_columns(total=pl.col("price") * 1.1)
+    """
+
+    def test_nonstrict_call_result_is_open(self):
+        source = textwrap.dedent(
+            self._HELPER
+            + """
+        def pipeline(df: DataFrame[WideSales]) -> pl.DataFrame:
+            out = add_total(df)
+            return out.select(pl.col("sku"), pl.col("price"), pl.col("total"))
+        """
+        )
+        results = analyze_source(source)
+        target = [r for r in results if r.name == "pipeline"]
+        assert len(target) == 1
+        # The issue's repro: selecting the caller-preserved 'sku' through
+        # the helper call must not be a provable miss.
+        assert target[0].errors == [], target[0].errors
+        inferred = target[0].inferred_return_type
+        assert inferred is not None
+        assert set(inferred.columns) == {"sku", "price", "total"}
+
+    def test_declared_columns_keep_their_dtypes(self):
+        source = textwrap.dedent(
+            self._HELPER
+            + """
+        def declared_precise(df: DataFrame[WideSales]) -> pl.DataFrame:
+            out = add_total(df)
+            return out.select(pl.col("total") - 1)
+        """
+        )
+        results = analyze_source(source)
+        target = [r for r in results if r.name == "declared_precise"]
+        assert target[0].errors == [], target[0].errors
+
+    def test_strict_return_stays_closed(self):
+        source = textwrap.dedent(
+            """
+        import polars as pl
+        import pandera.polars as pa
+        from pandera.typing.polars import DataFrame
+
+        class StrictOut(pa.DataFrameModel):
+            price: float
+
+            class Config:
+                strict = True
+
+        class Src(pa.DataFrameModel):
+            sku: str
+            price: float
+
+        def helper(df: DataFrame[Src]) -> DataFrame[StrictOut]:
+            return df.select(pl.col("price"))
+
+        def caller(df: DataFrame[Src]) -> pl.DataFrame:
+            return helper(df).select(pl.col("sku"))
+        """
+        )
+        results = analyze_source(source)
+        target = [r for r in results if r.name == "caller"]
+        # strict=True return is genuinely closed — 'sku' is a provable miss.
+        assert any("PLY001" in str(e) and "'sku'" in str(e) for e in target[0].errors), target[
+            0
+        ].errors
+
+
+class TestStrictParamExtraColumns:
+    """Issue #82: passing a frame with provable extra columns into a
+    strict=True parameter — check_types validates the argument at runtime
+    and rejects it, so the call site must flag it. Open-frame extras
+    (unprovable) stay lenient."""
+
+    def test_wide_closed_frame_into_strict_param_flags(self):
+        source = textwrap.dedent(
+            """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+
+            class StrictPrice(pa.DataFrameModel):
+                price: float
+
+                class Config:
+                    strict = True
+                    coerce = True
+
+            class Wide(pa.DataFrameModel):
+                sku: str
+                price: float
+
+                class Config:
+                    strict = True
+                    coerce = True
+
+            def strict_helper(df: DataFrame[StrictPrice]) -> DataFrame[StrictPrice]:
+                return df.filter(pl.col("price") > 0)
+
+            def wide_into_strict_param(df: DataFrame[Wide]) -> DataFrame[StrictPrice]:
+                return strict_helper(df)
+            """
+        )
+        results = analyze_source(source)
+        target = [r for r in results if r.name == "wide_into_strict_param"]
+        assert len(target) == 1
+        assert any(
+            "extra column" in str(e) and "sku" in str(e) and "strict" in str(e)
+            for e in target[0].errors
+        ), target[0].errors
+
+    def test_open_frame_unknown_extras_stay_lenient(self):
+        source = textwrap.dedent(
+            """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+
+            class StrictPrice(pa.DataFrameModel):
+                price: float
+
+                class Config:
+                    strict = True
+                    coerce = True
+
+            def strict_helper(df: DataFrame[StrictPrice]) -> DataFrame[StrictPrice]:
+                return df.filter(pl.col("price") > 0)
+
+            def open_into_strict(df: pl.DataFrame) -> DataFrame[StrictPrice]:
+                return strict_helper(df)
+            """
+        )
+        results = analyze_source(source)
+        target = [r for r in results if r.name == "open_into_strict"]
+        # The open frame pins nothing — its extras aren't provable.
+        assert target[0].errors == [], target[0].errors
+
+    def test_pinned_extra_on_open_frame_is_provable(self):
+        source = textwrap.dedent(
+            """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+
+            class StrictPrice(pa.DataFrameModel):
+                price: float
+
+                class Config:
+                    strict = True
+                    coerce = True
+
+            def strict_helper(df: DataFrame[StrictPrice]) -> DataFrame[StrictPrice]:
+                return df.filter(pl.col("price") > 0)
+
+            def pinned_extra(df: pl.DataFrame) -> DataFrame[StrictPrice]:
+                tagged = df.with_columns(label=pl.lit("x"))
+                return strict_helper(tagged)
+            """
+        )
+        results = analyze_source(source)
+        target = [r for r in results if r.name == "pinned_extra"]
+        assert any("extra column" in str(e) and "label" in str(e) for e in target[0].errors), (
+            target[0].errors
+        )

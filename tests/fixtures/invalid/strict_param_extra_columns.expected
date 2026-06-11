@@ -1,0 +1,3 @@
+strict_helper: OK
+wide_into_strict_param: FAIL
+  error: Argument 'df' has extra column 'sku' (Utf8) but the parameter schema is strict

@@ -119,6 +119,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Call results of functions with non-strict (`strict = False`) return
+  schemas bind as OPEN frames (issue #81): pandera's `check_types`
+  passes the caller's extra columns through such a return, so the
+  row-polymorphic helper pattern no longer turns the caller's own
+  columns into PLY001/PLY040 errors — they resolve through the rest
+  (dtype Unknown, visible leniency). `strict = True` returns stay
+  closed, keeping select-style proofs; applies to direct calls, method
+  calls and `df.pipe(helper)`.
+- Passing a frame with provable extra columns into a `strict = True`
+  parameter is flagged at the call site (issue #82): `check_types`
+  validates arguments at runtime and rejects undeclared columns, but the
+  detailed call-site error generator only reported missing columns and
+  dtype conflicts — the strict-extra direction passed silently. Pinned
+  extras on open frames are provable and flag too; unknown open-frame
+  extras stay lenient.
+
 - Aliased base-class imports resolve regardless of import order (issue
   #80, boundary of #76): the alias registration lived behind the
   `visited` skip in the import merger, so `from m import Base as B0` +
