@@ -228,9 +228,11 @@ For invalid code:
 
 Supported aggregation functions: `sum`, `mean`, `min`, `max`, `count`,
 `n_unique`, `first`, `last`, `list`, `std`, `var`, `median`, `quantile`,
-`product`. `std`/`var`/`median`/`quantile` always return `Float64` (or
-`Nullable[Float64]` if the input is nullable); `product` preserves the
-numeric input dtype.
+`product`. `median`/`quantile` return `Float64` (or `Nullable[Float64]`
+if the input is nullable); `std`/`var` return `Nullable[Float64]` even on
+non-nullable input — the default `ddof=1` is null for singleton groups
+(an explicit literal `ddof=0` keeps plain `Float64` in expression
+position); `product` preserves the numeric input dtype.
 
 ### Select / With Columns
 
@@ -273,7 +275,8 @@ of the same element type compare equal regardless of width).
 | `pl.col("x").fill_null(v)` / `fill_nan(v)` | strips `Nullable[...]` from the receiver |
 | `pl.col("x").abs() / round() / clip(...) / floor() / ceil() / sign() / neg()` | preserves the receiver's dtype |
 | `pl.col("x").log() / log10() / log1p() / exp() / sqrt() / cbrt() / entropy()` | `Float64` (`Nullable[Float64]` if input is nullable) |
-| `pl.col("x").std() / var() / median() / quantile(p)` (in select / agg) | `Float64` |
+| `pl.col("x").median() / quantile(p)` (in select / agg) | `Float64` |
+| `pl.col("x").std() / var()` (in select / agg) | `Nullable[Float64]` (`ddof=1` is null on a single sample); a literal `ddof=0` keeps `Float64` |
 | `pl.col("x").sum() / mean() / min() / max() / first() / last() / count() / n_unique() / product()` (in select / agg) | reduction result dtype |
 
 `df.filter(pred)` is identity-typed but the predicate is walked through
@@ -378,8 +381,8 @@ return multiple frames are out of scope.
 | `pl.col("v").cum_sum() / cum_max() / cum_min() / cum_prod()` | preserves receiver dtype |
 | `pl.col("v").cum_count()` | `UInt32` |
 | `pl.col("v").shift(n) / diff(n) / pct_change(n)` | `Nullable[T]` (head positions become NULL) |
-| `pl.col("v").rolling_sum(...) / rolling_min / rolling_max` | preserves receiver dtype |
-| `pl.col("v").rolling_mean / rolling_std / rolling_var / rolling_median / rolling_quantile` | `Float64` |
+| `pl.col("v").rolling_sum(...) / rolling_min / rolling_max` | `Nullable[T]` of the receiver dtype (`rolling_sum` upcasts `Int8/Int16/UInt8/UInt16` → `Int64`, `Boolean` → `UInt32`); probed-invalid receivers (e.g. String, Decimal — Date/Datetime/Time/Duration too for `rolling_sum`) flag PLY016 |
+| `pl.col("v").rolling_mean / rolling_std / rolling_var / rolling_median / rolling_quantile` | `Nullable[Float64]` (windows below `min_samples` are null); an explicit literal `min_samples<=1` / `window_size=1` keeps plain `Float64` (`rolling_std`/`rolling_var` also need `ddof=0`) |
 | `pl.col("v").mean().over("k")` and other aggregations followed by `.over(...)` | preserves receiver dtype |
 | `df.group_by_dynamic("ts", every="1d").agg(...)` / `df.rolling("ts", period="1d").agg(...)` | same shape as `df.group_by(...).agg(...)` |
 | `df.join_asof(other, on=..., left_on=..., right_on=...)` | same column shape as `df.join(other, how="left")` (right side `Nullable`) |
