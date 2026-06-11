@@ -13,7 +13,10 @@ class In(pa.DataFrameModel):
 
 class Out(pa.DataFrameModel):
     region: str
-    sales_std: pl.Float64
+    # std(ddof=1) is null for singleton groups at runtime, so the column is
+    # honestly nullable. polypolarism infers std() as plain Float64 (a
+    # documented leniency), which still satisfies Nullable[Float64].
+    sales_std: pl.Float64 = pa.Field(nullable=True)
     sales_med: pl.Float64
     units_prod: int
 

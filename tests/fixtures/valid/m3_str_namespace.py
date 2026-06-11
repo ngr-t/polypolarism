@@ -23,7 +23,10 @@ class Raw(pa.DataFrameModel):
 
 class Parsed(pa.DataFrameModel):
     qty: int
-    price: pl.Decimal
+    # str.to_decimal requires a kw-only ``scale`` since polars 1.x and yields
+    # Decimal(38, scale); the parametrized annotation matches that exactly
+    # (pandera reads bare ``pl.Decimal`` as Decimal(28, 0), polars as (38, 0)).
+    price: pl.Decimal(38, 0)
     opens_at: pl.Time
 
 
@@ -39,6 +42,6 @@ def parse(df: DataFrame[Raw]) -> DataFrame[Parsed]:
     """Issue #19: str parse helpers infer precise dtypes."""
     return df.select(
         pl.col("qty").str.to_integer(base=10).alias("qty"),
-        pl.col("price").str.to_decimal().alias("price"),
+        pl.col("price").str.to_decimal(scale=0).alias("price"),
         pl.col("opens_at").str.to_time().alias("opens_at"),
     )

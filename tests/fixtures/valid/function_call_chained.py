@@ -21,8 +21,13 @@ class ABC(pa.DataFrameModel):
 
 
 def add_b(df: DataFrame[A]) -> DataFrame[AB]:
-    """Step 1: add column b."""
-    return df.with_columns(pl.lit(100).alias("b"))
+    """Step 1: add column b.
+
+    ``dtype=pl.Int64`` keeps the literal runtime-faithful to ``b: int``:
+    bare ``pl.lit(100)`` materializes as Int32 at runtime (probed on
+    polars 1.41.2) while polypolarism models int literals as Int64.
+    """
+    return df.with_columns(pl.lit(100, dtype=pl.Int64).alias("b"))
 
 
 def add_c(df: DataFrame[AB]) -> DataFrame[ABC]:
