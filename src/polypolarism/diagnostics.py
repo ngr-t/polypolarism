@@ -30,11 +30,11 @@ PLY010 = "PLY010"  # join key error (missing or dtype mismatch)
 PLY011 = "PLY011"  # group_by key missing or aggregation type error
 
 # Expression namespaces
-PLY012 = "PLY012"  # namespace accessor (.str/.dt/.list/.arr/.struct) on a column of the wrong dtype
+PLY012 = "PLY012"  # namespace accessor (.str/.dt/.list/.arr/.struct/.bin/.cat) on a wrong dtype
 
 # Concat / explode / unpivot
 PLY020 = "PLY020"  # concat schema mismatch / horizontal overlap
-PLY021 = "PLY021"  # explode: column missing or not List[T]
+PLY021 = "PLY021"  # explode: column missing or not List/Array
 PLY022 = "PLY022"  # unpivot: column missing / value dtype unification failure
 
 # Eager / lazy distinction
