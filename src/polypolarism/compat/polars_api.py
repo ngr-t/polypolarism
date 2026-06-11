@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from polypolarism.types import (
+    Array,
     Binary,
     Boolean,
     Categorical,
@@ -54,6 +55,7 @@ from polypolarism.types import (
     Int64,
     Int128,
     Null,
+    Struct,
     Time,
     UInt8,
     UInt16,
@@ -426,56 +428,175 @@ LIST_NAMESPACE_PRESERVING: frozenset[str] = frozenset(
 )
 
 # ``pl.col("xs").list.<method>()`` methods that return the element dtype
-# (de-listing operations). ``sum`` / ``mean`` / ``median`` / ``std`` /
-# ``var`` are NOT element-preserving — see ``container_agg_return`` below
-# (probed: ``list.mean`` on List(Int64) is Float64, not Int64).
+# (de-listing operations). The reducers ``sum`` / ``mean`` / ``median`` /
+# ``std`` / ``var`` / ``min`` / ``max`` are NOT here — they are strictly
+# typed per element dtype via ``container_agg_return`` below (probed:
+# ``list.mean`` on List(Int64) is Float64, and ``list.min`` on
+# List(Struct) raises at runtime).
 LIST_NAMESPACE_ELEMENT_RETURN: frozenset[str] = frozenset(
     {
         "get",
         "first",
         "last",
-        "min",
-        "max",
         "explode",
     }
 )
 
 
-# Element-wise aggregations shared by the ``list`` and ``arr`` namespaces
-# whose result dtype is NOT simply the element dtype. Probed on polars
-# 1.41.2 — the two namespaces agree on every probed cell:
+# Element-wise reductions of the ``list`` and ``arr`` namespaces, strictly
+# typed per (namespace, method, element dtype) — issue #55. Probed on
+# polars 1.41.2 (full matrix; the two namespaces DIVERGE on several cells):
 #
 #   sum:  Int8/Int16/UInt8/UInt16 -> Int64 (overflow guard);
-#         Int32/Int64/UInt32/UInt64/Float32/Float64 -> element;
-#         Boolean -> UInt32; Decimal(p, s) -> Decimal(p, s).
-#         (Utf8 raises at runtime; other elements unprobed -> Unknown.)
-#   mean/median/std/var: Float32 -> Float32; every other probed numeric
-#         width and Boolean -> Float64. (Date -> Datetime for mean/median
-#         and Decimal -> Float64 for mean are probed but deliberately not
-#         claimed beyond mean(Decimal); unprobed cells -> Unknown.)
-CONTAINER_AGG_METHODS: frozenset[str] = frozenset({"sum", "mean", "median", "std", "var"})
+#         other int/uint widths and floats -> element; Boolean -> UInt32.
+#         list-only extras: Decimal(p, s) -> Decimal(p, s), Duration ->
+#         Duration, Null -> Null. INVALID (InvalidOperationError) on list:
+#         Utf8 / Date / Datetime / Time / List / Array / Struct /
+#         Categorical / Enum / Binary; on arr ALL of the non-core cells
+#         (Duration / Decimal / Null included) raise ComputeError.
+#   mean/median: Float32/Float16 keep their width (except list.mean on
+#         Float16 — a probed rust panic); ints, Boolean and Decimal ->
+#         Float64; Duration -> Duration. list-only: Date/Datetime ->
+#         Datetime (tz kept), Time -> Time; the same arr cells are probed
+#         to return Float64 (epoch numbers) and stay unclaimed.
+#   std:  like mean but temporal cells beyond Duration stay unclaimed.
+#   var:  like std; INVALID on list for Date / Datetime / Time / Duration
+#         (InvalidOperationError) but only Duration on arr.
+#   min/max: element dtype for every numeric width on both namespaces.
+#         list-only: Boolean / Utf8 / temporal / Decimal / Categorical /
+#         Enum / Binary / Null -> element (lexicographic etc., probed);
+#         INVALID on list for List / Array / Struct; on arr EVERY
+#         non-numeric cell is a probed rust panic.
+#
+# Degenerate probed-valid cells (e.g. ``list.mean`` over strings -> an
+# all-null Float64) are deliberately unclaimed: they look like polars
+# accepting-by-accident and are likelier to drift across minors.
+CONTAINER_AGG_METHODS: frozenset[str] = frozenset(
+    {"sum", "mean", "median", "std", "var", "min", "max"}
+)
+
+
+class ContainerAggInvalid:
+    """Sentinel type for probed-invalid container-reduction cells.
+
+    The (namespace, method, element) combination is a probed runtime error
+    — InvalidOperationError, ComputeError, or a rust panic, depending on
+    the cell. The analyzer flags PLY016 and degrades the output to Unknown.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "CONTAINER_AGG_INVALID"
+
+
+CONTAINER_AGG_INVALID = ContainerAggInvalid()
 
 _CONTAINER_SUM_WIDENS_TO_INT64 = (Int8, Int16, UInt8, UInt16)
-_CONTAINER_SUM_KEEPS_ELEMENT = (Int32, Int64, UInt32, UInt64, Float32, Float64, Decimal)
+_CONTAINER_SUM_KEEPS_ELEMENT = (
+    Int32,
+    Int64,
+    Int128,
+    UInt32,
+    UInt64,
+    UInt128,
+    Float16,
+    Float32,
+    Float64,
+)
+_LIST_SUM_KEEPS_ELEMENT_EXTRA = (Decimal, Duration, Null)
+_LIST_SUM_INVALID = (Utf8, Date, Datetime, Time, ListT, Array, Struct, Categorical, Enum, Binary)
+_ARR_SUM_INVALID = (
+    Utf8,
+    Date,
+    Datetime,
+    Time,
+    Duration,
+    Decimal,
+    ListT,
+    Array,
+    Struct,
+    Categorical,
+    Enum,
+    Binary,
+    Null,
+)
 _CONTAINER_FLOAT_AGG_FLOAT64 = (
     Int8,
     Int16,
     Int32,
     Int64,
+    Int128,
     UInt8,
     UInt16,
     UInt32,
     UInt64,
+    UInt128,
     Float64,
     Boolean,
+    Decimal,
+)
+_LIST_VAR_INVALID = (Date, Datetime, Time, Duration)
+_ARR_VAR_INVALID = (Duration,)
+_CONTAINER_MINMAX_NUMERIC = (
+    Int8,
+    Int16,
+    Int32,
+    Int64,
+    Int128,
+    UInt8,
+    UInt16,
+    UInt32,
+    UInt64,
+    UInt128,
+    Float16,
+    Float32,
+    Float64,
+)
+_LIST_MINMAX_ELEMENT_EXTRA = (
+    Boolean,
+    Utf8,
+    Date,
+    Datetime,
+    Duration,
+    Time,
+    Decimal,
+    Categorical,
+    Enum,
+    Binary,
+    Null,
+)
+_LIST_MINMAX_INVALID = (ListT, Array, Struct)
+_ARR_MINMAX_INVALID = (
+    Boolean,
+    Utf8,
+    Date,
+    Datetime,
+    Duration,
+    Time,
+    Decimal,
+    ListT,
+    Array,
+    Struct,
+    Categorical,
+    Enum,
+    Binary,
+    Null,
 )
 
 
-def container_agg_return(method: str, element: DataType) -> DataType | None:
+def container_agg_return(
+    namespace: str, method: str, element: DataType
+) -> DataType | ContainerAggInvalid | None:
     """Result dtype of ``list.<agg>()`` / ``arr.<agg>()`` for one element dtype.
 
-    ``None`` means the cell is unprobed (or a probed runtime error, e.g.
-    ``sum`` over string elements) — the caller degrades to Unknown.
+    Three-way verdict (issue #55):
+
+    - a ``DataType``: the probed result dtype;
+    - ``CONTAINER_AGG_INVALID``: a probed runtime error (the caller flags
+      PLY016 and degrades the output to Unknown);
+    - ``None``: unprobed or deliberately unclaimed — the caller degrades
+      to Unknown silently.
     """
     if method == "sum":
         if isinstance(element, _CONTAINER_SUM_WIDENS_TO_INT64):
@@ -484,14 +605,60 @@ def container_agg_return(method: str, element: DataType) -> DataType | None:
             return UInt32()
         if isinstance(element, _CONTAINER_SUM_KEEPS_ELEMENT):
             return element
+        if namespace == "list":
+            if isinstance(element, _LIST_SUM_KEEPS_ELEMENT_EXTRA):
+                return element
+            if isinstance(element, _LIST_SUM_INVALID):
+                return CONTAINER_AGG_INVALID
+        elif isinstance(element, _ARR_SUM_INVALID):
+            return CONTAINER_AGG_INVALID
         return None
-    if method in ("mean", "median", "std", "var"):
-        if isinstance(element, Float32):
-            return Float32()
+    if method in ("mean", "median"):
+        if namespace == "list" and isinstance(element, Float16):
+            # Probed oddity: ``list.mean`` on Float16 panics in rust while
+            # ``list.median`` (and every arr cell) keeps Float16.
+            return CONTAINER_AGG_INVALID if method == "mean" else element
+        if isinstance(element, (Float16, Float32)):
+            return element
         if isinstance(element, _CONTAINER_FLOAT_AGG_FLOAT64):
             return Float64()
-        if isinstance(element, Decimal) and method == "mean":
+        if isinstance(element, Duration):
+            return element
+        if namespace == "list":
+            if isinstance(element, Date):
+                return Datetime()
+            if isinstance(element, Datetime):
+                return element
+            if isinstance(element, Time):
+                return element
+        return None
+    if method == "std":
+        if isinstance(element, (Float16, Float32)):
+            return element
+        if isinstance(element, _CONTAINER_FLOAT_AGG_FLOAT64):
             return Float64()
+        if isinstance(element, Duration):
+            return element
+        return None
+    if method == "var":
+        invalid = _LIST_VAR_INVALID if namespace == "list" else _ARR_VAR_INVALID
+        if isinstance(element, invalid):
+            return CONTAINER_AGG_INVALID
+        if isinstance(element, (Float16, Float32)):
+            return element
+        if isinstance(element, _CONTAINER_FLOAT_AGG_FLOAT64):
+            return Float64()
+        return None
+    if method in ("min", "max"):
+        if isinstance(element, _CONTAINER_MINMAX_NUMERIC):
+            return element
+        if namespace == "list":
+            if isinstance(element, _LIST_MINMAX_ELEMENT_EXTRA):
+                return element
+            if isinstance(element, _LIST_MINMAX_INVALID):
+                return CONTAINER_AGG_INVALID
+        elif isinstance(element, _ARR_MINMAX_INVALID):
+            return CONTAINER_AGG_INVALID
         return None
     return None
 
@@ -502,8 +669,9 @@ def container_agg_return(method: str, element: DataType) -> DataType | None:
 # - ``sort`` / ``reverse`` / ``shift`` preserve the Array dtype;
 # - ``unique`` / ``head`` / ``tail`` / ``slice`` / ``to_list`` return a
 #   *List* of the element dtype (the fixed width is lost);
-# - ``get`` / ``first`` / ``last`` / ``min`` / ``max`` / ``explode``
-#   return the element dtype;
+# - ``get`` / ``first`` / ``last`` / ``explode`` return the element dtype
+#   (``min`` / ``max`` are strictly typed via ``container_agg_return`` —
+#   they panic in rust for every non-numeric element, issue #55);
 # - fixed returns below; ``join`` (element-dependent error) and
 #   ``to_struct`` / ``agg`` (shape-dependent) fall through to Unknown.
 ARR_NAMESPACE_PRESERVING: frozenset[str] = frozenset({"sort", "reverse", "shift"})
@@ -513,8 +681,6 @@ ARR_NAMESPACE_ELEMENT_RETURN: frozenset[str] = frozenset(
         "get",
         "first",
         "last",
-        "min",
-        "max",
         "explode",
     }
 )
