@@ -1,0 +1,10 @@
+struct_mixed_args: FAIL
+  error: [PLY017] pl.struct: a list literal mixed with other positional arguments is not flattened — polars raises TypeError (or misparses the list as a nested literal) at runtime; pass either varargs or one single list
+  via: column 'a': not provably absent (open frame)
+  via: column 'b': not provably absent (open frame)
+coalesce_mixed_args: FAIL
+  error: [PLY017] pl.coalesce: a list literal mixed with other positional arguments is not flattened — polars raises TypeError (or misparses the list as a nested literal) at runtime; pass either varargs or one single list
+  via: column 'c': passed via Unknown
+horizontal_mixed_args: FAIL
+  error: [PLY017] pl.sum_horizontal: a list literal mixed with other positional arguments is not flattened — polars raises TypeError (or misparses the list as a nested literal) at runtime; pass either varargs or one single list
+  via: column 'total': passed via Unknown

@@ -57,6 +57,7 @@ from polypolarism.diagnostics import (
     PLY014,
     PLY015,
     PLY016,
+    PLY017,
     PLY020,
     PLY021,
     PLY022,
@@ -1189,7 +1190,9 @@ def _flatten_expr_args(args: list[ast.expr]) -> list[ast.expr]:
     list of expressions: ``pl.struct(pl.col("a"), pl.col("b"))`` ≡
     ``pl.struct([pl.col("a"), pl.col("b")])``. Expanding top-level
     ``ast.List`` / ``ast.Tuple`` args lets the caller analyze both forms
-    (and mixed forms) uniformly (issue #16).
+    uniformly (issue #16). MIXED forms (a list/tuple literal next to other
+    positional args) never reach this helper — they are flagged PLY017 by
+    ``_mixed_list_args`` first (issue #59).
     """
     out: list[ast.expr] = []
     for arg in args:
@@ -1198,6 +1201,39 @@ def _flatten_expr_args(args: list[ast.expr]) -> list[ast.expr]:
         else:
             out.append(arg)
     return out
+
+
+# The ``pl.*`` helpers that accept either varargs or one list of
+# expressions — exactly the issue-#16 flatten consumers handled in
+# ``_analyze_pl_func``. ``pl.format`` takes a template string first but is
+# probed to crash the same way when a list literal follows it.
+_MULTI_EXPR_HELPERS: frozenset[str] = frozenset(
+    {
+        "struct",
+        "coalesce",
+        "concat_str",
+        "format",
+        "concat_list",
+        "sum_horizontal",
+        "min_horizontal",
+        "max_horizontal",
+        "mean_horizontal",
+    }
+)
+
+
+def _mixed_list_args(args: list[ast.expr]) -> bool:
+    """True when a list/tuple literal is mixed with other positional args.
+
+    Probed (polars 1.41.2; issue #59) for every multi-expression helper:
+    the mix is never flattened at runtime — an expression-bearing list
+    raises TypeError ("Nested object types"); a string-only list either
+    raises (coalesce / concat_str / horizontal: supertype failure) or
+    misparses as a nested *literal* column (struct / concat_list). A single
+    list/tuple argument (with or without keyword args) is the supported
+    sequence form and stays exempt.
+    """
+    return len(args) > 1 and any(isinstance(arg, (ast.List, ast.Tuple)) for arg in args)
 
 
 # polars.selectors return-type predicates by selector name.
@@ -2140,6 +2176,21 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         # flagging that is out of scope — silence avoids false positives).
         if name == "element" and not node.args and self.element_dtype is not None:
             return None, self.element_dtype
+
+        # A list/tuple literal mixed with further positional args does NOT
+        # flatten at runtime (issue #59) — flag it and degrade to Unknown
+        # instead of typing the flatten that never happens.
+        if name in _MULTI_EXPR_HELPERS and _mixed_list_args(node.args):
+            self.errors.append(
+                tag(
+                    PLY017,
+                    f"pl.{name}: a list literal mixed with other positional "
+                    f"arguments is not flattened — polars raises TypeError "
+                    f"(or misparses the list as a nested literal) at runtime; "
+                    f"pass either varargs or one single list",
+                )
+            )
+            return None, Unknown()
 
         if name == "concat_str" or name == "format":
             for arg in _flatten_expr_args(node.args):

@@ -90,6 +90,7 @@ Rules with both sides present (valid twin -> invalid twin):
 | drop/rename/cast | `m1_drop_rename_cast` | `m1_drop_missing`, `m1_rename_unknown`, `cast_impossible`, `cast_column_not_found` |
 | nullability propagation | `m2_fill_null_narrowing` | `null_propagation_nonnull` |
 | coerce limits | `coerce_len_agg`, `coerce_to_string` | `coerce_limits` |
+| multi-expr list args | `expr_list_args` | `expr_list_args_mixed` |
 | tz handling | `tz_same_ops` | `tz_mixing` |
 | function-call checking | `function_call_*` | `function_call_{missing_column,type_mismatch,nullable_mismatch,untyped_inference_fail}` |
 | sort/unique/over/drop_nulls keys | `m5_window_and_rolling`, `m1_drop_nulls_and_row_index` | `sort_missing_column`, `unique_missing_subset`, `over_missing_column`, `drop_nulls_subset_not_found`, `with_row_index_collision` |
