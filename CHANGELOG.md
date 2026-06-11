@@ -148,6 +148,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the left rest carries that name as String). Collisions with PINNED
   left columns keep their deterministic suffix and precise dtypes, and
   the closed-left case keeps every pin precise.
+- Stdlib `decimal.Decimal` and `datetime.time` field annotations resolve
+  instead of silently dropping the field from the schema (issue #77).
+  `decimal.Decimal` / bare `Decimal` (`from decimal import Decimal`)
+  register pandera's engine default `Decimal(28, 0)` — the same value as a
+  bare `pl.Decimal` (issue #75) — and `datetime.time` / `dt.time` / bare
+  `time` register `Time`, both probed against pandera 0.31.1 in both
+  directions. Nested positions (`pl.List(decimal.Decimal)`) stay runtime
+  wildcards and parse to `Unknown`, mirroring nested `pl.Decimal`. The
+  bare `time` name is read as `from datetime import time` (annotating with
+  the stdlib `time` *module* is never meaningful — pandera rejects it).
+- An UNRECOGNIZED field annotation no longer silently drops the field
+  (issue #77, ADR-0007): the column registers with `Unknown` dtype — so
+  strict schemas no longer reject correct code with phantom
+  "Extra column" errors and open schemas no longer pass wrong dtypes
+  against a vanished column — and every function referencing the schema
+  gets a new `PLW011` warning naming the field and annotation. A warning
+  rather than a `PLY041` error because the name may be a runtime alias of
+  a real dtype (`MyAlias = pl.Int64` resolves fine in pandera); if it
+  genuinely does not resolve, pandera raises TypeError at first schema
+  use, which the warning text points at.
 - Cross-file schema inheritance resolves (issue #76): a class whose base
   is an IMPORTED schema (`from base import WithId` + `class
   Users(WithId)`) was not recognized as a schema at all — functions

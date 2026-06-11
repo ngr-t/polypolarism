@@ -1,0 +1,4 @@
+decimal_wrong_dtype: FAIL
+  error: [PLY040] Column 'd' has type Int64, but declared type is Decimal(28, 0)
+time_wrong_dtype: FAIL
+  error: [PLY040] Column 't' has type Int64, but declared type is Time

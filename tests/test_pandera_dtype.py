@@ -496,11 +496,117 @@ class TestStdlibTemporal:
 
         assert _parse("Optional[date]") == ColumnSpec(Date(), required=False)
 
+    def test_bare_time(self):
+        # Issue #77: ``from datetime import time`` + ``t: time``. Pandera
+        # resolves ``datetime.time`` to ``Time`` (probed, pandera 0.31.1).
+        # The bare NAME is ambiguous — ``import time; t: time`` annotates
+        # with the stdlib MODULE, which pandera rejects (TypeError at first
+        # use) — but a module annotation is never meaningful, so the
+        # ``datetime.time`` reading is the only useful one.
+        from polypolarism.types import Time
+
+        assert _parse("time") == ColumnSpec(Time(), required=True)
+
+    def test_qualified_datetime_time(self):
+        from polypolarism.types import Time
+
+        assert _parse("datetime.time") == ColumnSpec(Time(), required=True)
+
+    def test_aliased_module_time(self):
+        from polypolarism.types import Time
+
+        assert _parse("dt.time") == ColumnSpec(Time(), required=True)
+
+    def test_optional_time(self):
+        from polypolarism.types import Time
+
+        assert _parse("Optional[time]") == ColumnSpec(Time(), required=False)
+
+    def test_nested_time_in_list(self):
+        # ``pl.List(datetime.time)`` is ``List(Time)`` at runtime (probed)
+        # — Time is parameterless, so no wildcard concern (unlike Decimal).
+        from polypolarism.types import Time
+
+        assert _parse("pl.List(time)") == ColumnSpec(List(Time()), required=True)
+        assert _parse("pl.List(datetime.time)") == ColumnSpec(List(Time()), required=True)
+
     def test_pl_dtype_unchanged(self):
         # Make sure the existing ``pl.Date`` etc. path didn't regress.
         from polypolarism.types import Date
 
         assert _parse("pl.Date") == ColumnSpec(Date(), required=True)
+
+
+class TestStdlibDecimal:
+    """``decimal.Decimal`` / bare ``Decimal`` field annotations (issue #77).
+
+    Pandera resolves the stdlib class through its engine default —
+    ``Decimal(28, 0)``, identical to a bare ``pl.Decimal`` (issue #75).
+    Probed (pandera 0.31.1): ``to_schema()`` reports (28, 0); ``validate``
+    passes a (28, 0) column and rejects (38, 0) and Int64. NESTED positions
+    are class-level wildcards at runtime — ``pl.List(decimal.Decimal)``
+    builds polars' ``List(Decimal)`` and validates List(Decimal(28,0)) AND
+    List(Decimal(38,0)) — so they parse to Unknown, mirroring nested
+    ``pl.Decimal``.
+    """
+
+    def test_bare_decimal(self):
+        # ``from decimal import Decimal`` — polars' Decimal is always
+        # ``pl.``-qualified in annotations, so the bare name is the stdlib.
+        assert _parse("Decimal") == ColumnSpec(Decimal(28, 0), required=True)
+
+    def test_qualified_decimal(self):
+        assert _parse("decimal.Decimal") == ColumnSpec(Decimal(28, 0), required=True)
+
+    def test_aliased_module_decimal(self):
+        # ``import decimal as dec`` — any non-``pl`` prefix, like the
+        # stdlib temporal attribute forms.
+        assert _parse("dec.Decimal") == ColumnSpec(Decimal(28, 0), required=True)
+
+    def test_optional_qualified_decimal(self):
+        assert _parse("Optional[decimal.Decimal]") == ColumnSpec(Decimal(28, 0), required=False)
+
+    def test_series_bare_decimal(self):
+        assert _parse("Series[Decimal]") == ColumnSpec(Decimal(28, 0), required=True)
+
+    def test_nested_bare_decimal_is_wildcard(self):
+        assert _parse("pl.List(Decimal)") == ColumnSpec(List(Unknown()), required=True)
+
+    def test_nested_qualified_decimal_is_wildcard(self):
+        assert _parse("pl.List(decimal.Decimal)") == ColumnSpec(List(Unknown()), required=True)
+
+    def test_pl_decimal_top_level_unchanged(self):
+        # Issue #75 handling must not regress: bare top-level ``pl.Decimal``
+        # is pandera's (28, 0); nested bare ``pl.Decimal`` is a wildcard.
+        assert _parse("pl.Decimal") == ColumnSpec(Decimal(28, 0), required=True)
+        assert _parse("pl.List(pl.Decimal)") == ColumnSpec(List(Unknown()), required=True)
+
+
+class TestUnrecognizedFieldSpec:
+    """``unrecognized_field_spec`` — the degraded column for annotations the
+    parser rejects (issue #77): the column EXISTS with Unknown dtype instead
+    of silently vanishing from the schema. Optional/Series wrappers still
+    contribute their requiredness."""
+
+    def _spec(self, annotation_src: str) -> ColumnSpec:
+        from polypolarism.pandera_dtype import unrecognized_field_spec
+
+        tree = ast.parse(f"x: {annotation_src}")
+        stmt = tree.body[0]
+        assert isinstance(stmt, ast.AnnAssign)
+        return unrecognized_field_spec(stmt.annotation)
+
+    def test_plain_name(self):
+        assert self._spec("MyCustom") == ColumnSpec(Unknown(), required=True)
+
+    def test_optional_wrapped(self):
+        assert self._spec("Optional[MyCustom]") == ColumnSpec(Unknown(), required=False)
+
+    def test_series_wrapped(self):
+        assert self._spec("Series[MyCustom]") == ColumnSpec(Unknown(), required=True)
+
+    def test_series_optional_wrapped(self):
+        assert self._spec("Series[Optional[MyCustom]]") == ColumnSpec(Unknown(), required=False)
 
 
 class TestSeriesWrapper:

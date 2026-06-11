@@ -55,6 +55,7 @@ from polypolarism.diagnostics import (
     PLW006,
     PLW007,
     PLW008,
+    PLW011,
     PLY001,
     PLY002,
     PLY003,
@@ -1980,6 +1981,33 @@ def _schema_definition_error(schema_name: str, schema_registry: SchemaRegistry) 
     return tag(
         PLY041,
         f"schema '{schema_name}' cannot be used at runtime: {details}",
+    )
+
+
+def _schema_definition_warning(schema_name: str, schema_registry: SchemaRegistry) -> str | None:
+    """PLW011 message for a schema with unrecognized field annotations.
+
+    Issue #77: a field annotation polypolarism cannot translate registers
+    as a column of Unknown dtype instead of silently vanishing (which
+    produced phantom "extra column" FPs on strict schemas and vanished-
+    column FNs on open ones). A warning rather than an error: the name may
+    be a runtime alias of a real dtype (``MyAlias = pl.Int64`` resolves
+    fine in pandera), so the schema is not provably broken — but if it
+    does NOT resolve, pandera raises TypeError the first time the schema
+    is used. Returns ``None`` for unknown or fully-recognized schemas.
+    """
+    schema = schema_registry.get(schema_name)
+    if schema is None or not schema.definition_warnings:
+        return None
+    details = "; ".join(
+        f"field '{field_name}': {detail}"
+        for field_name, detail in schema.definition_warnings.items()
+    )
+    return tag(
+        PLW011,
+        f"schema '{schema_name}' has unrecognized field annotations: {details} — "
+        f"each column is treated as Unknown dtype (pandera raises TypeError at "
+        f"first use if the annotation does not resolve to a dtype at runtime)",
     )
 
 
@@ -4119,6 +4147,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         current_class_name: str | None = None,
         module_consts: dict[str, str | list[str] | int] | None = None,
         reported_broken_schemas: set[str] | None = None,
+        reported_degraded_schemas: set[str] | None = None,
     ):
         self.input_types = input_types
         self.errors = errors
@@ -4128,6 +4157,11 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         # validate sites reference it.
         self._reported_broken_schemas: set[str] = (
             reported_broken_schemas if reported_broken_schemas is not None else set()
+        )
+        # Same dedup contract for PLW011 (issue #77): schemas with
+        # unrecognized field annotations, warned once per function.
+        self._reported_degraded_schemas: set[str] = (
+            reported_degraded_schemas if reported_degraded_schemas is not None else set()
         )
         # Non-fatal advisories. Owned externally so nested analyses can append.
         self.warnings: list[str] = warnings if warnings is not None else []
@@ -4174,13 +4208,20 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         Issue #69: ``x: DataFrame[Broken] = ...`` and ``Broken.validate(df)``
         crash at runtime even when the function signature is healthy. Once
         per schema per function (shared dedup set with the signature sites).
+
+        Issue #77: the same body sites surface PLW011 when the schema has
+        fields whose annotation degraded to Unknown dtype.
         """
-        if schema_name in self._reported_broken_schemas:
-            return
-        error = _schema_definition_error(schema_name, self.schema_registry)
-        if error is not None:
-            self._reported_broken_schemas.add(schema_name)
-            self.errors.append(error)
+        if schema_name not in self._reported_broken_schemas:
+            error = _schema_definition_error(schema_name, self.schema_registry)
+            if error is not None:
+                self._reported_broken_schemas.add(schema_name)
+                self.errors.append(error)
+        if schema_name not in self._reported_degraded_schemas:
+            warning = _schema_definition_warning(schema_name, self.schema_registry)
+            if warning is not None:
+                self._reported_degraded_schemas.add(schema_name)
+                self.warnings.append(warning)
 
     def _visit_with_narrowing_disabled(self, node: ast.AST) -> None:
         prev = self._narrowing_enabled
@@ -6620,17 +6661,26 @@ def analyze_function(
     # Schema names already flagged PLY041 (issue #69): a schema whose
     # ``Annotated`` field arity provably crashes pandera is reported once
     # per function, however many annotation sites reference it. Shared with
-    # the body analyzer below.
+    # the body analyzer below. ``degraded_schemas_reported`` is the same
+    # dedup contract for PLW011 (issue #77: unrecognized field annotations
+    # degraded to Unknown-dtype columns).
     broken_schemas_reported: set[str] = set()
+    degraded_schemas_reported: set[str] = set()
 
     def _note_schema_reference(annotation: ast.expr) -> None:
         schema_name = frame_annotation_schema_name(annotation)
-        if schema_name is None or schema_name in broken_schemas_reported:
+        if schema_name is None:
             return
-        error = _schema_definition_error(schema_name, schema_registry)
-        if error is not None:
-            broken_schemas_reported.add(schema_name)
-            errors.append(error)
+        if schema_name not in broken_schemas_reported:
+            error = _schema_definition_error(schema_name, schema_registry)
+            if error is not None:
+                broken_schemas_reported.add(schema_name)
+                errors.append(error)
+        if schema_name not in degraded_schemas_reported:
+            warning = _schema_definition_warning(schema_name, schema_registry)
+            if warning is not None:
+                degraded_schemas_reported.add(schema_name)
+                warnings.append(warning)
 
     # Extract input parameter types
     for arg in func_node.args.args:
@@ -6721,6 +6771,7 @@ def analyze_function(
         current_class_name=current_class_name,
         module_consts=module_consts,
         reported_broken_schemas=broken_schemas_reported,
+        reported_degraded_schemas=degraded_schemas_reported,
     )
     for stmt in func_node.body:
         body_analyzer.visit(stmt)

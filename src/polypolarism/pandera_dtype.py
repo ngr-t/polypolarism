@@ -2,6 +2,11 @@
 
 Recognised annotation shapes:
 - Python builtins: ``int``, ``str``, ``float``, ``bool``
+- Python stdlib classes (issue #77): bare ``date`` / ``datetime`` /
+  ``timedelta`` / ``time`` and the qualified ``datetime.date`` etc. forms;
+  ``decimal.Decimal`` / bare ``Decimal`` -> pandera's ``Decimal(28, 0)``
+  (same engine default as bare ``pl.Decimal``, issue #75; nested positions
+  are runtime wildcards -> ``Unknown``)
 - Polars dtype classes: ``pl.Int64``, ``pl.Utf8``, ``pl.Float64`` etc. (with or without ``()``)
 - ``Series[T]`` (the canonical pandera class-based form) -> equivalent to bare ``T``.
   Both bare and qualified heads (``Series``, ``pa.typing.Series``,
@@ -69,6 +74,7 @@ from polypolarism.types import (
     List,
     Nullable,
     Struct,
+    Time,
     Unknown,
     Utf8,
 )
@@ -88,6 +94,13 @@ _BUILTIN_MAP: dict[str, DataType] = {
     "date": Date(),
     "datetime": Datetime(),
     "timedelta": Duration(),
+    # Issue #77 — read as ``from datetime import time`` (pandera resolves
+    # ``datetime.time`` to Time; probed 0.31.1). Ambiguity note: the bare
+    # NAME could also be the stdlib ``time`` MODULE (``import time``),
+    # which pandera rejects with a TypeError at first use — but a module
+    # annotation is never meaningful, so the datetime.time reading is the
+    # only useful one.
+    "time": Time(),
 }
 
 
@@ -99,6 +112,7 @@ _STDLIB_TEMPORAL_ATTR_MAP: dict[str, DataType] = {
     "date": Date(),
     "datetime": Datetime(),
     "timedelta": Duration(),
+    "time": Time(),
 }
 
 
@@ -147,13 +161,16 @@ def _parse_dtype_expr(node: ast.expr) -> tuple[DataType, bool] | None:
     if _is_annotated(node):
         return _parse_annotated(node)
 
-    # A TOP-LEVEL bare ``pl.Decimal`` annotation resolves through pandera's
+    # A TOP-LEVEL bare Decimal-class annotation resolves through pandera's
     # engine default — (28, 0), not polars' materialized (38, 0) (issue
     # #75; probed: ``to_schema()`` reports 28 and ``validate`` rejects 38).
-    # Call forms (``pl.Decimal()``, omitted/None args) carry a polars
-    # instance and keep polars' 38; nested bare forms are runtime
-    # wildcards and parse to Unknown in ``_parse_plain_dtype``.
-    if _is_pl_attr(node, "Decimal"):
+    # This covers ``pl.Decimal``, the stdlib ``decimal.Decimal`` qualified
+    # form, and the bare ``Decimal`` name (issue #77; probed: pandera
+    # resolves the stdlib class to the same Decimal(28, 0)). Call forms
+    # (``pl.Decimal()``, omitted/None args) carry a polars instance and
+    # keep polars' 38; nested bare forms are runtime wildcards and parse
+    # to Unknown in ``_parse_plain_dtype``.
+    if _is_bare_decimal_class(node):
         return PANDERA_BARE_DECIMAL, True
 
     dtype = _parse_plain_dtype(node)
@@ -170,6 +187,14 @@ def _is_series(node: ast.expr) -> bool:
 def _parse_plain_dtype(node: ast.expr) -> DataType | None:
     """Parse a non-Optional, non-Annotated dtype expression."""
     if isinstance(node, ast.Name):
+        # A bare ``Decimal`` name (``from decimal import Decimal``) in a
+        # NESTED position is a class-level wildcard at runtime, exactly
+        # like nested bare ``pl.Decimal`` (issues #75/#77 — probed:
+        # ``pl.List(decimal.Decimal)`` builds polars' ``List(Decimal)``
+        # and validates List(Decimal(28,0)) AND List(Decimal(38,0))).
+        # The TOP-LEVEL bare form is special-cased in ``_parse_dtype_expr``.
+        if node.id == "Decimal":
+            return Unknown()
         return _BUILTIN_MAP.get(node.id)
 
     if isinstance(node, ast.Attribute):
@@ -206,6 +231,11 @@ def _parse_plain_dtype(node: ast.expr) -> DataType | None:
             # names disambiguate from polars' uppercase dtype names.
             if node.attr in _STDLIB_TEMPORAL_ATTR_MAP:
                 return _STDLIB_TEMPORAL_ATTR_MAP[node.attr]
+            # ``decimal.Decimal`` / ``dec.Decimal`` under a non-``pl``
+            # prefix in a NESTED position — the same class-level runtime
+            # wildcard as the bare-name form above (issue #77).
+            if node.attr == "Decimal":
+                return Unknown()
         return None
 
     if isinstance(node, ast.Call):
@@ -508,6 +538,49 @@ def _is_pl_attr(node: ast.expr, attr: str) -> bool:
         and node.value.id == "pl"
         and node.attr == attr
     )
+
+
+def _is_bare_decimal_class(node: ast.expr) -> bool:
+    """A bare Decimal CLASS reference: ``pl.Decimal``, ``decimal.Decimal``
+    (any non-``pl`` module prefix, mirroring the stdlib temporal forms), or
+    the bare ``Decimal`` name (``from decimal import Decimal`` — polars'
+    Decimal is always ``pl.``-qualified in annotations, so the bare name is
+    the stdlib class; both resolve to pandera's (28, 0) anyway)."""
+    if isinstance(node, ast.Name):
+        return node.id == "Decimal"
+    return (
+        isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.attr == "Decimal"
+    )
+
+
+def unrecognized_field_spec(annotation: ast.expr) -> ColumnSpec:
+    """Degraded spec for an annotation ``parse_field_annotation`` rejects.
+
+    Issue #77: an unrecognized dtype annotation used to silently DROP the
+    field from the schema, producing phantom "extra column" false positives
+    on strict schemas and vanished-column false negatives on open ones.
+    Instead the column registers with ``Unknown`` dtype — it EXISTS, just
+    with an unknowable dtype. Optional/Series wrappers still contribute
+    their requiredness. The caller (``pandera_schema._parse_schema``)
+    records a definition warning so the degrade stays loud (PLW011).
+    """
+    node = annotation
+    required = True
+    while True:
+        if _is_optional(node):
+            inner = _optional_inner(node)
+            if inner is None:
+                break
+            required = False
+            node = inner
+        elif _is_series(node):
+            assert isinstance(node, ast.Subscript)
+            node = node.slice
+        else:
+            break
+    return ColumnSpec(dtype=Unknown(), required=required)
 
 
 def _name_matches(node: ast.expr, name: str) -> bool:

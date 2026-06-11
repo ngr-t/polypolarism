@@ -14,7 +14,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from polypolarism.compat.pandera_api import SCHEMA_BASE_NAMES as _BASE_NAMES
-from polypolarism.pandera_dtype import annotated_arity_error, parse_field_annotation
+from polypolarism.pandera_dtype import (
+    annotated_arity_error,
+    parse_field_annotation,
+    unrecognized_field_spec,
+)
 from polypolarism.types import ColumnSpec, FrameType
 
 
@@ -34,6 +38,16 @@ class Schema:
     # analyzer surfaces these as PLY041 on every function that references
     # the schema.
     definition_errors: dict[str, str] = field(default_factory=dict)
+    # Field annotations polypolarism cannot translate to a dtype (issue
+    # #77): field name -> detail. The column still registers (Unknown
+    # dtype, via ``unrecognized_field_spec``) so it neither produces
+    # phantom "extra column" FPs on strict schemas nor vanished-column
+    # FNs on open ones. NOT an error: a bare name may be a runtime alias
+    # of a real dtype (``MyAlias = pl.Int64`` resolves fine in pandera),
+    # so unresolvability is not provable statically. The analyzer
+    # surfaces these as PLW011 on every function that references the
+    # schema. Inheritance/repair semantics mirror ``definition_errors``.
+    definition_warnings: dict[str, str] = field(default_factory=dict)
 
     def to_frame_type(self) -> FrameType:
         return FrameType(columns=dict(self.columns), strict=self.strict, coerce=self.coerce)
@@ -160,6 +174,8 @@ def _parse_schema(node: ast.ClassDef, registry: SchemaRegistry) -> Schema:
             schema.columns.setdefault(col_name, col_spec)
         for col_name, detail in parent.definition_errors.items():
             schema.definition_errors.setdefault(col_name, detail)
+        for col_name, detail in parent.definition_warnings.items():
+            schema.definition_warnings.setdefault(col_name, detail)
         if parent.strict:
             schema.strict = True
         if parent.coerce:
@@ -180,6 +196,21 @@ def _parse_schema(node: ast.ClassDef, registry: SchemaRegistry) -> Schema:
             spec = parse_field_annotation(stmt.annotation, stmt.value)
             if spec is not None:
                 schema.columns[field_name] = spec
+                schema.definition_warnings.pop(field_name, None)
+            elif arity_error is None:
+                # Issue #77: an unrecognized annotation must not silently
+                # drop the field. Register the column with Unknown dtype
+                # and record a definition warning (surfaced as PLW011).
+                # Arity-broken fields are excluded — PLY041 already
+                # carries their verdict.
+                schema.columns[field_name] = unrecognized_field_spec(stmt.annotation)
+                schema.definition_warnings[field_name] = (
+                    f"annotation `{ast.unparse(stmt.annotation)}` is not a recognized dtype form"
+                )
+            else:
+                # Re-declared (broken) field: an inherited unrecognized-
+                # annotation warning no longer describes this class.
+                schema.definition_warnings.pop(field_name, None)
         elif isinstance(stmt, ast.ClassDef) and stmt.name == "Config":
             _apply_config(schema, stmt)
 
