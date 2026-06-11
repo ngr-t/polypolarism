@@ -5,10 +5,13 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Literal
+from typing import Literal, NoReturn
 
 from polypolarism.types import (
     DataType,
+    Date,
+    Datetime,
+    Duration,
     Float16,
     Float32,
     Float64,
@@ -20,6 +23,7 @@ from polypolarism.types import (
     Int128,
     List,
     Nullable,
+    Time,
     UInt8,
     UInt16,
     UInt32,
@@ -122,6 +126,27 @@ NUMERIC_TYPES = (
 # select and agg contexts; e.g. sum of UInt8 [250, 250] is 500: i64.
 _SMALL_INT_TYPES = (Int8, Int16, UInt8, UInt16)
 
+# Temporal receivers (issue #85). The full
+# {mean, median, std, var, quantile, sum, min, max, product} x
+# {Date, Datetime(ms/us/ns, naive + tz), Duration(ms/us/ns), Time} matrix
+# was probed on polars 1.41.2 in both contexts:
+#
+# - mean/median/quantile preserve the receiver dtype EXACTLY (time unit and
+#   tz flow through) for Datetime/Duration/Time, and return Datetime[us]
+#   (naive) for a Date receiver — identical in select and agg contexts, and
+#   total on non-empty non-null input (a singleton group yields a value).
+# - sum/std on Duration preserve the unit in both contexts; std keeps the
+#   ddof=1 singleton-group null (issue #60), so it stays always-nullable.
+# - var on Duration raises InvalidOperationError in BOTH contexts.
+# - sum/std/var on Date/Datetime/Time raise InvalidOperationError as
+#   whole-frame (select) reductions; in grouped contexts polars does NOT
+#   raise — it silently yields an unconditionally all-null column of the
+#   receiver dtype. An always-null result is never what the author meant,
+#   so those cells stay statically rejected in both contexts.
+# - product raises InvalidOperationError on every temporal receiver.
+# - min/max/first/last/list pass temporals through untouched (no guard).
+TEMPORAL_TYPES = (Date, Datetime, Duration, Time)
+
 # Cells that PANIC in rust (pyo3 ``PanicException``, a BaseException — not a
 # catchable polars error class) when evaluated in a grouped context —
 # ``group_by().agg()`` and ``Expr.over`` windows — while the same expression
@@ -169,9 +194,44 @@ def _float_reduction_width(inner: DataType) -> DataType:
     return Float64()
 
 
+def _temporal_mean_like(inner: DataType) -> DataType:
+    """Result dtype of mean/median/quantile on a temporal receiver (issue #85).
+
+    Probed (polars 1.41.2; identical in select and agg contexts): the
+    receiver INSTANCE is preserved — Datetime keeps its time unit and tz,
+    Duration its unit, Time stays Time — except Date, which returns a naive
+    Datetime[us] (the midpoint of dates is not a date).
+    """
+    if isinstance(inner, Date):
+        return Datetime(unit="us")
+    return inner
+
+
+def _reject_temporal(name: str, dtype: DataType) -> NoReturn:
+    """Raise for a probed temporal cell polars does not support.
+
+    Probed (polars 1.41.2): these cells raise InvalidOperationError as
+    whole-frame reductions; in grouped contexts they either raise too
+    (var on Duration) or silently fill the column with nulls (sum/std/var
+    on Date/Datetime/Time) — rejected statically either way.
+    """
+    raise GroupByTypeError(
+        f"Cannot apply {name} to type {dtype}: {name} is not supported for "
+        f"this temporal type at runtime (probed polars 1.41.2)"
+    )
+
+
 def _infer_sum(dtype: DataType) -> DataType:
     """sum(T) -> T for numeric types; sub-32-bit ints upcast to Int64."""
     inner, is_nullable = _unwrap_nullable(dtype)
+
+    # Probed (polars 1.41.2; issue #85): sum on Duration preserves the
+    # receiver unit in both contexts; Date/Datetime/Time are unsupported
+    # (select raises, grouped degrades to all-null — see TEMPORAL_TYPES).
+    if isinstance(inner, Duration):
+        return _wrap_nullable(inner, is_nullable)
+    if isinstance(inner, TEMPORAL_TYPES):
+        _reject_temporal("sum", dtype)
 
     if not isinstance(inner, NUMERIC_TYPES):
         raise GroupByTypeError(f"Cannot apply sum to type {dtype}: sum requires numeric type")
@@ -186,8 +246,15 @@ def _infer_sum(dtype: DataType) -> DataType:
 
 
 def _infer_mean(dtype: DataType) -> DataType:
-    """mean(T) -> Float64 for numeric types; mean(Float32/Float16) keeps the width."""
+    """mean(T) -> Float64 for numeric types; mean(Float32/Float16) keeps the width.
+
+    Temporal receivers are supported too (issue #85): the receiver dtype is
+    preserved (Date transforms to Datetime[us]) — see ``_temporal_mean_like``.
+    """
     inner, is_nullable = _unwrap_nullable(dtype)
+
+    if isinstance(inner, TEMPORAL_TYPES):
+        return _wrap_nullable(_temporal_mean_like(inner), is_nullable)
 
     if not isinstance(inner, NUMERIC_TYPES):
         raise GroupByTypeError(f"Cannot apply mean to type {dtype}: mean requires numeric type")
@@ -241,7 +308,12 @@ def _infer_max(dtype: DataType) -> DataType:
     return dtype
 
 
-def _infer_float_reduction(name: str, *, always_nullable: bool = False):
+def _infer_float_reduction(
+    name: str,
+    *,
+    always_nullable: bool = False,
+    temporal_ok: tuple[type[DataType], ...] = (),
+):
     """Build an inference fn for numeric -> Float64 reductions (std/var/median/quantile).
 
     A Float32 receiver keeps Float32 (probed, polars 1.41.2; backlog N-2).
@@ -251,10 +323,20 @@ def _infer_float_reduction(name: str, *, always_nullable: bool = False):
     polars 1.41.2: any singleton group), so the result is Nullable even on
     non-nullable input. median/quantile are total on non-empty non-null
     input (probed) and only propagate the input's nullability.
+
+    ``temporal_ok`` lists the temporal receiver classes the reduction
+    supports at runtime (issue #85): all four for median/quantile, only
+    Duration for std, none for var. Accepted temporals preserve the
+    receiver instance (Date -> Datetime[us], see ``_temporal_mean_like``);
+    every other temporal receiver is a probed runtime error.
     """
 
     def _infer(dtype: DataType) -> DataType:
         inner, is_nullable = _unwrap_nullable(dtype)
+        if isinstance(inner, temporal_ok):
+            return _wrap_nullable(_temporal_mean_like(inner), is_nullable or always_nullable)
+        if isinstance(inner, TEMPORAL_TYPES):
+            _reject_temporal(name, dtype)
         if not isinstance(inner, NUMERIC_TYPES):
             raise GroupByTypeError(
                 f"Cannot apply {name} to type {dtype}: {name} requires numeric type"
@@ -267,6 +349,10 @@ def _infer_float_reduction(name: str, *, always_nullable: bool = False):
 def _infer_product(dtype: DataType) -> DataType:
     """product(T) -> T for numeric types; sub-32-bit ints upcast to Int64."""
     inner, is_nullable = _unwrap_nullable(dtype)
+    # Probed (polars 1.41.2; issue #85): product raises InvalidOperationError
+    # on every temporal receiver in both contexts.
+    if isinstance(inner, TEMPORAL_TYPES):
+        _reject_temporal("product", dtype)
     if not isinstance(inner, NUMERIC_TYPES):
         raise GroupByTypeError(
             f"Cannot apply product to type {dtype}: product requires numeric type"
@@ -289,10 +375,13 @@ _AGG_INFER_MAP: dict[AggFunction, Callable[[DataType], DataType]] = {
     AggFunction.LAST: _infer_last,
     AggFunction.MIN: _infer_min,
     AggFunction.MAX: _infer_max,
-    AggFunction.STD: _infer_float_reduction("std", always_nullable=True),
+    # Temporal receiver support (issue #85): std accepts only Duration,
+    # var accepts no temporal, median/quantile accept all four — probed,
+    # see the TEMPORAL_TYPES comment.
+    AggFunction.STD: _infer_float_reduction("std", always_nullable=True, temporal_ok=(Duration,)),
     AggFunction.VAR: _infer_float_reduction("var", always_nullable=True),
-    AggFunction.MEDIAN: _infer_float_reduction("median"),
-    AggFunction.QUANTILE: _infer_float_reduction("quantile"),
+    AggFunction.MEDIAN: _infer_float_reduction("median", temporal_ok=TEMPORAL_TYPES),
+    AggFunction.QUANTILE: _infer_float_reduction("quantile", temporal_ok=TEMPORAL_TYPES),
     AggFunction.PRODUCT: _infer_product,
 }
 

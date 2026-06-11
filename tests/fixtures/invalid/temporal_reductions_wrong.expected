@@ -1,0 +1,10 @@
+mean_wrong_unit: FAIL
+  error: [PLY040] Column 'mean_started' has type Datetime[ms, UTC], but declared type is Datetime[us, UTC]
+var_on_duration: FAIL
+  error: [PLY011] Cannot apply var to type Duration[ns]: var is not supported for this temporal type at runtime (probed polars 1.41.2)
+  error: [PLY040] Could not infer return type
+sum_on_datetime_grouped: FAIL
+  error: [PLY011] Cannot apply sum to type Datetime[ms, UTC]: sum is not supported for this temporal type at runtime (probed polars 1.41.2)
+  error: [PLY040] Could not infer return type
+std_on_datetime_select: FAIL
+  error: [PLY011] Cannot apply std to type Datetime[ms, UTC]: std is not supported for this temporal type at runtime (probed polars 1.41.2)
