@@ -147,6 +147,41 @@ class TestNullableHandling:
         assert result == Nullable(Int64())
 
 
+class TestStdVarNullability:
+    """std/var are Nullable(Float64) even on non-nullable input (issue #60).
+
+    Probed (polars 1.41.2): ``group_by(...).agg(std())`` with the default
+    ``ddof=1`` yields null for every group of size 1, so the result column
+    is honestly nullable regardless of the input's nullability.
+    """
+
+    def test_std_returns_nullable_float64(self):
+        result = infer_agg_result_type(AggFunction.STD, Float64())
+        assert result == Nullable(Float64())
+
+    def test_var_returns_nullable_float64(self):
+        result = infer_agg_result_type(AggFunction.VAR, Int64())
+        assert result == Nullable(Float64())
+
+    def test_std_nullable_input_stays_single_nullable(self):
+        result = infer_agg_result_type(AggFunction.STD, Nullable(Float64()))
+        assert result == Nullable(Float64())
+
+    def test_median_stays_non_nullable(self):
+        # Probed: median of a non-empty all-non-null group is never null.
+        result = infer_agg_result_type(AggFunction.MEDIAN, Float64())
+        assert result == Float64()
+
+    def test_quantile_stays_non_nullable(self):
+        # Probed: quantile of a non-empty all-non-null group is never null.
+        result = infer_agg_result_type(AggFunction.QUANTILE, Int64())
+        assert result == Float64()
+
+    def test_std_on_utf8_still_raises(self):
+        with pytest.raises(GroupByTypeError):
+            infer_agg_result_type(AggFunction.STD, Utf8())
+
+
 class TestUnknownAggregation:
     """Aggregating an Unknown-typed column never raises."""
 

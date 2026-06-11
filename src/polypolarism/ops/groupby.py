@@ -167,8 +167,15 @@ def _infer_max(dtype: DataType) -> DataType:
     return dtype
 
 
-def _infer_float_reduction(name: str):
-    """Build an inference fn for numeric -> Float64 reductions (std/var/median/quantile)."""
+def _infer_float_reduction(name: str, *, always_nullable: bool = False):
+    """Build an inference fn for numeric -> Float64 reductions (std/var/median/quantile).
+
+    ``always_nullable`` is set for std/var (issue #60): with the default
+    ``ddof=1`` they are null whenever only one sample is available (probed,
+    polars 1.41.2: any singleton group), so the result is Nullable even on
+    non-nullable input. median/quantile are total on non-empty non-null
+    input (probed) and only propagate the input's nullability.
+    """
 
     def _infer(dtype: DataType) -> DataType:
         inner, is_nullable = _unwrap_nullable(dtype)
@@ -176,7 +183,7 @@ def _infer_float_reduction(name: str):
             raise GroupByTypeError(
                 f"Cannot apply {name} to type {dtype}: {name} requires numeric type"
             )
-        return _wrap_nullable(Float64(), is_nullable)
+        return _wrap_nullable(Float64(), is_nullable or always_nullable)
 
     return _infer
 
@@ -202,8 +209,8 @@ _AGG_INFER_MAP: dict[AggFunction, Callable[[DataType], DataType]] = {
     AggFunction.LAST: _infer_last,
     AggFunction.MIN: _infer_min,
     AggFunction.MAX: _infer_max,
-    AggFunction.STD: _infer_float_reduction("std"),
-    AggFunction.VAR: _infer_float_reduction("var"),
+    AggFunction.STD: _infer_float_reduction("std", always_nullable=True),
+    AggFunction.VAR: _infer_float_reduction("var", always_nullable=True),
     AggFunction.MEDIAN: _infer_float_reduction("median"),
     AggFunction.QUANTILE: _infer_float_reduction("quantile"),
     AggFunction.PRODUCT: _infer_product,

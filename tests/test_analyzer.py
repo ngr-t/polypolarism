@@ -1524,8 +1524,11 @@ class TestM2NewAggregations:
     @pytest.mark.parametrize(
         "agg, expected_type",
         [
-            ("std", Float64()),
-            ("var", Float64()),
+            # std/var: ddof=1 default is null for singleton groups (probed,
+            # polars 1.41.2; issue #60) -> Nullable even on non-null input.
+            ("std", Nullable(Float64())),
+            ("var", Nullable(Float64())),
+            # median/quantile: total on non-empty, non-null groups (probed).
             ("median", Float64()),
             ("quantile", Float64()),
         ],
@@ -1567,6 +1570,122 @@ class TestM2NewAggregations:
         ft = results[0].inferred_return_type
         assert ft is not None
         assert ft.columns["p"].dtype == Int64()
+
+
+class TestM2StdVarDdof:
+    """std/var nullability and the explicit ``ddof=0`` refinement (issue #60).
+
+    Probed (polars 1.41.2): ``std()``/``var()`` with the default ``ddof=1``
+    are null whenever only one sample is available (singleton group, 1-row
+    frame), so the result is Nullable(Float64). An explicit literal
+    ``ddof=0`` is total on non-empty input (singleton group -> 0.0), so the
+    Nullable wrap is dropped — the receiver's own nullability still wins.
+    """
+
+    def _select(self, schema_field: str, expr: str):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + f"""
+            class In(pa.DataFrameModel):
+                g: str
+                {schema_field}
+
+            def f(data: DataFrame[In]):
+                return data.select({expr})
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        return ft
+
+    def test_select_std_is_nullable(self):
+        ft = self._select("v: pl.Float64", 'pl.col("v").std().alias("s")')
+        assert ft.columns["s"].dtype == Nullable(Float64())
+
+    def test_select_std_ddof_zero_keyword_non_nullable(self):
+        ft = self._select("v: pl.Float64", 'pl.col("v").std(ddof=0).alias("s")')
+        assert ft.columns["s"].dtype == Float64()
+
+    def test_select_var_ddof_zero_positional_non_nullable(self):
+        # Expr.var(ddof) takes ddof as its first positional parameter.
+        ft = self._select("v: int", 'pl.col("v").var(0).alias("s")')
+        assert ft.columns["s"].dtype == Float64()
+
+    def test_select_std_ddof_zero_nullable_receiver_stays_nullable(self):
+        # An all-null window is still null even with ddof=0.
+        ft = self._select(
+            "v: pl.Float64 = pa.Field(nullable=True)",
+            'pl.col("v").std(ddof=0).alias("s")',
+        )
+        assert ft.columns["s"].dtype == Nullable(Float64())
+
+    def test_select_std_explicit_ddof_one_stays_nullable(self):
+        ft = self._select("v: pl.Float64", 'pl.col("v").std(ddof=1).alias("s")')
+        assert ft.columns["s"].dtype == Nullable(Float64())
+
+    def test_select_std_non_literal_ddof_stays_nullable(self):
+        # A non-literal ddof cannot be proven 0 -> conservative Nullable.
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                v: pl.Float64
+
+            def f(data: DataFrame[In], d: int):
+                return data.select(pl.col("v").std(ddof=d).alias("s"))
+        """
+        )
+        results = analyze_source(source)
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["s"].dtype == Nullable(Float64())
+
+    def test_agg_std_ddof_zero_non_nullable(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                g: str
+                v: pl.Float64
+
+            def f(data: DataFrame[In]):
+                return data.group_by("g").agg(pl.col("v").std(ddof=0).alias("s"))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["s"].dtype == Float64()
+
+    def test_agg_var_ddof_zero_positional_non_nullable(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                g: str
+                v: pl.Float64
+
+            def f(data: DataFrame[In]):
+                return data.group_by("g").agg(pl.col("v").var(0).alias("s"))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["s"].dtype == Float64()
+
+    def test_std_over_stays_nullable(self):
+        # .std().over(g): singleton partitions broadcast their null (probed).
+        ft = self._select("v: pl.Float64", 'pl.col("v").std().over("g").alias("s")')
+        assert ft.columns["s"].dtype == Nullable(Float64())
+
+    def test_pl_std_shorthand_select_nullable(self):
+        ft = self._select("v: pl.Float64", 'pl.std("v")')
+        assert ft.columns["v"].dtype == Nullable(Float64())
 
 
 class TestM3StrNamespace:

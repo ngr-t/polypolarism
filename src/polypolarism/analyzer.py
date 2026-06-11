@@ -1049,6 +1049,24 @@ def _call_arg(call: ast.Call | None, *, position: int, name: str) -> ast.expr | 
     return node
 
 
+def _int_literal(node: ast.expr | None) -> int | None:
+    """The value of an explicit int literal (bools excluded), else None."""
+    if isinstance(node, ast.Constant) and type(node.value) is int:
+        return node.value
+    return None
+
+
+def _stdvar_ddof_zero(call: ast.Call) -> bool:
+    """True when a ``std``/``var`` call carries an explicit literal ``ddof=0``.
+
+    ``Expr.std(ddof: int = 1)`` / ``Expr.var(ddof: int = 1)`` take ``ddof``
+    as the first positional parameter (probed, polars 1.41.2). ``ddof=0``
+    is total on non-empty input (a singleton group yields 0.0, not null);
+    anything else — including a non-literal value — stays conservative.
+    """
+    return _int_literal(_call_arg(call, position=0, name="ddof")) == 0
+
+
 def _time_zone_arg_dtype(method: str, call_node: ast.Call | None) -> DataType:
     """Result dtype of ``dt.replace_time_zone(...)`` / ``dt.convert_time_zone(...)``
     on a Datetime receiver (issue #50 collateral).
@@ -1613,16 +1631,27 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                     # Form 1: ``pl.col("X").<agg>()`` — receiver is the col.
                     col_name = self._extract_col_name(col_expr)
 
-                    # Form 2: ``pl.<agg>("X")`` top-level shorthand — the
-                    # column name is the first positional arg of the call,
-                    # not buried inside a separate ``pl.col(...)`` receiver.
+                    # std/var with an explicit literal ``ddof=0`` flip the
+                    # result's nullability (issue #60) — call-level detail
+                    # the direct AggExpr form cannot carry. Skip the direct
+                    # form so the chain fallback below routes through the
+                    # ddof-aware expression path. Form-1 only: in the
+                    # ``pl.std("X", 0)`` shorthand the ddof sits at a
+                    # different positional slot and stays Nullable (safe
+                    # side; the shorthand path lives in _analyze_pl_func).
                     if (
-                        col_name is None
-                        and isinstance(col_expr, ast.Name)
-                        and col_expr.id == "pl"
-                        and agg_node.args
+                        col_name is not None
+                        and agg_func_name in ("std", "var")
+                        and _stdvar_ddof_zero(agg_node)
                     ):
-                        col_name = _str_constant(agg_node.args[0])
+                        col_name = None
+                    elif col_name is None:
+                        # Form 2: ``pl.<agg>("X")`` top-level shorthand —
+                        # the column name is the first positional arg of
+                        # the call, not buried inside a separate
+                        # ``pl.col(...)`` receiver.
+                        if isinstance(col_expr, ast.Name) and col_expr.id == "pl" and agg_node.args:
+                            col_name = _str_constant(agg_node.args[0])
 
                     if col_name:
                         return AggExpr(
@@ -3124,10 +3153,22 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         }
         if method in agg_map and receiver_type is not None:
             try:
-                return receiver_name, infer_agg_result_type(agg_map[method], receiver_type)
+                result_type = infer_agg_result_type(agg_map[method], receiver_type)
             except GroupByTypeError as e:
                 self.errors.append(str(e))
                 return receiver_name, receiver_type
+            # std/var with an explicit literal ``ddof=0`` are total on
+            # non-empty input (probed 1.41.2: singleton group -> 0.0), so
+            # the Nullable wrap from ``infer_agg_result_type`` is undone;
+            # the receiver's own nullability still propagates (an all-null
+            # window stays null even with ddof=0).
+            if (
+                method in ("std", "var")
+                and _stdvar_ddof_zero(node)
+                and result_type == Nullable(Float64())
+            ):
+                result_type = _wrap_like(receiver_type, Float64())
+            return receiver_name, result_type
 
         # ``cast(pl.<dtype>)`` chained directly on column. A structurally
         # impossible source -> target pair flags PLY013 (issue #34) and the
