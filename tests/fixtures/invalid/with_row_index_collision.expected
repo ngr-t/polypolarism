@@ -1,3 +1,3 @@
 add_colliding_row_index: FAIL
   error: [PLY006] with_row_index: column 'index' already exists
-  error: Column 'index' has type UInt32, but declared type is Int64
+  error: [PLY040] Column 'index' has type UInt32, but declared type is Int64

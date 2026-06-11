@@ -1,2 +1,2 @@
 add_extra: FAIL
-  error: Extra column 'doubled' of type Int64 not in declared return type
+  error: [PLY040] Extra column 'doubled' of type Int64 not in declared return type

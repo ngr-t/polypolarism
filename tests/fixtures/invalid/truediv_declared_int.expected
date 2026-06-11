@@ -1,2 +1,2 @@
 divide: FAIL
-  error: Column 'r' has type Float64, but declared type is Int64
+  error: [PLY040] Column 'r' has type Float64, but declared type is Int64

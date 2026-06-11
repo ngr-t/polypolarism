@@ -1,2 +1,2 @@
 process: FAIL
-  error: Column 'doubled' has type Int64, but declared type is Utf8
+  error: [PLY040] Column 'doubled' has type Int64, but declared type is Utf8

@@ -240,8 +240,8 @@ For invalid code:
 
 ```
   bad_join: FAIL
-    - Column 'user_id' not found in right frame
-    - Could not infer return type
+    - [PLY010] Column 'user_id' not found in right frame
+    - [PLY040] Could not infer return type
 
 1 function(s) failed, 0 passed.
 ```
@@ -476,6 +476,7 @@ Errors are tagged with a stable `[PLY###]` prefix for IDE/CI consumers:
 | `PLY031` | lazy-only method called on a `DataFrame` (e.g. `df.sink_csv(...)`, `df.collect()`) — suggests `.lazy()` or removing the call |
 | `PLY032` | function-call argument or return type mixes up `DataFrame[S]` and `LazyFrame[S]` — suggests the appropriate `.collect()` / `.lazy()` |
 | `PLY033` | a variable annotation re-interprets the inferred frame as an unrelated type (neither subtype direction holds, ADR-0005) |
+| `PLY040` | declared return type does not match the inferred return type — one shared code for the whole family: missing column, extra column, dtype difference, or the return type could not be inferred |
 
 ### Apply-style helpers and warning codes
 
@@ -512,6 +513,11 @@ Warning codes:
 
 JSON output (`--format json`) emits warnings as `severity: "warning"`
 diagnostics so editors and CI can route them separately from errors.
+Every tagged diagnostic also exposes its `PLY###` / `PLW###` code as a
+structured `"code"` field alongside the `[PLY###]`-prefixed message, so
+consumers (pre-commit hooks, CI annotators, editors) never need to regex
+the message text. Untagged diagnostics (file read / parse failures) omit
+the field.
 
 ### Schema diff block
 
@@ -522,10 +528,10 @@ errors so the user can scan the whole shape difference at once:
 
 ```
   f (line 19): FAIL
-    - Column 'id' has type Int64, but declared type is Int32
-    - Missing column 'amount' of type Float64
-    - Column 'name' has type Utf8, but declared type is Float64
-    - Missing column 'extra' of type Int64
+    - [PLY040] Column 'id' has type Int64, but declared type is Int32
+    - [PLY040] Missing column 'amount' of type Float64
+    - [PLY040] Column 'name' has type Utf8, but declared type is Float64
+    - [PLY040] Missing column 'extra' of type Int64
     schema diff:
       column  declared  inferred   status
       ──────  ────────  ─────────  ────────

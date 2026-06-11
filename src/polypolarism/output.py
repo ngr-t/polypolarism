@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from polypolarism.checker import CheckResult
+from polypolarism.diagnostics import extract_code
 
 
 class DiagnosticSeverity(Enum):
@@ -30,6 +31,10 @@ class Diagnostic:
     end_line: int | None = None
     end_column: int | None = None
     source: str = "polypolarism"
+    # Stable ``PLY###`` / ``PLW###`` code, exposed structurally so JSON
+    # consumers don't have to regex the message prefix (issue #70). ``None``
+    # for untagged diagnostics (parse / read failures).
+    code: str | None = None
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
@@ -41,6 +46,8 @@ class Diagnostic:
             "severity": self.severity.value,
             "source": self.source,
         }
+        if self.code is not None:
+            result["code"] = self.code
         if self.end_line is not None:
             result["end_line"] = self.end_line
         if self.end_column is not None:
@@ -70,14 +77,16 @@ def _build_diagnostics(group: FileResults) -> list[dict]:
         end_line = group.function_end_lines.get(result.function_name)
         if not result.passed:
             for error in result.errors:
+                message = _error_to_message(error)
                 diag = Diagnostic(
                     file=group.file_path,
                     line=line,
                     column=0,
-                    message=_error_to_message(error),
+                    message=message,
                     severity=DiagnosticSeverity.ERROR,
                     end_line=end_line,
                     end_column=0,
+                    code=extract_code(message),
                 )
                 diagnostics.append(diag.to_dict())
         for warning in result.warnings:
@@ -89,6 +98,7 @@ def _build_diagnostics(group: FileResults) -> list[dict]:
                 severity=DiagnosticSeverity.WARNING,
                 end_line=end_line,
                 end_column=0,
+                code=extract_code(warning),
             )
             diagnostics.append(diag.to_dict())
     return diagnostics

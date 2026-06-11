@@ -54,8 +54,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `publish.yml` workflow for PyPI Trusted Publishing (manual dispatch /
   tag-triggered; not yet wired up to a published project).
 
+- New diagnostic code `PLY040` for the declared-return-type comparison
+  family — `Missing column`, `Extra column`, dtype difference, and
+  `Could not infer return type` were the only diagnostics without a
+  stable code (issue #70). One shared code for the family; the message
+  distinguishes the kind.
+- `--format json` diagnostics now carry a structured `"code"` field
+  (`"PLY040"`, `"PLW001"`, ...) in addition to the `[PLY###]` message
+  prefix, so JSON consumers no longer regex the message (issue #70).
+  Untagged diagnostics (file read / parse failures) omit the field;
+  the schema change is purely additive.
+
 ### Changed
 
+- Return-type mismatch messages are now prefixed with their diagnostic
+  code, e.g. `[PLY040] Missing column 'name' of type Utf8` (issue #70) —
+  in line with every other diagnostic.
 - `FrameType.__init__` now formally accepts
   `Mapping[str, ColumnSpec | DataType]`, matching the runtime
   normalization that was already happening in `__post_init__`.

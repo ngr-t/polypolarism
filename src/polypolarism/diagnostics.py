@@ -6,6 +6,8 @@ only add new ones. Format: ``[PLY###] message``.
 
 from __future__ import annotations
 
+import re
+
 # Expression / column lookup
 PLY001 = "PLY001"  # Column not found in expression (pl.col / cs.*)
 
@@ -46,6 +48,12 @@ PLY033 = (
     "PLY033"  # variable annotation re-interprets the inferred frame as an unrelated type (ADR-0005)
 )
 
+# Declared vs inferred return type comparison (checker.py). One shared code
+# for the whole family (issue #70): missing column, extra column, dtype
+# difference, and could-not-infer all describe the same declared-return-type
+# check; the message distinguishes the kind.
+PLY040 = "PLY040"  # declared return type does not match the inferred return type
+
 
 # Warnings (PLW###): inference is imprecise here, but the user can usually
 # fix it by adding a type annotation or an explicit dtype argument.
@@ -67,3 +75,17 @@ def tag(code: str, message: str) -> str:
     if message.startswith(f"[{code}]"):
         return message
     return f"[{code}] {message}"
+
+
+_TAGGED_MESSAGE = re.compile(r"^\[(PL[YW]\d{3})\]")
+
+
+def extract_code(message: str) -> str | None:
+    """Return the leading ``PLY###`` / ``PLW###`` code of a tagged message.
+
+    ``None`` for untagged diagnostics (e.g. parse / read failures). Used by
+    JSON output to expose the code structurally (issue #70) — consumers
+    should not have to regex the message themselves.
+    """
+    match = _TAGGED_MESSAGE.match(message)
+    return match.group(1) if match else None

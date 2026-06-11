@@ -1,2 +1,2 @@
 bug_mixed_branches_declared_int: FAIL
-  error: Column 'x' has type Utf8, but declared type is Int64
+  error: [PLY040] Column 'x' has type Utf8, but declared type is Int64

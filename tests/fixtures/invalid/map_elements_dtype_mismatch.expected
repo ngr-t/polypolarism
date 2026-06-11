@@ -1,2 +1,2 @@
 f: FAIL
-  error: Column 'doubled' has type Float64, but declared type is Utf8
+  error: [PLY040] Column 'doubled' has type Float64, but declared type is Utf8

@@ -1,2 +1,2 @@
 users_with_orders: FAIL
-  error: Column 'total' has type Float64?, but declared type is Float64
+  error: [PLY040] Column 'total' has type Float64?, but declared type is Float64

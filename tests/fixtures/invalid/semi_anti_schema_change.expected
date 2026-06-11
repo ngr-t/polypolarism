@@ -1,4 +1,4 @@
 semi_join_widened: FAIL
-  error: Missing column 'w' of type Int64
+  error: [PLY040] Missing column 'w' of type Int64
 anti_join_wrong_dtype: FAIL
-  error: Column 'v' has type Int64, but declared type is Utf8
+  error: [PLY040] Column 'v' has type Int64, but declared type is Utf8
