@@ -68,12 +68,16 @@ Status legend: `[ ]` open / `[x]` done / `[-]` deliberately deferred.
 - [x] **N-4: mean_horizontal width.** Done 2026-06-11: Float32 iff every
   operand is Float32 (probed 1.41.2); pinned in the
   `float32_reduction_width` fixture pair.
-- [ ] **N-5: groupby NUMERIC_TYPES width/coverage gap.** `ops/groupby.py`
-  rejects Float16/Int8/Int16/UInt8/UInt16/Int128/UInt128 receivers for
-  numeric aggs, so e.g. select-context `mean(Int8)` (valid → Float64) and
-  `mean(Float16)` (valid in select → Float16) are falsely flagged.
-  CAUTION (probed 1.41.2): `group_by().agg(mean)` on Float16 PANICS in
-  rust — any fix must distinguish select vs agg contexts.
+- [x] **N-5: groupby NUMERIC_TYPES width/coverage gap.** Done 2026-06-11:
+  the agg receiver matrix is widened to all 13 numeric widths with a full
+  probe (1.41.2) — small ints sum/product → Int64 (UInt8/16 land SIGNED),
+  Float16 keeps width through every select reduction, 128-bit preserved.
+  `infer_agg_result_type` gained `context="select"|"agg"`; the four
+  probed rust-PANIC cells ({mean,median,quantile}×Float16,
+  product×UInt128) are PLY011 errors in grouped contexts (group_by/agg
+  chains/`.over()`), valid in select. Runtime harness now catches
+  `PanicException` (BaseException) as the predicted crash. Pair:
+  `valid/small_int_float16_reductions` + 2 invalid twins.
 - [x] **N-3: PLW007 for unmodeled FRAME-level methods.** Done 2026-06-11:
   probed frame-returning sets (`EAGER/LAZY_FRAME_RETURNING_METHODS`,
   73/66 names from signature return annotations on 1.41.2) gate the

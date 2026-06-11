@@ -62,6 +62,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Numeric aggregations accept every numeric width (probed on polars
+  1.41.2): Int8/Int16/UInt8/UInt16/Int128/UInt128/Float16 receivers were
+  falsely rejected. Small-int `sum`/`product` infer Int64 (unsigned
+  included — polars lands on signed), Float16 keeps its width through
+  select-context reductions, and the four probed rust-panic cells
+  (grouped `mean`/`median`/`quantile` on Float16, grouped `product` on
+  UInt128 — including `.over()` windows) are now `PLY011` errors instead
+  of accepted crashes.
 - `Array` widths are now tracked (closing the issue #53 "width ignored"
   gap): `pl.Array(pl.Int64, 3)` declared against an inferred width 5 is
   an error (probed: pandera rejects the mismatch and coerce cannot
