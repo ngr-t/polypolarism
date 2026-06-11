@@ -59,11 +59,22 @@ Status legend: `[ ]` open / `[x]` done / `[-]` deliberately deferred.
     `warning/annotation_narrowing`.
   - [x] **N-1d**: docs (README code tables, fixtures pair audit,
     CHANGELOG).
-- [ ] **N-2: rolling_mean/std/var/median/quantile on Float32 infer Float64
-  (wrong width, false positive).** Probed (polars 1.41.2): these return
-  **Float32** on a Float32 receiver. Affects literal-arg calls too — a
-  `Float32` declaration over a Float32 rolling mean is falsely rejected.
-  Needs a full float-family receiver probe before fixing.
+- [x] **N-2: rolling_mean/std/var/median/quantile on Float32 infer Float64
+  (wrong width, false positive).** Done 2026-06-11: width follows the
+  receiver in the rolling family AND the select/group_by reductions
+  (shared `_float_reduction_width`, probed 1.41.2). Float16 deliberately
+  NOT width-preserved in rolling (probed: widens to Float64). Spawned
+  N-4/N-5 below.
+- [ ] **N-4: mean_horizontal width.** Probed (1.41.2): all-Float32 inputs
+  return Float32; the analyzer returns Float64 unconditionally
+  (`analyzer.py` mean_horizontal handling). Same family as N-2, separate
+  call site.
+- [ ] **N-5: groupby NUMERIC_TYPES width/coverage gap.** `ops/groupby.py`
+  rejects Float16/Int8/Int16/UInt8/UInt16/Int128/UInt128 receivers for
+  numeric aggs, so e.g. select-context `mean(Int8)` (valid → Float64) and
+  `mean(Float16)` (valid in select → Float16) are falsely flagged.
+  CAUTION (probed 1.41.2): `group_by().agg(mean)` on Float16 PANICS in
+  rust — any fix must distinguish select vs agg contexts.
 - [ ] **N-3: PLW007 for unmodeled FRAME-level methods.** The B-4 warning
   covers expression chains and namespaces only. An unmodeled frame method
   (`df.unknown_method()`) silently untracks the variable. Warning there
