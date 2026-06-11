@@ -13613,3 +13613,85 @@ class TestCheckedIslandNonStrictSchemas:
         results = analyze_source(source)
         errors = [str(e) for e in results[0].errors]
         assert any("PLY042" in e and "region" in e for e in errors), errors
+
+
+class TestOptionalColumnsAtStrictBoundaries:
+    """Issue #84 (boundary of #82): a column declared Optional[T]
+    (required=False — MAY be absent) is not a provable extra: there are
+    runtime inputs without it on which the call succeeds. Only
+    required=True pins prove strict-extra violations."""
+
+    _COMMON = """
+        import typing
+        import polars as pl
+        import pandera.polars as pa
+        from pandera.typing.polars import DataFrame
+
+        class StrictPrice(pa.DataFrameModel):
+            price: float
+
+            class Config:
+                strict = True
+                coerce = True
+
+        class OptionalSku(pa.DataFrameModel):
+            sku: typing.Optional[str]
+            price: float
+
+            class Config:
+                strict = True
+                coerce = True
+
+        def strict_helper(df: DataFrame[StrictPrice]) -> DataFrame[StrictPrice]:
+            return df.filter(pl.col("price") > 0)
+    """
+
+    def test_optional_extra_into_strict_param_is_lenient(self):
+        source = textwrap.dedent(
+            self._COMMON
+            + """
+        def pipeline(df: DataFrame[OptionalSku]) -> DataFrame[StrictPrice]:
+            return strict_helper(df)
+        """
+        )
+        results = analyze_source(source)
+        target = [r for r in results if r.name == "pipeline"]
+        assert target[0].errors == [], target[0].errors
+
+    def test_required_extra_still_provable(self):
+        source = textwrap.dedent(
+            self._COMMON
+            + """
+        class RequiredSku(pa.DataFrameModel):
+            sku: str
+            price: float
+
+            class Config:
+                strict = True
+
+        def pipeline(df: DataFrame[RequiredSku]) -> DataFrame[StrictPrice]:
+            return strict_helper(df)
+        """
+        )
+        results = analyze_source(source)
+        target = [r for r in results if r.name == "pipeline"]
+        assert any("extra column" in str(e) and "sku" in str(e) for e in target[0].errors), target[
+            0
+        ].errors
+
+    def test_optional_extra_against_strict_declared_return_is_lenient(self):
+        # The checker-side twin: an optional inferred column against a
+        # strict declared return is value-dependent, not provable.
+        from polypolarism.checker import check_source
+
+        source = textwrap.dedent(
+            self._COMMON
+            + """
+        def passthrough(df: DataFrame[OptionalSku]) -> DataFrame[StrictPrice]:
+            return df
+        """
+        )
+        results = check_source(source)
+        target = [r for r in results if r.function_name == "passthrough"]
+        assert target[0].passed, target[0].errors
+        assert any("sku" in note for note in target[0].leniency), target[0].leniency

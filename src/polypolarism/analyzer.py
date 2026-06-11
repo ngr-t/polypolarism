@@ -1947,8 +1947,10 @@ def _is_frame_subtype(actual: FrameType, expected: FrameType) -> bool:
                 continue
             return False
     if expected.strict:
-        for col_name in actual.columns:
-            if col_name not in expected.columns:
+        for col_name, actual_spec in actual.columns.items():
+            # Only REQUIRED extras are provable; an Optional column may be
+            # absent at runtime (issue #84).
+            if col_name not in expected.columns and actual_spec.required:
                 return False
     return True
 
@@ -5118,12 +5120,14 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                                 f"{actual_col_dtype} but expected {expected_col_dtype}"
                             )
                     # Strict parameter schemas reject undeclared columns at
-                    # runtime (issue #82) — a PINNED extra is provable even
-                    # on an open argument frame; unknown open-frame extras
-                    # stay lenient (not provable).
+                    # runtime (issue #82) — a REQUIRED pinned extra is
+                    # provable even on an open argument frame. Optional
+                    # (required=False) columns MAY be absent (issue #84) and
+                    # unknown open-frame extras are unenumerable — both stay
+                    # lenient (not provable).
                     if expected_type.strict:
                         for col_name, actual_spec in arg_type.columns.items():
-                            if col_name not in expected_type.columns:
+                            if col_name not in expected_type.columns and actual_spec.required:
                                 self.errors.append(
                                     f"Argument '{param_name}' has extra column "
                                     f"'{col_name}' ({actual_spec.dtype}) but the "

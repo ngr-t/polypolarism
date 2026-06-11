@@ -119,6 +119,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Optional (`required=False`) columns are no longer treated as provable
+  extras at strict boundaries (issue #84, boundary of #82): a column
+  that MAY be absent admits runtime inputs on which the call succeeds,
+  so passing it into a `strict=True` parameter (and returning it against
+  a strict declared schema) stays lenient — the checker records an
+  "optional extra vs strict schema" leniency note instead of an error.
+  Required pins keep proving strict-extra violations.
+
 - Undeclared-column references inside functions with non-strict declared
   schemas are reported honestly (issue #83): new code `PLY042` replaces
   `PLY001` there, naming the schema and stating the truth — a

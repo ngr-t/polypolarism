@@ -348,11 +348,19 @@ def check_function(analysis: FunctionAnalysis) -> CheckResult:
         else:
             errors.append(TypeDifference(col_name, declared_spec.dtype, inferred_spec.dtype))
 
-    # Extra columns (only flagged for strict declared schemas)
+    # Extra columns (only flagged for strict declared schemas). An
+    # OPTIONAL (required=False) inferred column may be absent at runtime —
+    # value-dependent, not provable (issue #84) — recorded as leniency.
     if declared.strict:
         for col_name, inferred_spec in inferred.columns.items():
             if col_name not in declared.columns:
-                errors.append(ExtraColumn(col_name, inferred_spec.dtype))
+                if inferred_spec.required:
+                    errors.append(ExtraColumn(col_name, inferred_spec.dtype))
+                else:
+                    leniency.append(
+                        f"column '{col_name}': optional extra vs strict schema "
+                        f"(absent inputs pass; present ones fail at runtime)"
+                    )
 
     return CheckResult(
         function_name=analysis.name,

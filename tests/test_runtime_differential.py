@@ -223,6 +223,13 @@ def _value_overrides() -> dict[str, dict[str, pl.Series]]:
 OMIT_OPTIONAL_COLUMNS: frozenset[str] = frozenset(
     {
         "invalid/pandera_optional_required_mismatch.py",
+        # Issue #84: the static OK is value-dependent — the optional sku
+        # MAY be absent, and the sku-less input (the issue's runtime
+        # counterexample) is the execution the static verdict describes.
+        # With sku synthesized present, the strict argument validation
+        # correctly raises — that value-dependence is exactly why the
+        # static side stays lenient instead of claiming a proof.
+        "valid/optional_extra_strict_param.py",
     }
 )
 
