@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from polypolarism.compat.pandera_api import SCHEMA_BASE_NAMES as _BASE_NAMES
-from polypolarism.pandera_dtype import parse_field_annotation
+from polypolarism.pandera_dtype import annotated_arity_error, parse_field_annotation
 from polypolarism.types import ColumnSpec, FrameType
 
 
@@ -27,6 +27,13 @@ class Schema:
     strict: bool = False
     coerce: bool = False
     bases: list[str] = field(default_factory=list)
+    # Field annotations that provably crash pandera at runtime (issue #69):
+    # field name -> detail from ``annotated_arity_error``. Inherited from
+    # parents; a child re-declaring the field with a healthy annotation
+    # clears the entry (probed: the override repairs the schema). The
+    # analyzer surfaces these as PLY040 on every function that references
+    # the schema.
+    definition_errors: dict[str, str] = field(default_factory=dict)
 
     def to_frame_type(self) -> FrameType:
         return FrameType(columns=dict(self.columns), strict=self.strict, coerce=self.coerce)
@@ -126,6 +133,8 @@ def _parse_schema(node: ast.ClassDef, registry: SchemaRegistry) -> Schema:
         parent = registry.schemas[base_name]
         for col_name, col_spec in parent.columns.items():
             schema.columns.setdefault(col_name, col_spec)
+        for col_name, detail in parent.definition_errors.items():
+            schema.definition_errors.setdefault(col_name, detail)
         if parent.strict:
             schema.strict = True
         if parent.coerce:
@@ -134,9 +143,18 @@ def _parse_schema(node: ast.ClassDef, registry: SchemaRegistry) -> Schema:
     # Parse this class's body.
     for stmt in node.body:
         if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+            field_name = stmt.target.id
+            # Issue #69: a wrong-arity ``Annotated`` form deterministically
+            # crashes pandera at runtime. Record it; a healthy re-declaration
+            # shadows (and thereby repairs) an inherited broken one.
+            arity_error = annotated_arity_error(stmt.annotation)
+            if arity_error is None:
+                schema.definition_errors.pop(field_name, None)
+            else:
+                schema.definition_errors[field_name] = arity_error
             spec = parse_field_annotation(stmt.annotation, stmt.value)
             if spec is not None:
-                schema.columns[stmt.target.id] = spec
+                schema.columns[field_name] = spec
         elif isinstance(stmt, ast.ClassDef) and stmt.name == "Config":
             _apply_config(schema, stmt)
 

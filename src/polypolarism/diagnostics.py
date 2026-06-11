@@ -46,6 +46,9 @@ PLY033 = (
     "PLY033"  # variable annotation re-interprets the inferred frame as an unrelated type (ADR-0005)
 )
 
+# Schema definition
+PLY040 = "PLY040"  # schema field annotation provably crashes pandera at runtime (Annotated arity, issue #69)
+
 
 # Warnings (PLW###): inference is imprecise here, but the user can usually
 # fix it by adding a type annotation or an explicit dtype argument.

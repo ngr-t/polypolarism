@@ -12130,3 +12130,105 @@ class TestSmallIntLandmarkReductionContexts:
         )
         assert analyzer.errors == [], analyzer.errors
         assert analyzer.var_types["out"].columns["a"].dtype == Float64()
+
+
+class TestSchemaDefinitionErrors:
+    """Issue #69 (PLY040): a function referencing a schema whose ``Annotated``
+    field arity provably crashes pandera is dead on arrival — the deferred
+    TypeError fires the first time the schema is used (to_schema / validate /
+    @pa.check_types), so the static verdict must be FAIL."""
+
+    HEADER = textwrap.dedent(
+        """
+        import typing
+        import polars as pl
+        import pandera.polars as pa
+        from pandera.typing.polars import DataFrame
+
+        class Src(pa.DataFrameModel):
+            a: int
+
+        class Broken(pa.DataFrameModel):
+            v: typing.Annotated[pl.Array, pl.Int64(), 2]
+        """
+    )
+
+    def _analyze(self, func_src: str):
+        source = self.HEADER + textwrap.dedent(func_src)
+        results = analyze_source(source)
+        assert len(results) == 1, results
+        return results[0]
+
+    def test_broken_return_schema_is_flagged(self):
+        result = self._analyze(
+            """
+            def f(df: DataFrame[Src]) -> DataFrame[Broken]:
+                return df.select(v=pl.concat_list(pl.col("a")).cast(pl.Array(pl.Int64, 2)))
+            """
+        )
+        ply = [e for e in result.errors if "PLY040" in e]
+        assert ply, result.errors
+        assert "Broken" in ply[0]
+        assert "v" in ply[0]
+
+    def test_broken_param_schema_is_flagged(self):
+        result = self._analyze(
+            """
+            def f(df: DataFrame[Broken]) -> DataFrame[Src]:
+                return df.select(a=pl.lit(1))
+            """
+        )
+        assert any("PLY040" in e for e in result.errors), result.errors
+
+    def test_same_broken_schema_reported_once_per_function(self):
+        result = self._analyze(
+            """
+            def f(df: DataFrame[Broken]) -> DataFrame[Broken]:
+                x: DataFrame[Broken] = df.select(pl.col("v"))
+                return x
+            """
+        )
+        ply = [e for e in result.errors if "PLY040" in e]
+        assert len(ply) == 1, result.errors
+
+    def test_body_annotation_only_is_flagged(self):
+        result = self._analyze(
+            """
+            def f(df: DataFrame[Src]) -> DataFrame[Src]:
+                x: DataFrame[Broken] = df.select(v=pl.concat_list(pl.col("a")).cast(pl.Array(pl.Int64, 2)))
+                return df
+            """
+        )
+        assert any("PLY040" in e for e in result.errors), result.errors
+
+    def test_body_validate_call_is_flagged(self):
+        result = self._analyze(
+            """
+            def f(df: DataFrame[Src]) -> DataFrame[Src]:
+                checked = Broken.validate(df)
+                return df
+            """
+        )
+        assert any("PLY040" in e for e in result.errors), result.errors
+
+    def test_legal_schema_is_silent(self):
+        source = textwrap.dedent(
+            """
+            import typing
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+
+            class Src(pa.DataFrameModel):
+                a: int
+
+            class Legal(pa.DataFrameModel):
+                v: typing.Annotated[pl.Array, pl.Int64(), 2, None]
+
+            def f(df: DataFrame[Src]) -> DataFrame[Legal]:
+                return df.select(v=pl.concat_list(pl.col("a")).cast(pl.Array(pl.Int64, 2)))
+            """
+        )
+        results = analyze_source(source)
+        assert len(results) == 1
+        assert not any("PLY040" in e for e in results[0].errors), results[0].errors

@@ -363,3 +363,85 @@ class TestToFrameType:
     def test_unknown_schema_returns_none(self):
         registry = _collect("")
         assert registry.to_frame_type("Unknown") is None
+
+
+class TestDefinitionErrors:
+    """Issue #69: a field annotation with the wrong ``Annotated`` metadata
+    arity makes pandera raise TypeError the first time the schema is used.
+    The registry records these per field so the analyzer can flag every
+    function referencing the schema."""
+
+    def test_broken_annotated_field_is_recorded(self):
+        registry = _collect(
+            """
+            import typing
+            import polars as pl
+            import pandera.polars as pa
+
+            class S(pa.DataFrameModel):
+                v: typing.Annotated[pl.Array, pl.Int64(), 2]
+            """
+        )
+        schema = registry.get("S")
+        assert schema is not None
+        assert "v" in schema.definition_errors
+        assert "inner, shape, width" in schema.definition_errors["v"]
+
+    def test_legal_schema_has_no_definition_errors(self):
+        registry = _collect(
+            """
+            import typing
+            import polars as pl
+            import pandera.polars as pa
+
+            class S(pa.DataFrameModel):
+                a: int
+                v: typing.Annotated[pl.Array, pl.Int64(), 2, None]
+                t: typing.Annotated[pl.Datetime, "us", None]
+            """
+        )
+        schema = registry.get("S")
+        assert schema is not None
+        assert schema.definition_errors == {}
+
+    def test_child_inherits_broken_field(self):
+        # Probed: a child class inheriting the broken annotation crashes
+        # exactly like the parent.
+        registry = _collect(
+            """
+            import typing
+            import polars as pl
+            import pandera.polars as pa
+
+            class Parent(pa.DataFrameModel):
+                v: typing.Annotated[pl.Array, pl.Int64(), 2]
+
+            class Child(Parent):
+                extra: int
+            """
+        )
+        child = registry.get("Child")
+        assert child is not None
+        assert "v" in child.definition_errors
+
+    def test_child_override_with_legal_annotation_repairs(self):
+        # Probed: re-declaring the field with the full-arity form shadows
+        # the broken parent annotation — the child schema builds fine.
+        registry = _collect(
+            """
+            import typing
+            import polars as pl
+            import pandera.polars as pa
+
+            class Parent(pa.DataFrameModel):
+                v: typing.Annotated[pl.Array, pl.Int64(), 2]
+
+            class Child(Parent):
+                v: typing.Annotated[pl.Array, pl.Int64(), 2, None]
+            """
+        )
+        parent = registry.get("Parent")
+        child = registry.get("Child")
+        assert parent is not None and "v" in parent.definition_errors
+        assert child is not None
+        assert child.definition_errors == {}

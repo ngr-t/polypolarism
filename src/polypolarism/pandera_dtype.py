@@ -8,7 +8,8 @@ Recognised annotation shapes:
   ``pandera.typing.polars.Series``) are accepted.
 - ``Optional[T]`` and ``T | None`` -> ``required=False``
 - ``Annotated[pl.List, pl.Int64()]`` -> ``List(Int64())``
-- ``Annotated[pl.Array, pl.Int64(), 3]`` -> ``Array(Int64(), 3)`` (width tracked; C-7)
+- ``Annotated[pl.Array, pl.Int64(), 3, None]`` -> ``Array(Int64(), 3)`` (width
+  tracked; C-7. pandera requires all three of inner/shape/width)
 - ``Annotated[pl.Struct, {"a": pl.Utf8(), "b": pl.Float64()}]`` -> ``Struct({...})``
 - Parametrized scalars, Annotated form (pandera passes the metadata as the
   dtype's positional arguments and requires all of them):
@@ -30,6 +31,11 @@ Recognised annotation shapes:
 Field RHS:
 - ``pa.Field(nullable=True)`` wraps the parsed dtype in ``Nullable(...)``.
 - Other Field options (``coerce``, ``unique``, value constraints) are runtime-only and ignored.
+
+``Annotated`` forms whose metadata arity provably crashes pandera at runtime
+(issue #69) are detected separately by :func:`annotated_arity_error`; the
+parse itself stays lax (partial forms still degrade to a best-effort dtype /
+``Unknown``) so the diagnostic, not the parse, carries the verdict.
 """
 
 from __future__ import annotations
@@ -356,6 +362,110 @@ def _parse_annotated(node: ast.expr) -> tuple[DataType, bool] | None:
         return Enum(), True
 
     return _parse_dtype_expr(head)
+
+
+# pandera's ``get_dtype_kwargs`` maps the ``Annotated[pl.<Dtype>, ...]``
+# metadata 1:1 onto the dtype class's ``__init__`` parameters and requires
+# EXACTLY all of them — ``len(metadata) != len(signature(cls).parameters)``
+# is a TypeError ("Annotation 'Array' requires all positional arguments
+# ['inner', 'shape', 'width']") raised the first time the schema is used
+# (``to_schema`` / ``validate`` / ``@pa.check_types``); the class statement
+# itself imports cleanly (probed: pandera 0.31.1). Parameter names per
+# head, probed via ``inspect.signature`` on polars 1.41.2 (keyword-only
+# params like Array's ``width`` count too):
+_ANNOTATED_PARAM_NAMES: dict[str, tuple[str, ...]] = {
+    "List": ("inner",),
+    "Array": ("inner", "shape", "width"),
+    "Struct": ("fields",),
+    "Datetime": ("time_unit", "time_zone"),
+    "Duration": ("time_unit",),
+    "Decimal": ("precision", "scale"),
+    "Enum": ("categories",),
+    "Categorical": ("categories", "ordering"),
+}
+
+
+def annotated_arity_error(annotation: ast.expr) -> str | None:
+    """Detect ``Annotated[pl.<Dtype>, ...]`` forms that provably crash at runtime.
+
+    Issue #69: polypolarism's parser is laxer than pandera — partial-argument
+    forms used to degrade to ``Unknown`` (which passes everything) while the
+    schema class can never actually be built. Returns a human-readable detail
+    string when the annotation is provably broken, ``None`` otherwise.
+
+    Two crash classes:
+
+    - wrong metadata arity for a known ``pl.<Dtype>`` head — pandera raises
+      TypeError at first use (see ``_ANNOTATED_PARAM_NAMES``); simple scalar
+      dtypes (``pl.Int64`` …) take zero parameters, so ANY metadata crashes;
+    - zero metadata (``Annotated[X]``) — Python's typing module itself
+      rejects single-argument ``Annotated`` at import time.
+
+    Conservative by design: unknown heads, non-``pl`` heads (pandera ignores
+    pure-metadata Annotated on python types — probed) and statically
+    unknowable arities (starred metadata) stay silent.
+    """
+    node = annotation
+    # Unwrap Optional[...] / Series[...] the same way ``_parse_dtype_expr``
+    # does — the crash survives both wrappers (probed).
+    while True:
+        if _is_optional(node):
+            inner = _optional_inner(node)
+            if inner is None:
+                return None
+            node = inner
+        elif _is_series(node):
+            assert isinstance(node, ast.Subscript)
+            node = node.slice
+        else:
+            break
+    if not _is_annotated(node):
+        return None
+    assert isinstance(node, ast.Subscript)
+    slice_ = node.slice
+    elts = slice_.elts if isinstance(slice_, ast.Tuple) else [slice_]
+    if not elts or any(isinstance(e, ast.Starred) for e in elts):
+        return None
+    head = elts[0]
+    meta = elts[1:]
+    if not meta:
+        return (
+            "single-argument `Annotated[...]` is rejected by Python's typing "
+            "module — TypeError when the module is imported"
+        )
+    if not _is_pl_head(head):
+        return None
+    assert isinstance(head, ast.Attribute)
+    name = head.attr
+    params = _ANNOTATED_PARAM_NAMES.get(name)
+    if params is None:
+        if name not in _PL_DTYPE_MAP:
+            return None
+        params = ()
+    if len(meta) == len(params):
+        return None
+    if not params:
+        return (
+            f"`Annotated[pl.{name}, ...]` has {len(meta)} metadata argument(s) "
+            f"but `pl.{name}` takes none — pandera raises TypeError the first "
+            f"time the schema is used; use bare `pl.{name}`"
+        )
+    return (
+        f"`Annotated[pl.{name}, ...]` has {len(meta)} metadata argument(s) but "
+        f"pandera requires exactly {len(params)} ({', '.join(params)}) — "
+        f"TypeError the first time the schema is used; pass every argument "
+        f"(a `None` literal keeps the polars default) or use the call form "
+        f"`pl.{name}(...)`"
+    )
+
+
+def _is_pl_head(node: ast.expr) -> bool:
+    """``pl.<Attr>`` attribute access (any attr name)."""
+    return (
+        isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "pl"
+    )
 
 
 def _decimal_annotated_arg(node: ast.expr, *, default: int) -> int | None:

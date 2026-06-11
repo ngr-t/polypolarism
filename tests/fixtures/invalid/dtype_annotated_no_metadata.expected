@@ -1,0 +1,2 @@
+uses_no_metadata_schema: FAIL
+  error: [PLY040] schema 'NoMetadata' cannot be used at runtime: field 't': single-argument `Annotated[...]` is rejected by Python's typing module — TypeError when the module is imported
