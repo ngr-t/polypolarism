@@ -15,6 +15,7 @@ from polypolarism.expr_infer import (
     unify_types,
 )
 from polypolarism.types import (
+    Array,
     Boolean,
     Categorical,
     DataType,
@@ -496,6 +497,18 @@ class TestSupertype:
             # dtypes outside the probed numeric widths
             (Float16(), Int64()),
             (UInt128(), Int64()),
+            # Array cells (issue #53): width-untracked, and the probed
+            # behavior is operation-dependent — when/then(Array(i64,3),
+            # List(i64)) -> List(Int64) while concat raises SchemaError;
+            # when/then(Array(i64,3), Array(i64,2)) -> List(Int64) although
+            # the dtypes are "equal" in our width-less model. Every Array
+            # cell stays Unknown (silent), including Array vs Array.
+            (Array(Int64()), Array(Int64())),
+            (Array(Int64()), Array(Float64())),
+            (Array(Int64()), List(Int64())),
+            (Array(Int64()), Int64()),
+            (Array(Int64()), Utf8()),
+            (Array(Int64()), Boolean()),
         ],
     )
     def test_unprobed_combinations_return_unknown(self, left: DataType, right: DataType) -> None:

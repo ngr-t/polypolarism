@@ -36,6 +36,7 @@ from polypolarism.expr_infer import (
     unify_types,
 )
 from polypolarism.types import (
+    Array,
     Binary,
     Boolean,
     Categorical,
@@ -88,10 +89,18 @@ _SIMPLE: tuple[DataType, ...] = (
 )
 
 
+def _containers(children: st.SearchStrategy[DataType]) -> st.SearchStrategy[DataType]:
+    """Container layer for the recursive dtype strategies: nested ``List``
+    and ``Array`` (issue #53 — both containers participate in the order
+    laws; ``Array`` recurses in ``_is_subtype`` like ``List`` and is never
+    cross-compatible with it)."""
+    return st.one_of(children.map(List), children.map(Array))
+
+
 def _dtypes(*, with_unknown: bool, with_null: bool = True) -> st.SearchStrategy[DataType]:
-    """Random dtypes: simple leaves, nested ``List``, optional top ``Nullable``."""
+    """Random dtypes: simple leaves, nested ``List``/``Array``, optional top ``Nullable``."""
     leaves = _SIMPLE + ((Unknown(),) if with_unknown else ())
-    inner = st.recursive(st.sampled_from(leaves), lambda children: children.map(List), max_leaves=3)
+    inner = st.recursive(st.sampled_from(leaves), _containers, max_leaves=3)
     top = st.one_of(inner, inner.map(Nullable))
     if with_null:
         top = st.one_of(top, st.just(Null()))
@@ -102,9 +111,7 @@ dtypes = _dtypes(with_unknown=True)
 unknown_free_dtypes = _dtypes(with_unknown=False)
 # No Unknown / Null / top-level Nullable — for tests that wrap in Nullable
 # themselves (double-Nullable is not a constructible polars dtype).
-unknown_free_plain = st.recursive(
-    st.sampled_from(_SIMPLE), lambda children: children.map(List), max_leaves=3
-)
+unknown_free_plain = st.recursive(st.sampled_from(_SIMPLE), _containers, max_leaves=3)
 
 
 def _outcome(fn, left: DataType, right: DataType):

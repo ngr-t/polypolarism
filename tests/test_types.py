@@ -1,6 +1,7 @@
 """Tests for types module."""
 
 from polypolarism.types import (
+    Array,
     Boolean,
     Categorical,
     DataType,
@@ -113,6 +114,34 @@ class TestListType:
     def test_nested_list(self):
         nested = List(List(Int64()))
         assert nested.inner == List(Int64())
+
+
+class TestArrayType:
+    """Test Array type (issue #53: distinct from List, width not tracked)."""
+
+    def test_array_of_int64(self):
+        array_type = Array(Int64())
+        assert isinstance(array_type, DataType)
+        assert array_type.inner == Int64()
+
+    def test_array_equality(self):
+        assert Array(Int64()) == Array(Int64())
+        assert Array(Int64()) != Array(Utf8())
+
+    def test_array_is_not_list(self):
+        assert Array(Int64()) != List(Int64())
+        assert List(Int64()) != Array(Int64())
+
+    def test_array_str(self):
+        assert str(Array(Int64())) == "Array[Int64]"
+
+    def test_array_hashable(self):
+        assert hash(Array(Int64())) == hash(Array(Int64()))
+        assert hash(Array(Int64())) != hash(List(Int64()))
+
+    def test_nested_containers(self):
+        assert List(Array(Int64())).inner == Array(Int64())
+        assert Array(List(Int64())).inner == List(Int64())
 
 
 class TestUnknownType:

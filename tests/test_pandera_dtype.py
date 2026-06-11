@@ -6,6 +6,7 @@ import ast
 
 from polypolarism.pandera_dtype import parse_field_annotation
 from polypolarism.types import (
+    Array,
     Boolean,
     ColumnSpec,
     Datetime,
@@ -322,10 +323,10 @@ class TestAnnotatedList:
     def test_annotated_list_utf8(self):
         assert _parse("Annotated[pl.List, pl.Utf8()]") == ColumnSpec(List(Utf8()), required=True)
 
-    def test_annotated_array_treated_as_list(self):
-        # Width is ignored for our purposes
+    def test_annotated_array_is_array(self):
+        # Issue #53: Array is a real dtype now; the width is still ignored.
         assert _parse("Annotated[pl.Array, pl.Int64(), 3]") == ColumnSpec(
-            List(Int64()), required=True
+            Array(Int64()), required=True
         )
 
 
@@ -464,8 +465,21 @@ class TestContainerCallForms:
         )
 
     def test_pl_array_with_width(self):
-        """Width is ignored, consistent with the Annotated handling."""
-        assert _parse("pl.Array(pl.Int64, 4)") == ColumnSpec(List(Int64()), required=True)
+        """Issue #53: ``pl.Array(...)`` parses to Array; the width is ignored."""
+        assert _parse("pl.Array(pl.Int64, 4)") == ColumnSpec(Array(Int64()), required=True)
+
+    def test_pl_array_nested_in_list(self):
+        assert _parse("pl.List(pl.Array(pl.Int64, 4))") == ColumnSpec(
+            List(Array(Int64())), required=True
+        )
+
+    def test_pl_array_unparseable_element_is_unknown(self):
+        assert _parse("pl.Array(some_variable, 4)") == ColumnSpec(Array(Unknown()), required=True)
+
+    def test_pl_array_nullable_field(self):
+        assert _parse("pl.Array(pl.Int64, 4)", "pa.Field(nullable=True)") == ColumnSpec(
+            Nullable(Array(Int64())), required=True
+        )
 
     def test_pl_struct_dict_literal(self):
         assert _parse('pl.Struct({"a": pl.Utf8, "b": pl.Float64()})') == ColumnSpec(
@@ -498,7 +512,7 @@ class TestContainerBareForms:
         assert _parse("pl.List") == ColumnSpec(List(Unknown()), required=True)
 
     def test_pl_array_bare(self):
-        assert _parse("pl.Array") == ColumnSpec(List(Unknown()), required=True)
+        assert _parse("pl.Array") == ColumnSpec(Array(Unknown()), required=True)
 
     def test_pl_struct_bare_is_unknown(self):
         """A struct whose fields we don't know carries no usable shape —

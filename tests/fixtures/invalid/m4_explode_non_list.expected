@@ -1,2 +1,2 @@
 f: FAIL
-  error: [PLY021] explode: column 'v' is Float64, not List[T]
+  error: [PLY021] explode: column 'v' is Float64, not List/Array

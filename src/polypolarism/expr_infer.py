@@ -3,6 +3,7 @@
 from typing import Any
 
 from polypolarism.types import (
+    Array,
     Binary,
     Boolean,
     Categorical,
@@ -384,6 +385,16 @@ def _numeric_supertype(left: DataType, right: DataType) -> DataType:
 
 def _supertype_base(left: DataType, right: DataType) -> DataType | None:
     """Supertype of two bare (non-Nullable, non-Null, non-Unknown) dtypes."""
+    # Array cells are width-dependent AND operation-dependent (probed,
+    # issue #53): when/then(Array(i64,3), List(i64)) -> List(Int64) while
+    # ``concat`` raises SchemaError for the same pair; when/then of two
+    # same-element Arrays with different widths -> List although the dtypes
+    # are "equal" in our width-less model. No cell is claimable — every
+    # Array operand degrades to Unknown (silent), checked BEFORE the
+    # equality shortcut because even Array(T) + Array(T) may yield a List
+    # at runtime.
+    if isinstance(left, Array) or isinstance(right, Array):
+        return Unknown()
     if left == right:
         return left
 

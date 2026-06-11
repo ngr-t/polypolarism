@@ -81,8 +81,11 @@ polypolarism your_module.py
 Use Pandera class-based schemas. Field annotations accept Python builtins
 (`int`, `str`, `float`, `bool`), polars dtype classes (`pl.Int64`,
 `pl.Float64`, `pl.UInt32`, ...), `Optional[T]`, and
-`Annotated[pl.List, pl.Int64()]` / `Annotated[pl.Struct, {...}]` for
-nested types.
+`Annotated[pl.List, pl.Int64()]` / `Annotated[pl.Array, pl.Int64(), 3]` /
+`Annotated[pl.Struct, {...}]` (or the equivalent `pl.List(...)` /
+`pl.Array(...)` / `pl.Struct(...)` call forms) for nested types. `List`
+and `Array` are distinct dtypes — polars does not interchange them — but
+the `Array` width is not tracked.
 
 ```python
 class Example(pa.DataFrameModel):
@@ -256,7 +259,9 @@ literal expressions, `pl.col(...)` references, arithmetic, and
 `Categorical`, `Enum` (polars 1.25+ stabilized),
 `Decimal(precision, scale)` (polars 1.35+ stabilized — precision and
 scale are preserved, so `Decimal(20, 4)` and `Decimal(20, 2)` are
-distinct types).
+distinct types), `List(inner)` and `Array(inner, width)` (the width is
+not tracked — `Array` is a distinct dtype from `List` but two `Array`s
+of the same element type compare equal regardless of width).
 
 ### Expression predicates and narrowing
 
@@ -277,9 +282,12 @@ the same expression analyser, so referencing a missing column produces a
 
 ### Sub-namespaces
 
-Method chains on `.str` / `.dt` / `.list` (alias `.arr`) are dispatched
-to per-namespace return-type tables. The receiver's `Nullable[...]`
-wrapper is preserved on the result.
+Method chains on `.str` / `.dt` / `.list` / `.arr` / `.struct` / `.bin` /
+`.cat` are dispatched to per-namespace return-type tables, and each
+namespace validates its receiver dtype (`.list` requires `List`, `.arr`
+requires `Array`, `.cat` requires `Categorical` / `Enum` — PLY012
+otherwise). The receiver's `Nullable[...]` wrapper is preserved on the
+result.
 
 **`pl.col("s").str.<m>(...)`**
 
@@ -302,13 +310,36 @@ wrapper is preserved on the result.
 | `date()` | `Date` |
 | `truncate`, `round`, `offset_by`, `replace_time_zone`, `convert_time_zone`, `month_start`, `month_end` | preserves receiver dtype |
 
-**`pl.col("xs").list.<m>(...)`** (also exposed as `.arr`)
+**`pl.col("xs").list.<m>(...)`** (requires a `List[T]` receiver)
 
 | Methods | Return |
 |---|---|
 | `len` | `UInt32` |
 | `unique`, `sort`, `reverse`, `head`, `tail`, `slice`, `drop_nulls`, `sample`, `shift` | preserves receiver dtype |
-| `get(i)`, `first`, `last`, `sum`, `mean`, `min`, `max`, `median` | element dtype (requires `List[T]` receiver) |
+| `get(i)`, `first`, `last`, `min`, `max`, `explode` | element dtype |
+| `sum` | element dtype for the ≥32-bit numeric widths; `Int8/Int16/UInt8/UInt16` widen to `Int64`, `Boolean` to `UInt32` |
+| `mean`, `median`, `std`, `var` | `Float64` (`Float32` elements stay `Float32`) |
+
+**`pl.col("q").arr.<m>(...)`** (requires an `Array[T]` receiver)
+
+| Methods | Return |
+|---|---|
+| `len`, `n_unique`, `arg_min`, `arg_max`, `count_matches` | `UInt32` |
+| `contains`, `any`, `all` | `Boolean` |
+| `sort`, `reverse`, `shift` | preserves receiver `Array[T]` |
+| `unique`, `head`, `tail`, `slice`, `to_list` | `List[T]` (the fixed width is lost) |
+| `get(i)`, `first`, `last`, `min`, `max`, `explode` | element dtype |
+| `sum` / `mean`, `median`, `std`, `var` | same widening rules as `.list` |
+| `eval(body)` | `Array[<body dtype>]` |
+
+**`pl.col("c").cat.<m>(...)`** (requires a `Categorical` / `Enum` receiver)
+
+| Methods | Return |
+|---|---|
+| `get_categories` | `Utf8` (length-changing; never inherits the receiver's nullability) |
+| `len_bytes`, `len_chars` | `UInt32` |
+| `starts_with`, `ends_with` | `Boolean` |
+| `slice` | `Utf8` |
 
 **`pl.col("s").struct.<m>(...)`**
 
@@ -321,7 +352,7 @@ wrapper is preserved on the result.
 
 | Form | Result |
 |---|---|
-| `df.explode("xs")` / `explode(["a","b"])` | `List[T]` columns become `T`; errors if column isn't `List[T]` |
+| `df.explode("xs")` / `explode(["a","b"])` | `List[T]` / `Array[T]` columns become `T`; errors if column isn't a list-like container |
 | `pl.concat([f1, f2])` (default `how="vertical"`) | column sets must match; per-column dtypes unified, `Nullable[...]` widened |
 | `pl.concat([f1, f2], how="horizontal")` | column sets must be disjoint; merged into one frame |
 | `pl.concat([f1, f2], how="diagonal")` / `"diagonal_relaxed"` | union of columns; columns absent in any input become `Nullable[T]` |
@@ -404,7 +435,7 @@ Errors are tagged with a stable `[PLY###]` prefix for IDE/CI consumers:
 | `PLY010` | join key error (missing / dtype mismatch) |
 | `PLY011` | `group_by` key missing or aggregation type error |
 | `PLY020` | `concat` schema mismatch (vertical / horizontal overlap / diagonal unify) |
-| `PLY021` | `explode`: column not found or not `List[T]` |
+| `PLY021` | `explode`: column not found or not `List[T]` / `Array[T]` |
 | `PLY022` | `unpivot`: column not found or `on`-columns dtype mismatch |
 | `PLY030` | eager-only method called on a `LazyFrame` (e.g. `lf.write_csv(...)`) — suggests `.collect()` |
 | `PLY031` | lazy-only method called on a `DataFrame` (e.g. `df.sink_csv(...)`, `df.collect()`) — suggests `.lazy()` or removing the call |

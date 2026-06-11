@@ -12,6 +12,7 @@ from polypolarism.checker import (
     check_source,
 )
 from polypolarism.types import (
+    Array,
     Float64,
     FrameType,
     Int64,
@@ -317,6 +318,117 @@ class TestUnknownCompatibility:
         assert result.passed is False
 
 
+class TestArrayContainerChecking:
+    """Issue #53: Array recurses like List, and Array vs List is NOT
+    substitutable (probed: pandera validation rejects a List column where
+    ``pl.Array(...)`` is declared and vice versa — without coerce)."""
+
+    def _analysis(self, declared: FrameType, inferred: FrameType) -> FunctionAnalysis:
+        return FunctionAnalysis(
+            name="f",
+            lineno=1,
+            end_lineno=1,
+            input_types={},
+            declared_return_type=declared,
+            inferred_return_type=inferred,
+            errors=[],
+        )
+
+    def test_array_of_unknown_passes_declared_array_of_int(self):
+        result = check_function(
+            self._analysis(
+                declared=FrameType({"a": Array(Int64())}),
+                inferred=FrameType({"a": Array(Unknown())}),
+            )
+        )
+        assert result.passed is True
+
+    def test_declared_array_of_unknown_passes_inferred_array_of_utf8(self):
+        result = check_function(
+            self._analysis(
+                declared=FrameType({"a": Array(Unknown())}),
+                inferred=FrameType({"a": Array(Utf8())}),
+            )
+        )
+        assert result.passed is True
+
+    def test_array_inner_mismatch_fails(self):
+        result = check_function(
+            self._analysis(
+                declared=FrameType({"a": Array(Utf8())}),
+                inferred=FrameType({"a": Array(Int64())}),
+            )
+        )
+        assert result.passed is False
+
+    def test_inferred_list_fails_declared_array(self):
+        result = check_function(
+            self._analysis(
+                declared=FrameType({"a": Array(Int64())}),
+                inferred=FrameType({"a": ListType(Int64())}),
+            )
+        )
+        assert result.passed is False
+
+    def test_inferred_array_fails_declared_list(self):
+        result = check_function(
+            self._analysis(
+                declared=FrameType({"a": ListType(Int64())}),
+                inferred=FrameType({"a": Array(Int64())}),
+            )
+        )
+        assert result.passed is False
+
+    def test_nullable_array_cannot_fill_non_nullable_slot(self):
+        result = check_function(
+            self._analysis(
+                declared=FrameType({"a": Array(Int64())}),
+                inferred=FrameType({"a": Nullable(Array(Int64()))}),
+            )
+        )
+        assert result.passed is False
+
+    def test_array_can_fill_nullable_array_slot(self):
+        result = check_function(
+            self._analysis(
+                declared=FrameType({"a": Nullable(Array(Int64()))}),
+                inferred=FrameType({"a": Array(Int64())}),
+            )
+        )
+        assert result.passed is True
+
+
+class TestArrayCoercibleDifference:
+    """Probed (pandera + polars 1.41.2): under ``Config.coerce`` pandera
+    casts a List column into a declared ``pl.Array(...)`` (succeeds when
+    widths line up — value-dependent) and an Array column into a declared
+    ``pl.List(...)`` (always valid). Every probed polars cast between
+    list-like containers is structurally permissive, so any difference
+    involving an Array container is treated as coercible — flagging would
+    manufacture false positives."""
+
+    def test_list_vs_declared_array_is_coercible(self):
+        assert _is_coercible_difference(ListType(Int64()), Array(Int64())) is True
+
+    def test_array_vs_declared_list_is_coercible(self):
+        assert _is_coercible_difference(Array(Int64()), ListType(Int64())) is True
+
+    def test_array_vs_array_inner_difference_is_coercible(self):
+        assert _is_coercible_difference(Array(Int64()), Array(Utf8())) is True
+
+    def test_list_vs_list_difference_is_not_affected(self):
+        # List-vs-List coercion stays out of the new rule (unprobed).
+        assert _is_coercible_difference(ListType(Int64()), ListType(Utf8())) is False
+
+    def test_array_vs_scalar_is_not_coercible(self):
+        assert _is_coercible_difference(Array(Int64()), Int64()) is False
+        assert _is_coercible_difference(Int64(), Array(Int64())) is False
+
+    def test_nullable_array_vs_non_nullable_list_is_not_coercible(self):
+        # Coercion does not remove nulls.
+        assert _is_coercible_difference(Nullable(Array(Int64())), ListType(Int64())) is False
+
+
 class TestOpenFrameChecking:
     """A declared column missing from an open inferred frame is not an error."""
 
@@ -537,6 +649,100 @@ class TestCheckSource:
 
         assert len(results) == 1
         assert results[0].passed is True
+
+
+class TestArrayCatEndToEnd:
+    """End-to-end ``check_source`` runs for the issue #53 / #54 repros."""
+
+    HEADER = textwrap.dedent("""
+        import polars as pl
+        import pandera.polars as pa
+        from pandera.typing.polars import DataFrame
+
+        class In(pa.DataFrameModel):
+            a: int
+            xs: pl.List(pl.Int64) = pa.Field()
+            q: pl.Array(pl.Int64, 3) = pa.Field()
+            c: pl.Categorical
+
+        class Out(pa.DataFrameModel):
+            r: int
+
+            class Config:
+                coerce = True
+    """)
+
+    def _check(self, body: str):
+        source = self.HEADER + textwrap.dedent(f"""
+            def f(df: DataFrame[In]) -> DataFrame[Out]:
+                return df.select(r={body})
+        """)
+        results = check_source(source)
+        assert len(results) == 1
+        return results[0]
+
+    def test_arr_on_list_fails_ply012(self):
+        result = self._check('pl.col("xs").arr.sum()')
+        assert result.passed is False
+        assert any("PLY012" in str(e) for e in result.errors)
+
+    def test_list_on_array_fails_ply012(self):
+        result = self._check('pl.col("q").list.sum()')
+        assert result.passed is False
+        assert any("PLY012" in str(e) for e in result.errors)
+
+    def test_arr_sum_on_array_passes(self):
+        # ``.arr.sum()`` on Array(Int64) -> Int64 satisfies the declared
+        # ``int`` column (coerce on the Out schema is irrelevant here —
+        # the dtypes match exactly).
+        assert self._check('pl.col("q").arr.sum()').passed is True
+
+    def test_list_sum_on_list_passes(self):
+        assert self._check('pl.col("xs").list.sum()').passed is True
+
+    def test_cat_on_int_fails_ply012(self):
+        result = self._check('pl.col("a").cat.get_categories()')
+        assert result.passed is False
+        assert any("PLY012" in str(e) and "SchemaError" in str(e) for e in result.errors)
+
+    def test_cat_on_categorical_passes(self):
+        source = self.HEADER + textwrap.dedent("""
+            class CatsOut(pa.DataFrameModel):
+                cats: str
+
+            def f(df: DataFrame[In]) -> DataFrame[CatsOut]:
+                return df.select(cats=pl.col("c").cat.get_categories())
+        """)
+        results = check_source(source)
+        assert results[0].passed is True, results[0].errors
+
+    def test_declared_array_inferred_list_fails_without_coerce(self):
+        source = self.HEADER + textwrap.dedent("""
+            class ArrOut(pa.DataFrameModel):
+                q: pl.Array(pl.Int64, 3) = pa.Field()
+
+            def f(df: DataFrame[In]) -> DataFrame[ArrOut]:
+                return df.select(q=pl.col("xs"))
+        """)
+        results = check_source(source)
+        assert results[0].passed is False
+        assert any(isinstance(e, TypeDifference) for e in results[0].errors)
+
+    def test_declared_array_inferred_list_passes_with_coerce(self):
+        # Probed: pandera Config.coerce casts the List column into the
+        # declared Array (succeeds whenever the widths line up).
+        source = self.HEADER + textwrap.dedent("""
+            class ArrOut(pa.DataFrameModel):
+                q: pl.Array(pl.Int64, 3) = pa.Field()
+
+                class Config:
+                    coerce = True
+
+            def f(df: DataFrame[In]) -> DataFrame[ArrOut]:
+                return df.select(q=pl.col("xs"))
+        """)
+        results = check_source(source)
+        assert results[0].passed is True, results[0].errors
 
 
 class TestCoerceEndToEnd:
