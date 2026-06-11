@@ -39,10 +39,20 @@ dev = [
     "pre-commit>=3.7.0",
     "hypothesis>=6.155.2",
 ]
+# Runtime differential harness (tests/test_runtime_differential.py): executes
+# the fixture corpus against real polars/pandera to cross-check static verdicts.
+runtime = [
+    "pandera[polars]>=0.31",
+]
 
 [build-system]
 requires = ["uv_build>=0.9.21,<0.10.0"]
 build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+markers = [
+    "runtime: runtime differential tests that execute fixtures against real polars/pandera (requires the 'runtime' dependency group)",
+]
 
 [tool.ruff]
 target-version = "py311"
