@@ -1,0 +1,4 @@
+chained_rename_old_name: FAIL
+  error: [PLY001] Column 'a' not found — it was removed earlier in this chain (drop/rename)
+chained_rename_intermediate_name: FAIL
+  error: [PLY001] Column 'b' not found — it was removed earlier in this chain (drop/rename)

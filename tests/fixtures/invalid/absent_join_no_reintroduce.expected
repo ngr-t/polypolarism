@@ -1,0 +1,2 @@
+join_does_not_reintroduce: FAIL
+  error: [PLY001] Column 'a' not found — it was removed earlier in this chain (drop/rename)

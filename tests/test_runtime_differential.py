@@ -157,6 +157,18 @@ def _value_overrides() -> dict[str, dict[str, pl.Series]]:
     return {
         # bin.decode("hex") needs even-length hex strings.
         "valid/bin_namespace.py": {"hex_repr": pl.Series(["0a", "1b", "2c"])},
+        # str.to_datetime parses these with explicit formats; generic "s0"
+        # strings raise. The offset column feeds the %::z parse.
+        "valid/str_to_datetime_time_unit.py": {
+            "s": pl.Series(["2020-01-01 00:00:00", "2021-06-15 12:30:00", "2022-12-31 23:59:59"]),
+            "s_off": pl.Series(
+                [
+                    "2020-01-01 00:00:00 +09:00",
+                    "2021-06-15 12:30:00 +00:00",
+                    "2022-12-31 23:59:59 -05:00",
+                ]
+            ),
+        },
         # the fixture exercises the value-dependent Utf8 -> Int64 cast (its own
         # docstring calls it out); generic "s0" strings are not numeric.
         "valid/compare_cast_ok.py": {"s": pl.Series(["1", "2", "3"])},
