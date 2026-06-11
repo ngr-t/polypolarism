@@ -93,6 +93,7 @@ Rules with both sides present (valid twin -> invalid twin):
 | tz handling | `tz_same_ops` | `tz_mixing` |
 | function-call checking | `function_call_*` | `function_call_{missing_column,type_mismatch,nullable_mismatch,untyped_inference_fail}` |
 | sort/unique/over/drop_nulls keys | `m5_window_and_rolling`, `m1_drop_nulls_and_row_index` | `sort_missing_column`, `unique_missing_subset`, `over_missing_column`, `drop_nulls_subset_not_found`, `with_row_index_collision` |
+| window/rolling/over dtypes | `m5_window_and_rolling` | `window_rolling_wrong_dtype` |
 
 Intentionally unpaired:
 
@@ -102,9 +103,11 @@ Intentionally unpaired:
 
 ### Known gaps (backlog — add the invalid twin when touching the rule)
 
-- **window/rolling dtypes** — `m5_window_and_rolling` has only the
-  missing-column twin (`over_missing_column`); no wrong-*dtype* twin for
-  rolling/cum aggregation outputs.
+- **rolling nullability** — polypolarism infers `rolling_*` outputs as
+  non-nullable, but rolling windows yield leading nulls at runtime
+  (probed): a non-nullable declaration passes statically yet fails
+  validation. Known false negative — fixture quarantined until the
+  inference is fixed; do not add a twin that pins the wrong behavior.
 - **group_by_dynamic / join_asof** — `m5_time_groupby_and_asof` has no
   invalid twin (wrong agg dtype, asof-key dtype mismatch).
 - **pivot** — `m12_pivot_annotated` has a warning twin
