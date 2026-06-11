@@ -25,9 +25,11 @@ from polypolarism.compat.polars_api import (
     DTYPE_NAME_MAP,
     EAGER_FRAME_RETURNING_METHODS,
     EAGER_ONLY_METHODS,
+    EAGER_READ_FUNCTIONS,
     IDENTITY_FRAME_METHODS,
     LAZY_FRAME_RETURNING_METHODS,
     LAZY_ONLY_METHODS,
+    LAZY_SCAN_FUNCTIONS,
     LIST_NAMESPACE_ELEMENT_RETURN,
     LIST_NAMESPACE_PRESERVING,
     STR_NAMESPACE_RETURN,
@@ -109,6 +111,7 @@ from polypolarism.ops.reshape import (
     unpivot as infer_unpivot,
 )
 from polypolarism.pandera_annotation import (
+    bare_frame_annotation,
     extract_dataframe_annotation,
     frame_annotation_schema_name,
 )
@@ -4457,6 +4460,17 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             ):
                 return self._infer_frame_literal(node, lazy=method_name == "LazyFrame")
 
+            # ``pl.read_parquet(...)`` / ``pl.scan_csv(...)`` — IO readers
+            # whose schema only the data source knows (ADR-0006). The
+            # result is an empty OPEN frame: column references resolve to
+            # Unknown, shape-determining calls downstream close it, and
+            # the eager/lazy bit is enforced.
+            if isinstance(receiver, ast.Name) and receiver.id == "pl":
+                if method_name in EAGER_READ_FUNCTIONS:
+                    return FrameType({}, rest=RowVar(method_name), is_lazy=False)
+                if method_name in LAZY_SCAN_FUNCTIONS:
+                    return FrameType({}, rest=RowVar(method_name), is_lazy=True)
+
             # Pandera narrowing: Schema.validate(df) -> Schema's FrameType
             if method_name == "validate":
                 schema_ft = self._infer_validate_call(node)
@@ -5240,6 +5254,11 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         for arg in node.args:
             sel = _resolve_selector(arg, input_frame)
             if sel is not None:
+                # A selector on an OPEN frame can also match unknown extra
+                # columns we cannot enumerate (ADR-0006) — the pinned
+                # matches register normally but the result stays open.
+                if input_frame.rest is not None:
+                    has_opaque_outputs = True
                 for c in sel:
                     spec = input_frame.columns.get(c)
                     if spec is not None:
@@ -5533,8 +5552,14 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         for col_name, spec in input_frame.columns.items():
             new_name = mapping.get(col_name, col_name)
             result_columns[new_name] = spec
-        for old in mapping:
+        for old, new in mapping.items():
             if old not in input_frame.columns:
+                if input_frame.rest is not None:
+                    # The source may exist among the open frame's unknown
+                    # extras — assume the rename succeeded (ADR-0006) and
+                    # pin the target name.
+                    result_columns.setdefault(new, ColumnSpec(dtype=Unknown()))
+                    continue
                 self.errors.append(tag(PLY003, f"rename: column '{old}' not found"))
         return FrameType(columns=result_columns, strict=input_frame.strict, rest=input_frame.rest)
 
@@ -5557,6 +5582,12 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 continue
             spec = result_columns.get(col)
             if spec is None:
+                if input_frame.rest is not None:
+                    # The column may exist among the open frame's unknown
+                    # extras — assume the cast succeeded (ADR-0006); its
+                    # dtype is now exactly the target.
+                    result_columns[col] = ColumnSpec(dtype=target)
+                    continue
                 self.errors.append(tag(PLY004, f"cast: column '{col}' not found"))
                 continue
             source_inner = spec.dtype.inner if isinstance(spec.dtype, Nullable) else spec.dtype
@@ -5606,7 +5637,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 result_columns[col_name] = ColumnSpec(dtype=inner, required=spec.required)
             else:
                 result_columns[col_name] = spec
-        if subset is not None:
+        if subset is not None and input_frame.rest is None:
+            # On an open frame a missing subset column may exist among the
+            # unknown extras (ADR-0006) — not provably absent, stay silent.
             for s in subset:
                 if s not in input_frame.columns:
                     self.errors.append(tag(PLY005, f"drop_nulls: column '{s}' not found"))
@@ -6082,6 +6115,15 @@ def _extract_function_signature(
     for idx, arg in enumerate(func_node.args.args):
         if arg.annotation:
             frame_type, _ = _resolve_declared_type(arg.annotation, schema_registry)
+            if frame_type is None:
+                # Bare ``pl.DataFrame`` / ``pl.LazyFrame`` params (ADR-0006)
+                # register as empty open frames so call sites type-check
+                # (any frame satisfies them) and laziness is enforced.
+                bare_head = bare_frame_annotation(arg.annotation)
+                if bare_head is not None:
+                    frame_type = FrameType(
+                        {}, rest=RowVar(arg.arg), is_lazy=bare_head == "LazyFrame"
+                    )
             if frame_type is not None:
                 parameters[arg.arg] = (idx, frame_type)
 
@@ -6136,6 +6178,18 @@ def analyze_function(
                 if schema_name is not None:
                     has_df_annotation = True
                     unresolved_schemas.append(schema_name)
+                else:
+                    # Bare ``pl.DataFrame`` / ``pl.LazyFrame`` (ADR-0006):
+                    # the user declared a frame without a schema — bind an
+                    # empty OPEN frame and check what the body determines.
+                    bare_head = bare_frame_annotation(arg.annotation)
+                    if bare_head is not None:
+                        has_df_annotation = True
+                        input_types[arg.arg] = FrameType(
+                            {},
+                            rest=RowVar(arg.arg),
+                            is_lazy=bare_head == "LazyFrame",
+                        )
 
     # Extract return type
     if func_node.returns:
@@ -6151,6 +6205,11 @@ def analyze_function(
             if schema_name is not None:
                 has_df_annotation = True
                 unresolved_schemas.append(schema_name)
+            elif bare_frame_annotation(func_node.returns) is not None:
+                # A bare frame return opts the function in but makes no
+                # schema claim — nothing to check against the inferred
+                # return (ADR-0006; the eager/lazy bit is future work).
+                has_df_annotation = True
 
     # If no DataFrame annotations found, skip this function
     if not has_df_annotation:

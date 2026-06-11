@@ -126,18 +126,20 @@ Status legend: `[ ]` open / `[x]` done / `[-]` deliberately deferred.
      differential harness crosses it today), so it needs an ADR.
 - [ ] **C-12: Implicit schemas for unannotated frames** (user request
   2026-06-11). Two independent halves:
-  1. *Open-frame propagation from unannotated sources*:
-     `pl.read_parquet(...)` / unannotated params start as
-     `FrameType({}, rest=RowVar)`; every `with_columns` / `select` /
-     `cast` pins the columns it provably determines, and diagnostics
-     fire only on provable contradictions — exactly the
-     row-polymorphism design intent. The type machinery (`rest`,
-     Unknown, open-frame leniency notes) already exists; the work is
-     wiring `read_*` constructors into body analysis and deciding the
-     diagnostics policy (likely warn-only at first).
-  2. *Source-schema snapshots*: parquet/IPC footers carry exact schemas
-     (`pl.read_parquet_schema` reads them without loading data). A
-     `polypolarism snapshot` command could write a committed
+  1. [x] *Open-frame propagation from unannotated sources* — Done
+     2026-06-11 per **ADR-0006**: bare `pl.DataFrame` / `pl.LazyFrame`
+     params bind empty open frames; `pl.read_*` / `pl.scan_*` infer
+     open frames; join/rename/cast/drop_nulls/selectors/concat/unpivot
+     made open-frame aware (assumption semantics — errors only on
+     provable contradictions; provable conflicts still fire). Fixture
+     pair `valid/open_frame_sources` + `invalid/open_frame_
+     contradictions`. Follow-ups recorded in the ADR: absence tracking
+     ("lacks" constraints for drop/rename), backward narrowing,
+     `pl.DataFrame(non_literal)` as open frame, eager/lazy check for
+     bare return annotations.
+  2. [ ] *Source-schema snapshots* (C-12b): parquet/IPC footers carry
+     exact schemas (`pl.read_parquet_schema` reads them without loading
+     data). A `polypolarism snapshot` command could write a committed
      path -> schema snapshot file consumed at check time, keeping checks
      hermetic (no IO during checking, CI-safe, staleness reviewed as a
      diff). CSV has no embedded schema — inference only, lower

@@ -1,0 +1,3 @@
+bare_helper_pins_what_it_builds: OK
+scan_select_closes_the_frame: OK
+open_frame_to_declared_schema: OK

@@ -12130,3 +12130,218 @@ class TestSmallIntLandmarkReductionContexts:
         )
         assert analyzer.errors == [], analyzer.errors
         assert analyzer.var_types["out"].columns["a"].dtype == Float64()
+
+
+class TestOpenFrameSources:
+    """ADR-0006: bare frame annotations and ``pl.read_*`` / ``pl.scan_*``
+    produce empty OPEN frames — the function is checked for what its body
+    itself determines, under the assumption that runtime column lookups
+    succeeded (their absence is never provable)."""
+
+    def test_bare_dataframe_param_binds_open_frame(self):
+        source = textwrap.dedent(
+            """
+            import polars as pl
+
+            def helper(df: pl.DataFrame) -> pl.DataFrame:
+                return df.with_columns(doubled=pl.col("x") * 2)
+            """
+        )
+        results = analyze_source(source)
+        assert len(results) == 1
+        analysis = results[0]
+        assert analysis.errors == [], analysis.errors
+        param = analysis.input_types["df"]
+        assert param.columns == {} and param.rest is not None
+        assert param.is_lazy is False
+        inferred = analysis.inferred_return_type
+        assert inferred is not None and inferred.rest is not None
+        assert "doubled" in inferred.columns
+
+    def test_bare_lazyframe_param_is_lazy(self):
+        source = textwrap.dedent(
+            """
+            import polars as pl
+
+            def helper(lf: pl.LazyFrame) -> pl.DataFrame:
+                return lf.collect()
+            """
+        )
+        results = analyze_source(source)
+        assert len(results) == 1
+        assert results[0].errors == []
+        inferred = results[0].inferred_return_type
+        assert inferred is not None and inferred.is_lazy is False
+
+    def test_eager_only_method_on_bare_lazyframe_flagged(self):
+        # Assignment form — bare expression statements are not inferred
+        # (pre-existing behavior for all frames, open or closed).
+        source = textwrap.dedent(
+            """
+            import polars as pl
+
+            def helper(lf: pl.LazyFrame) -> None:
+                x = lf.to_pandas()
+            """
+        )
+        results = analyze_source(source)
+        assert len(results) == 1
+        assert any("PLY030" in str(e) for e in results[0].errors), results[0].errors
+
+    def test_non_polars_prefix_is_not_claimed(self):
+        # ``pd.DataFrame`` may be pandas — the function stays unanalyzed.
+        source = textwrap.dedent(
+            """
+            def helper(df: pd.DataFrame):
+                return df.select("a")
+            """
+        )
+        assert analyze_source(source) == []
+
+    def test_read_parquet_is_open_eager_frame(self):
+        source = textwrap.dedent(
+            """
+            import polars as pl
+
+            def load() -> pl.DataFrame:
+                df = pl.read_parquet("data.parquet")
+                return df.with_columns(total=pl.col("a") + pl.col("b"))
+            """
+        )
+        results = analyze_source(source)
+        assert len(results) == 1
+        assert results[0].errors == [], results[0].errors
+        inferred = results[0].inferred_return_type
+        assert inferred is not None and inferred.rest is not None
+        assert inferred.is_lazy is False
+        assert "total" in inferred.columns
+
+    def test_scan_parquet_is_open_lazy_frame(self):
+        source = textwrap.dedent(
+            """
+            import polars as pl
+
+            def load() -> pl.DataFrame:
+                return pl.scan_parquet("data.parquet").select("a", "b").collect()
+            """
+        )
+        results = analyze_source(source)
+        assert len(results) == 1
+        assert results[0].errors == [], results[0].errors
+        inferred = results[0].inferred_return_type
+        assert inferred is not None
+        assert inferred.is_lazy is False
+        assert set(inferred.columns) == {"a", "b"}
+
+    def test_select_closes_open_frame_making_later_miss_provable(self):
+        source = textwrap.dedent(
+            """
+            import polars as pl
+
+            def helper(df: pl.DataFrame) -> pl.DataFrame:
+                picked = df.select("a", "b")
+                return picked.select(pl.col("c"))
+            """
+        )
+        results = analyze_source(source)
+        assert len(results) == 1
+        assert any("PLY001" in str(e) and "'c'" in str(e) for e in results[0].errors), results[
+            0
+        ].errors
+
+    def test_pinned_dtype_contradiction_is_provable(self):
+        source = textwrap.dedent(
+            """
+            import polars as pl
+
+            def helper(df: pl.DataFrame) -> pl.DataFrame:
+                tagged = df.with_columns(label=pl.lit("x"))
+                return tagged.select(out=pl.col("label") - 1)
+            """
+        )
+        results = analyze_source(source)
+        assert len(results) == 1
+        assert any("PLY009" in str(e) for e in results[0].errors), results[0].errors
+
+
+class TestOpenFrameOperations:
+    """Operations on open frames must not manufacture proofs (ADR-0006)."""
+
+    def _open(self, **cols) -> FrameType:
+        return FrameType(dict(cols), rest=RowVar("src"))
+
+    def test_rename_of_unpinned_column_pins_target(self):
+        analyzer = _run_body(self._open(), 'out = df.rename({"a": "b"})')
+        assert analyzer.errors == []
+        out = analyzer.var_types["out"]
+        assert "b" in out.columns and out.rest is not None
+
+    def test_cast_of_unpinned_column_pins_target_dtype(self):
+        analyzer = _run_body(self._open(), 'out = df.cast({"a": pl.Int64})')
+        assert analyzer.errors == []
+        out = analyzer.var_types["out"]
+        assert out.columns["a"].dtype == Int64()
+
+    def test_drop_nulls_unknown_subset_is_silent(self):
+        analyzer = _run_body(self._open(), 'out = df.drop_nulls(subset=["a"])')
+        assert analyzer.errors == []
+
+    def test_join_key_on_open_side_is_assumed(self):
+        source = textwrap.dedent(
+            """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+
+            class Right(pa.DataFrameModel):
+                k: int
+                v: str
+
+            def helper(df: pl.DataFrame, other: DataFrame[Right]) -> pl.DataFrame:
+                return df.join(other, on="k", how="left")
+            """
+        )
+        results = analyze_source(source)
+        assert len(results) == 1
+        assert results[0].errors == [], results[0].errors
+        inferred = results[0].inferred_return_type
+        assert inferred is not None and inferred.rest is not None
+        assert isinstance(inferred.columns["v"].dtype, Nullable)
+
+    def test_selector_keeps_select_result_open(self):
+        analyzer = _run_body(
+            self._open(num=Int64()),
+            "out = df.select(cs.numeric())",
+        )
+        assert analyzer.errors == []
+        out = analyzer.var_types["out"]
+        assert out.rest is not None
+        assert out.columns["num"].dtype == Int64()
+
+    def test_concat_vertical_open_with_closed_keeps_pins(self):
+        from polypolarism.ops.reshape import concat_vertical
+
+        closed = FrameType({"a": Int64(), "b": Utf8()})
+        result = concat_vertical([self._open(a=Int64()), closed])
+        assert result.rest is not None
+        assert result.columns["a"].dtype == Int64()
+        # ``b`` is unpinned on the open side — its dtype there is unknowable.
+        assert result.columns["b"].dtype == Unknown()
+
+    def test_concat_vertical_pinned_conflict_still_provable(self):
+        from polypolarism.ops.reshape import ReshapeError, concat_vertical
+
+        closed = FrameType({"a": Date()})
+        with pytest.raises(ReshapeError):
+            concat_vertical([self._open(a=Int64()), closed])
+
+    def test_unpivot_on_open_frame_value_is_unknown(self):
+        analyzer = _run_body(
+            self._open(),
+            'out = df.unpivot(index="id", on=["x", "y"])',
+        )
+        assert analyzer.errors == []
+        out = analyzer.var_types["out"]
+        assert set(out.columns) == {"id", "variable", "value"}
+        assert out.rest is None
+        assert out.columns["value"].dtype == Unknown()

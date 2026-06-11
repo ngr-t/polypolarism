@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Implicit open-frame sources (ADR-0006, backlog C-12a): a parameter
+  annotated with bare `pl.DataFrame` / `pl.LazyFrame` now opts the
+  function into checking with an empty *open* frame, and
+  `pl.read_parquet` / `pl.scan_csv` / the other unconditional IO readers
+  infer open frames with the right laziness. Column lookups on an open
+  frame are assumed to succeed (absence is never provable — the
+  gradual-typing boundary); everything the body itself determines is
+  checked: pinned columns carry exact dtypes through every dtype rule,
+  shape-determining calls (`select`, `group_by().agg()`, `unpivot`)
+  close the frame and make later column misses provable errors, and
+  declared `DataFrame[Schema]` returns check pinned columns exactly.
+  Join keys, `rename`, `cast`, `drop_nulls` subsets, selectors, and
+  `pl.concat` are open-frame aware (no manufactured proofs; provable
+  conflicts still fire).
+
 - Annotated assignments are now checked against the inferred RHS
   (ADR-0005 two-direction rule): `x: DataFrame[A] = expr` where the
   expression provably infers an *unrelated* schema is a new error

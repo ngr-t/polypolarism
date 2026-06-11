@@ -87,6 +87,11 @@ def infer_join(
     Raises:
         JoinError: If join key is missing or types don't match
     """
+    # An open input side (ADR-0006) makes the result open too: unknown
+    # extra columns survive every join kind, and their collisions with
+    # the other side's names (suffixing) cannot be tracked.
+    result_rest = left.rest or right.rest
+
     # Cross joins take no keys: the result is simply all left columns plus
     # all right columns (suffixed on collision), with dtypes unchanged and
     # no nullability introduced.
@@ -99,7 +104,7 @@ def infer_join(
         for col_name, col_spec in right.columns.items():
             final_name = f"{col_name}{suffix}" if col_name in result_columns else col_name
             result_columns[final_name] = col_spec.dtype
-        return FrameType(columns=result_columns)
+        return FrameType(columns=result_columns, rest=result_rest)
 
     # Determine join keys (each key pair is validated independently).
     if on is not None:
@@ -120,17 +125,23 @@ def infer_join(
         raise JoinError("join: at least one join key required")
 
     # Validate every key pair: existence on both sides + dtype compatibility.
+    # On an OPEN side a missing key may exist among the unknown extras
+    # (ADR-0006) — assume the join succeeded and treat it as Unknown.
     # Remember each pair's right-side type so a coalesced full join can
     # check whether nullability leaks in from the right key.
     right_type_for_left_key: dict[str, DataType] = {}
     for left_key, right_key in zip(left_keys, right_keys, strict=True):
         left_key_type = left.get_column_type(left_key)
         if left_key_type is None:
-            raise JoinError(f"Column '{left_key}' not found in left frame")
+            if left.rest is None:
+                raise JoinError(f"Column '{left_key}' not found in left frame")
+            left_key_type = Unknown()
 
         right_key_type = right.get_column_type(right_key)
         if right_key_type is None:
-            raise JoinError(f"Column '{right_key}' not found in right frame")
+            if right.rest is None:
+                raise JoinError(f"Column '{right_key}' not found in right frame")
+            right_key_type = Unknown()
 
         if not _types_compatible(left_key_type, right_key_type):
             raise JoinError(
@@ -205,4 +216,4 @@ def infer_join(
         else:
             result_columns[final_name] = col_type
 
-    return FrameType(columns=result_columns)
+    return FrameType(columns=result_columns, rest=result_rest)

@@ -416,6 +416,45 @@ AGG_SHORTHAND_NAMES: frozenset[str] = frozenset(
 )
 
 
+# Top-level ``pl.<name>(...)`` IO readers whose return annotation is
+# unconditionally ``DataFrame`` / ``LazyFrame`` (probed on polars 1.41.2 via
+# ``inspect.signature``; ADR-0006). Union-typed readers are deliberately
+# absent, mirroring the EAGER_FRAME_RETURNING_METHODS policy:
+# ``read_database`` (-> DataFrame | Iterator), ``read_excel`` / ``read_ods``
+# (-> DataFrame | dict), ``read_csv_batched`` (a reader object), and the
+# ``read_*_schema`` / ``read_parquet_metadata`` dict returns. The analyzer
+# infers an EMPTY OPEN frame for these — the file's schema is unknown and
+# deliberately not read at check time (hermetic checks; C-12b).
+EAGER_READ_FUNCTIONS: frozenset[str] = frozenset(
+    {
+        "read_avro",
+        "read_clipboard",
+        "read_csv",
+        "read_database_uri",
+        "read_delta",
+        "read_ipc",
+        "read_ipc_stream",
+        "read_json",
+        "read_lines",
+        "read_ndjson",
+        "read_parquet",
+    }
+)
+
+LAZY_SCAN_FUNCTIONS: frozenset[str] = frozenset(
+    {
+        "scan_csv",
+        "scan_delta",
+        "scan_iceberg",
+        "scan_ipc",
+        "scan_lines",
+        "scan_ndjson",
+        "scan_parquet",
+        "scan_pyarrow_dataset",
+    }
+)
+
+
 # Method names that dispatch as another (canonical) method. Two uses:
 #
 # 1. Renames within polars 1.x — none in the supported window today. The

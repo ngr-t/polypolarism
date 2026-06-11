@@ -72,6 +72,28 @@ def extract_dataframe_annotation(
     )
 
 
+def bare_frame_annotation(annotation: ast.expr) -> str | None:
+    """Return ``"DataFrame"`` / ``"LazyFrame"`` for a bare polars frame
+    annotation: ``pl.DataFrame`` / ``polars.LazyFrame`` with no subscript
+    (ADR-0006).
+
+    Only the ``pl`` / ``polars`` prefixes are recognized — a bare
+    ``DataFrame`` name or any other prefix (``pd.DataFrame``) may be
+    pandas, and claiming a polars frame there would be wrong. Such a
+    parameter binds an empty OPEN frame: nothing is known about its
+    columns, but everything the function body itself determines is
+    checked.
+    """
+    if (
+        isinstance(annotation, ast.Attribute)
+        and isinstance(annotation.value, ast.Name)
+        and annotation.value.id in ("pl", "polars")
+        and annotation.attr in _HEAD_NAMES
+    ):
+        return annotation.attr
+    return None
+
+
 def _dataframe_head_name(node: ast.expr) -> str | None:
     """Return ``"DataFrame"`` / ``"LazyFrame"`` when ``node`` is one of those
     (bare or qualified, e.g. ``pa.DataFrame``); ``None`` otherwise."""
