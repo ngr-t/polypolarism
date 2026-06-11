@@ -3014,6 +3014,46 @@ class TestNumericElementwiseStrictDtypes:
         assert analyzer.errors == [], analyzer.errors
         assert analyzer.var_types["out"].columns["c"].dtype == Unknown()
 
+    @pytest.mark.parametrize(
+        ("call", "receiver"),
+        [
+            # round/floor/ceil are int-identity and Decimal-preserving
+            # (probed: round(1) on Decimal(10, 2) keeps precision AND scale).
+            ("round(1)", Decimal(10, 2)),
+            ("round(1)", Float32()),
+            ("round(1)", UInt128()),
+            ("floor()", Decimal(10, 2)),
+            ("ceil()", Int64()),
+            # clip accepts everything physically numeric.
+            ("clip(0, 1)", Date()),
+            ("clip(0, 1)", Duration()),
+            ("clip(0, 1)", Decimal(10, 2)),
+            ("clip(0, 1)", Categorical()),
+            ("clip(0, 1)", Enum()),
+            # abs/neg accept Duration and Decimal (preserving).
+            ("abs()", Duration()),
+            ("abs()", Decimal(10, 2)),
+            ("abs()", UInt128()),
+            # sign keeps the float dtype in 1.41.2 (no Int8 cast).
+            ("sign()", Decimal(10, 2)),
+            ("sign()", Float32()),
+            ("neg()", Duration()),
+            ("neg()", Decimal(10, 2)),
+            # shrink_dtype is a deprecated no-op: any dtype, identity.
+            ("shrink_dtype()", Utf8()),
+        ],
+        ids=lambda p: str(p),
+    )
+    def test_probed_preserving_cells(self, call, receiver):
+        analyzer = self._run(receiver, call)
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["c"].dtype == receiver
+
+    def test_nullable_preserving_keeps_wrapper(self):
+        analyzer = self._run(Nullable(Float64()), "round(1)")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["c"].dtype == Nullable(Float64())
+
 
 class TestM5GroupByDynamic:
     def test_group_by_dynamic_then_agg(self):
