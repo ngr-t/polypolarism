@@ -98,6 +98,15 @@ Rules with both sides present (valid twin -> invalid twin):
 | rolling nullability | `m5_window_and_rolling` | `rolling_nullability_nonnull` |
 | numeric-only elementwise (cum/rolling/round families) | `numeric_elementwise` | `cum_sum_on_string`, `round_on_string` |
 | group_by_dynamic / join_asof | `m5_time_groupby_and_asof` | `time_groupby_asof_wrong` |
+| pivot (annotation flows downstream) | `m12_pivot_annotated` (+ `warning/m12_pivot_unannotated`) | `m12_pivot_wrong_declared` |
+| partition_by elements | `m14_partition_by` | `m14_partition_by_wrong_element` |
+| landmark dtypes | `dtype_enum`, `dtype_float16`, `dtype_int128`, `dtype_uint128` | `dtype_landmarks_wrong_declared` |
+| frame literals | `frame_literal` | `frame_literal_wrong_declared` |
+| pl expression constructors | `m6_pl_constructors` | `m6_pl_constructors_wrong_declared` |
+| variable annotations | `variable_annotation_basic`, `variable_annotation_chain` | `variable_annotation_wrong_downstream` |
+| plural col | `m9_plural_col`, `plural_col_exprs` | `plural_col_wrong_dtype` |
+| struct rename_fields | `struct_rename_fields` | `struct_rename_wrong_dtype` |
+| hstack | `m4_unpivot_and_hstack` | `m4_hstack_wrong_dtype` |
 
 Intentionally unpaired:
 
@@ -107,19 +116,16 @@ Intentionally unpaired:
 
 ### Known gaps (backlog — add the invalid twin when touching the rule)
 
-- **pivot** — `m12_pivot_annotated` has a warning twin
-  (`m12_pivot_unannotated`) but no wrong-declaration invalid twin.
-- **partition_by** — `m14_partition_by` unpaired (wrong element schema).
-- **landmark dtypes** — `dtype_enum`, `dtype_float16`, `dtype_int128`,
-  `dtype_uint128` prove registration; no wrong-declaration twins.
-- **frame literals / pl constructors** — `frame_literal`,
-  `m6_pl_constructors` unpaired.
-- **variable annotations** — `variable_annotation_basic`/`_chain` unpaired
-  (annotation contradicting the assigned expression).
-- **plural col / struct rename** — `m9_plural_col`, `plural_col_exprs`,
-  `struct_rename_fields` unpaired (wrong dtype through `pl.col("a", "b")`,
-  renamed struct fields).
-- **hstack** — `m4_unpivot_and_hstack` covers unpivot's twin only.
+- **variable annotation contradicting the assigned expression** —
+  discovered false negative (2026-06, while pairing the 7 gaps above):
+  `visit_AnnAssign` lets a `DataFrame[Schema]` annotation win
+  unconditionally, so an annotation that contradicts an *inferable* RHS
+  (e.g. `x: DataFrame[A] = df.select(...)` where the select infers B ≠ A)
+  passes silently — the RHS inference result is discarded and only walked
+  for warnings. `variable_annotation_wrong_downstream` therefore places
+  its wrong declaration downstream (the return schema); an invalid twin
+  for the contradiction itself needs the checker to compare the inferred
+  RHS against the annotation first.
 
 ## Runtime differential harness (ADR-0003, separate module)
 
