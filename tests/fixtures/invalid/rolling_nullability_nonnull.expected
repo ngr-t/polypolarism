@@ -1,0 +1,4 @@
+rolling_mean_nonnullable_decl: FAIL
+  error: Column 'roll' has type Float64?, but declared type is Float64
+rolling_sum_nonnullable_decl: FAIL
+  error: Column 'qty_sum' has type Int64?, but declared type is Int64

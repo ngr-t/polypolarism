@@ -1049,6 +1049,60 @@ def _call_arg(call: ast.Call | None, *, position: int, name: str) -> ast.expr | 
     return node
 
 
+def _int_literal(node: ast.expr | None) -> int | None:
+    """The value of an explicit int literal (bools excluded), else None."""
+    if isinstance(node, ast.Constant) and type(node.value) is int:
+        return node.value
+    return None
+
+
+def _stdvar_ddof_zero(call: ast.Call) -> bool:
+    """True when a ``std``/``var`` call carries an explicit literal ``ddof=0``.
+
+    ``Expr.std(ddof: int = 1)`` / ``Expr.var(ddof: int = 1)`` take ``ddof``
+    as the first positional parameter (probed, polars 1.41.2). ``ddof=0``
+    is total on non-empty input (a singleton group yields 0.0, not null);
+    anything else — including a non-literal value — stays conservative.
+    """
+    return _int_literal(_call_arg(call, position=0, name="ddof")) == 0
+
+
+def _rolling_min_samples_total(method: str, call: ast.Call) -> bool:
+    """True when a ``rolling_*`` call provably fills every row's window.
+
+    Rows whose window holds fewer than ``min_samples`` (default:
+    ``window_size``) non-null values are null (probed, polars 1.41.2). The
+    window always contains the row itself, so an explicit literal
+    ``min_samples`` of 0/1 — or ``window_size=1`` with min_samples unset —
+    makes the rolling output total on a non-null receiver. ``min_samples``
+    is keyword-only; ``min_periods`` is its deprecated pre-1.21 spelling
+    (still accepted, with a warning). ``window_size`` is the first
+    positional parameter except for ``rolling_quantile(quantile,
+    interpolation, window_size, ...)``. Non-literal values stay
+    conservative (Nullable result).
+    """
+    ms_node = next(
+        (kw.value for kw in call.keywords if kw.arg in ("min_samples", "min_periods")),
+        None,
+    )
+    if ms_node is not None:
+        return _int_literal(ms_node) in (0, 1)
+    ws_position = 2 if method == "rolling_quantile" else 0
+    return _int_literal(_call_arg(call, position=ws_position, name="window_size")) == 1
+
+
+def _rolling_ddof_zero(call: ast.Call) -> bool:
+    """Explicit literal ``ddof=0`` on ``rolling_std``/``rolling_var``.
+
+    Unlike ``Expr.std``/``Expr.var``, the rolling variants take ``ddof``
+    as keyword-only (probed signature, polars 1.41.2). The default
+    ``ddof=1`` is null on 1-sample windows even with ``min_samples=1``;
+    ``ddof=0`` restores totality (1-sample window -> 0.0).
+    """
+    ddof_node = next((kw.value for kw in call.keywords if kw.arg == "ddof"), None)
+    return _int_literal(ddof_node) == 0
+
+
 def _time_zone_arg_dtype(method: str, call_node: ast.Call | None) -> DataType:
     """Result dtype of ``dt.replace_time_zone(...)`` / ``dt.convert_time_zone(...)``
     on a Datetime receiver (issue #50 collateral).
@@ -1613,16 +1667,27 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                     # Form 1: ``pl.col("X").<agg>()`` — receiver is the col.
                     col_name = self._extract_col_name(col_expr)
 
-                    # Form 2: ``pl.<agg>("X")`` top-level shorthand — the
-                    # column name is the first positional arg of the call,
-                    # not buried inside a separate ``pl.col(...)`` receiver.
+                    # std/var with an explicit literal ``ddof=0`` flip the
+                    # result's nullability (issue #60) — call-level detail
+                    # the direct AggExpr form cannot carry. Skip the direct
+                    # form so the chain fallback below routes through the
+                    # ddof-aware expression path. Form-1 only: in the
+                    # ``pl.std("X", 0)`` shorthand the ddof sits at a
+                    # different positional slot and stays Nullable (safe
+                    # side; the shorthand path lives in _analyze_pl_func).
                     if (
-                        col_name is None
-                        and isinstance(col_expr, ast.Name)
-                        and col_expr.id == "pl"
-                        and agg_node.args
+                        col_name is not None
+                        and agg_func_name in ("std", "var")
+                        and _stdvar_ddof_zero(agg_node)
                     ):
-                        col_name = _str_constant(agg_node.args[0])
+                        col_name = None
+                    elif col_name is None:
+                        # Form 2: ``pl.<agg>("X")`` top-level shorthand —
+                        # the column name is the first positional arg of
+                        # the call, not buried inside a separate
+                        # ``pl.col(...)`` receiver.
+                        if isinstance(col_expr, ast.Name) and col_expr.id == "pl" and agg_node.args:
+                            col_name = _str_constant(agg_node.args[0])
 
                     if col_name:
                         return AggExpr(
@@ -1742,14 +1807,11 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             "neg",
             "shrink_dtype",
             "rechunk",
-            # Window — preserve receiver dtype. (``over`` is absent: its
-            # dtype depends on ``mapping_strategy`` and is handled by a
-            # dedicated branch — issues #32/#45. The cum_* family is
-            # absent too: it is strictly typed — see
-            # ``_CUM_INVALID_RECEIVERS`` below, issue #49.)
-            "rolling_sum",
-            "rolling_min",
-            "rolling_max",
+            # Window methods are absent: ``over``'s dtype depends on
+            # ``mapping_strategy`` (issues #32/#45), the cum_* family is
+            # strictly typed (``_CUM_INVALID_RECEIVERS`` below, issue #49),
+            # and rolling_sum/min/max are strictly typed AND windowed-
+            # nullable (``_ROLLING_INVALID_RECEIVERS`` below, issue #57).
             "set_sorted",
             "reverse",
         }
@@ -1761,9 +1823,11 @@ class ExpressionAnalyzer(ast.NodeVisitor):
     # ("'cum_sum' operation not supported for dtype 'str'") -> PLY016 and
     # the output degrades to Unknown. ``cum_count`` is deliberately absent:
     # it returns UInt32 for EVERY receiver dtype (probed incl. String /
-    # List / Struct / Null) and keeps its own branch. The rolling_* family
-    # is NOT mirrored here — polars accepts e.g. rolling_mean on String
-    # (all-null Float64, probed), so it stays in the silent path.
+    # List / Struct / Null) and keeps its own branch. The Float64-returning
+    # rolling family (rolling_mean & co.) is NOT mirrored here — polars
+    # accepts e.g. rolling_mean on String (all-null Float64, probed), so it
+    # stays in the silent path; rolling_sum/min/max ARE strictly typed —
+    # see ``_ROLLING_INVALID_RECEIVERS`` below (issue #57).
     # Array receivers probed too (issue #53): cum_sum/cum_prod/cum_min/
     # cum_max all raise "operation not supported for dtype array[...]";
     # cum_count is fine (UInt32 for every receiver, Array included).
@@ -1794,6 +1858,36 @@ class ExpressionAnalyzer(ast.NodeVisitor):
     # cum_prod computes in Int64 for every int dtype narrower than UInt64
     # (UInt64 / Int128 / UInt128 keep their dtype); Boolean also -> Int64.
     _CUM_PROD_INT64_RECEIVERS = (Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, Boolean)
+
+    # ---- dtype-carrying rolling reducers (issue #57; deferred from #49) -----
+    # Probed (polars 1.41.2) receiver-dtype matrix for rolling_sum/min/max.
+    # Receivers listed here raise InvalidOperationError at runtime ->
+    # PLY016 and the output degrades to Unknown. rolling_min/max accept
+    # Boolean and the temporals (dtype-preserving); rolling_sum rejects
+    # them all except Boolean (-> UInt32).
+    _ROLLING_INVALID_RECEIVERS: dict[str, tuple[type[DataType], ...]] = {
+        "rolling_sum": (
+            Utf8,
+            Date,
+            Datetime,
+            Time,
+            Duration,
+            Decimal,
+            ListT,
+            Array,
+            Struct,
+            Categorical,
+            Enum,
+            Null,
+        ),
+        "rolling_min": (Utf8, Decimal, ListT, Array, Struct, Categorical, Enum, Null),
+        "rolling_max": (Utf8, Decimal, ListT, Array, Struct, Categorical, Enum, Null),
+    }
+
+    # Probed-valid non-preserving cells: rolling_sum upcasts narrow ints to
+    # Int64 (overflow guard, mirrors cum_sum) and Boolean to UInt32; every
+    # other accepted receiver keeps its dtype (incl. Int128/UInt128).
+    _ROLLING_SUM_INT64_RECEIVERS = (Int8, Int16, UInt8, UInt16)
 
     # Shift-like methods: receiver dtype, but head positions become NULL.
     _SHIFT_LIKE_METHODS = frozenset({"shift", "diff", "pct_change"})
@@ -3019,11 +3113,59 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                     return receiver_name, Nullable(widened)
             return receiver_name, Nullable(inner)
 
-        # Rolling reductions returning Float64.
+        # Rolling reductions returning Float64. Rows whose window holds
+        # fewer than ``min_samples`` (default: window_size) values are null
+        # (probed 1.41.2; issue #57), so the result is Nullable unless the
+        # call provably fills every window (see _rolling_min_samples_total).
+        # rolling_std/rolling_var additionally need an explicit ``ddof=0``:
+        # the default ddof=1 is null on 1-sample windows. String / Null
+        # receivers are accepted by polars but yield an ALL-null Float64
+        # column (probed), so they stay Nullable regardless; a Nullable
+        # receiver stays Nullable too (an all-null window is null even with
+        # min_samples=1).
         if method in self._ROLLING_FLOAT_METHODS and receiver_type is not None:
-            if isinstance(receiver_type, Nullable):
-                return receiver_name, Nullable(Float64())
-            return receiver_name, Float64()
+            inner = receiver_type.inner if isinstance(receiver_type, Nullable) else receiver_type
+            total = _rolling_min_samples_total(method, node)
+            if method in ("rolling_std", "rolling_var"):
+                total = total and _rolling_ddof_zero(node)
+            if (
+                total
+                and not isinstance(receiver_type, Nullable)
+                and not isinstance(inner, (Utf8, Null))
+            ):
+                return receiver_name, Float64()
+            return receiver_name, Nullable(Float64())
+
+        # Dtype-carrying rolling reducers (rolling_sum/min/max): strictly
+        # typed receivers — the probed matrix on
+        # ``_ROLLING_INVALID_RECEIVERS`` flags PLY016 and degrades the
+        # output to Unknown (issue #57; the family was deferred in #49).
+        # Valid cells follow the same windowed-nullability rule as the
+        # Float64 family above; rolling_sum upcasts narrow ints to Int64
+        # and Boolean to UInt32 (probed, mirrors cum_sum). Unknown
+        # receivers stay silent.
+        if method in self._ROLLING_INVALID_RECEIVERS and receiver_type is not None:
+            inner = receiver_type.inner if isinstance(receiver_type, Nullable) else receiver_type
+            if isinstance(inner, Unknown):
+                return receiver_name, receiver_type
+            if isinstance(inner, self._ROLLING_INVALID_RECEIVERS[method]):
+                self.errors.append(
+                    tag(
+                        PLY016,
+                        f"{method}: operation not supported for dtype {inner} — "
+                        f"polars raises InvalidOperationError at runtime",
+                    )
+                )
+                return receiver_name, None
+            result_inner: DataType = inner
+            if method == "rolling_sum":
+                if isinstance(inner, self._ROLLING_SUM_INT64_RECEIVERS):
+                    result_inner = Int64()
+                elif isinstance(inner, Boolean):
+                    result_inner = UInt32()
+            if isinstance(receiver_type, Nullable) or not _rolling_min_samples_total(method, node):
+                return receiver_name, Nullable(result_inner)
+            return receiver_name, result_inner
 
         # ``rank(method=...)`` — the ranking method decides the dtype: the
         # default "average" returns Float64; the count-based methods return
@@ -3124,10 +3266,22 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         }
         if method in agg_map and receiver_type is not None:
             try:
-                return receiver_name, infer_agg_result_type(agg_map[method], receiver_type)
+                result_type = infer_agg_result_type(agg_map[method], receiver_type)
             except GroupByTypeError as e:
                 self.errors.append(str(e))
                 return receiver_name, receiver_type
+            # std/var with an explicit literal ``ddof=0`` are total on
+            # non-empty input (probed 1.41.2: singleton group -> 0.0), so
+            # the Nullable wrap from ``infer_agg_result_type`` is undone;
+            # the receiver's own nullability still propagates (an all-null
+            # window stays null even with ddof=0).
+            if (
+                method in ("std", "var")
+                and _stdvar_ddof_zero(node)
+                and result_type == Nullable(Float64())
+            ):
+                result_type = _wrap_like(receiver_type, Float64())
+            return receiver_name, result_type
 
         # ``cast(pl.<dtype>)`` chained directly on column. A structurally
         # impossible source -> target pair flags PLY013 (issue #34) and the

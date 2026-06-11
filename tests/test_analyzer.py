@@ -1524,8 +1524,11 @@ class TestM2NewAggregations:
     @pytest.mark.parametrize(
         "agg, expected_type",
         [
-            ("std", Float64()),
-            ("var", Float64()),
+            # std/var: ddof=1 default is null for singleton groups (probed,
+            # polars 1.41.2; issue #60) -> Nullable even on non-null input.
+            ("std", Nullable(Float64())),
+            ("var", Nullable(Float64())),
+            # median/quantile: total on non-empty, non-null groups (probed).
             ("median", Float64()),
             ("quantile", Float64()),
         ],
@@ -1567,6 +1570,122 @@ class TestM2NewAggregations:
         ft = results[0].inferred_return_type
         assert ft is not None
         assert ft.columns["p"].dtype == Int64()
+
+
+class TestM2StdVarDdof:
+    """std/var nullability and the explicit ``ddof=0`` refinement (issue #60).
+
+    Probed (polars 1.41.2): ``std()``/``var()`` with the default ``ddof=1``
+    are null whenever only one sample is available (singleton group, 1-row
+    frame), so the result is Nullable(Float64). An explicit literal
+    ``ddof=0`` is total on non-empty input (singleton group -> 0.0), so the
+    Nullable wrap is dropped — the receiver's own nullability still wins.
+    """
+
+    def _select(self, schema_field: str, expr: str):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + f"""
+            class In(pa.DataFrameModel):
+                g: str
+                {schema_field}
+
+            def f(data: DataFrame[In]):
+                return data.select({expr})
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        return ft
+
+    def test_select_std_is_nullable(self):
+        ft = self._select("v: pl.Float64", 'pl.col("v").std().alias("s")')
+        assert ft.columns["s"].dtype == Nullable(Float64())
+
+    def test_select_std_ddof_zero_keyword_non_nullable(self):
+        ft = self._select("v: pl.Float64", 'pl.col("v").std(ddof=0).alias("s")')
+        assert ft.columns["s"].dtype == Float64()
+
+    def test_select_var_ddof_zero_positional_non_nullable(self):
+        # Expr.var(ddof) takes ddof as its first positional parameter.
+        ft = self._select("v: int", 'pl.col("v").var(0).alias("s")')
+        assert ft.columns["s"].dtype == Float64()
+
+    def test_select_std_ddof_zero_nullable_receiver_stays_nullable(self):
+        # An all-null window is still null even with ddof=0.
+        ft = self._select(
+            "v: pl.Float64 = pa.Field(nullable=True)",
+            'pl.col("v").std(ddof=0).alias("s")',
+        )
+        assert ft.columns["s"].dtype == Nullable(Float64())
+
+    def test_select_std_explicit_ddof_one_stays_nullable(self):
+        ft = self._select("v: pl.Float64", 'pl.col("v").std(ddof=1).alias("s")')
+        assert ft.columns["s"].dtype == Nullable(Float64())
+
+    def test_select_std_non_literal_ddof_stays_nullable(self):
+        # A non-literal ddof cannot be proven 0 -> conservative Nullable.
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                v: pl.Float64
+
+            def f(data: DataFrame[In], d: int):
+                return data.select(pl.col("v").std(ddof=d).alias("s"))
+        """
+        )
+        results = analyze_source(source)
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["s"].dtype == Nullable(Float64())
+
+    def test_agg_std_ddof_zero_non_nullable(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                g: str
+                v: pl.Float64
+
+            def f(data: DataFrame[In]):
+                return data.group_by("g").agg(pl.col("v").std(ddof=0).alias("s"))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["s"].dtype == Float64()
+
+    def test_agg_var_ddof_zero_positional_non_nullable(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                g: str
+                v: pl.Float64
+
+            def f(data: DataFrame[In]):
+                return data.group_by("g").agg(pl.col("v").var(0).alias("s"))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["s"].dtype == Float64()
+
+    def test_std_over_stays_nullable(self):
+        # .std().over(g): singleton partitions broadcast their null (probed).
+        ft = self._select("v: pl.Float64", 'pl.col("v").std().over("g").alias("s")')
+        assert ft.columns["s"].dtype == Nullable(Float64())
+
+    def test_pl_std_shorthand_select_nullable(self):
+        ft = self._select("v: pl.Float64", 'pl.std("v")')
+        assert ft.columns["v"].dtype == Nullable(Float64())
 
 
 class TestM3StrNamespace:
@@ -2485,6 +2604,8 @@ class TestM5Over:
 class TestM5Rolling:
     @pytest.mark.parametrize("method", ["rolling_sum", "rolling_min", "rolling_max"])
     def test_rolling_preserve_methods(self, method: str):
+        # Dtype-preserving on Float64, but the default min_samples
+        # (= window_size) leaves leading nulls (probed; issue #57).
         source = textwrap.dedent(
             PANDERA_HEADER
             + f"""
@@ -2499,13 +2620,15 @@ class TestM5Rolling:
         assert results[0].has_errors is False, results[0].errors
         ft = results[0].inferred_return_type
         assert ft is not None
-        assert ft.columns["v"].dtype == Float64()
+        assert ft.columns["v"].dtype == Nullable(Float64())
 
     @pytest.mark.parametrize(
         "method",
         ["rolling_mean", "rolling_std", "rolling_var", "rolling_median"],
     )
     def test_rolling_float_methods(self, method: str):
+        # Default min_samples (= window_size) leaves the first
+        # window_size-1 rows null (probed 1.41.2; issue #57).
         source = textwrap.dedent(
             PANDERA_HEADER
             + f"""
@@ -2520,7 +2643,250 @@ class TestM5Rolling:
         assert results[0].has_errors is False, results[0].errors
         ft = results[0].inferred_return_type
         assert ft is not None
-        assert ft.columns["v"].dtype == Float64()
+        assert ft.columns["v"].dtype == Nullable(Float64())
+
+
+class TestM5RollingNullability:
+    """Rolling-window nullability (issue #57; probed on polars 1.41.2).
+
+    Rows whose window holds fewer than ``min_samples`` (default:
+    ``window_size``) non-null values are null, so rolling outputs are
+    Nullable by default. An explicit literal ``min_samples<=1`` (or
+    ``window_size=1`` with min_samples unset) makes the window total —
+    except rolling_std/rolling_var, whose default ``ddof=1`` is null on
+    1-sample windows, and String receivers, which are all-null always.
+    """
+
+    def _select(self, schema_field: str, expr: str):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + f"""
+            class S(pa.DataFrameModel):
+                {schema_field}
+
+            def f(data: DataFrame[S]):
+                return data.select({expr})
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        return ft
+
+    def test_rolling_quantile_default_nullable(self):
+        ft = self._select(
+            "v: pl.Float64",
+            'pl.col("v").rolling_quantile(quantile=0.5, window_size=3).alias("q")',
+        )
+        assert ft.columns["q"].dtype == Nullable(Float64())
+
+    @pytest.mark.parametrize("kwargs", ["min_samples=1", "min_samples=0", "min_periods=1"])
+    def test_rolling_mean_min_samples_one_total(self, kwargs: str):
+        # min_samples<=1 -> every window has enough values (probed); the
+        # deprecated pre-1.21 spelling min_periods= still works.
+        ft = self._select(
+            "v: pl.Float64",
+            f'pl.col("v").rolling_mean(window_size=3, {kwargs}).alias("m")',
+        )
+        assert ft.columns["m"].dtype == Float64()
+
+    def test_rolling_mean_window_size_one_total(self):
+        # min_samples defaults to window_size, so window_size=1 is total.
+        ft = self._select("v: pl.Float64", 'pl.col("v").rolling_mean(1).alias("m")')
+        assert ft.columns["m"].dtype == Float64()
+
+    def test_rolling_std_min_samples_one_still_nullable(self):
+        # ddof=1 (default) on a 1-sample window is null (probed).
+        ft = self._select(
+            "v: pl.Float64",
+            'pl.col("v").rolling_std(window_size=3, min_samples=1).alias("s")',
+        )
+        assert ft.columns["s"].dtype == Nullable(Float64())
+
+    def test_rolling_std_min_samples_one_ddof_zero_total(self):
+        ft = self._select(
+            "v: pl.Float64",
+            'pl.col("v").rolling_std(window_size=3, min_samples=1, ddof=0).alias("s")',
+        )
+        assert ft.columns["s"].dtype == Float64()
+
+    def test_rolling_var_window_size_one_nullable(self):
+        # Probed: rolling_var(window_size=1) is ALL-null with ddof=1.
+        ft = self._select("v: pl.Float64", 'pl.col("v").rolling_var(1).alias("s")')
+        assert ft.columns["s"].dtype == Nullable(Float64())
+
+    def test_rolling_var_window_size_one_ddof_zero_total(self):
+        ft = self._select("v: pl.Float64", 'pl.col("v").rolling_var(1, ddof=0).alias("s")')
+        assert ft.columns["s"].dtype == Float64()
+
+    def test_rolling_mean_nullable_receiver_stays_nullable(self):
+        # A window of only-null values is null even with min_samples=1.
+        ft = self._select(
+            "v: pl.Float64 = pa.Field(nullable=True)",
+            'pl.col("v").rolling_mean(window_size=3, min_samples=1).alias("m")',
+        )
+        assert ft.columns["m"].dtype == Nullable(Float64())
+
+    def test_rolling_mean_string_receiver_all_null(self):
+        # Probed: rolling_mean on String is accepted but ALL-null Float64,
+        # so min_samples=1 must not strip the Nullable wrap.
+        ft = self._select(
+            "v: str",
+            'pl.col("v").rolling_mean(window_size=3, min_samples=1).alias("m")',
+        )
+        assert ft.columns["m"].dtype == Nullable(Float64())
+
+    def test_rolling_mean_non_literal_min_samples_nullable(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                v: pl.Float64
+
+            def f(data: DataFrame[S], n: int):
+                return data.select(
+                    pl.col("v").rolling_mean(window_size=3, min_samples=n).alias("m")
+                )
+        """
+        )
+        results = analyze_source(source)
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["m"].dtype == Nullable(Float64())
+
+    def test_rolling_mean_non_literal_window_size_nullable(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                v: pl.Float64
+
+            def f(data: DataFrame[S], n: int):
+                return data.select(pl.col("v").rolling_mean(n).alias("m"))
+        """
+        )
+        results = analyze_source(source)
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["m"].dtype == Nullable(Float64())
+
+
+class TestRollingStrictDtypes:
+    """``rolling_sum``/``rolling_min``/``rolling_max`` are strictly typed
+    instead of blindly dtype-preserving (issue #57; #49 deferred this family).
+
+    Probed (polars 1.41.2) receiver-dtype matrix:
+
+    - invalid receivers raise InvalidOperationError at runtime — flagged
+      PLY016, output degrades to Unknown:
+        rolling_sum:      Utf8, Date, Datetime, Time, Duration, Decimal,
+                          List, Array, Struct, Categorical, Enum, Null
+        rolling_min/max:  Utf8, Decimal, List, Array, Struct, Categorical,
+                          Enum, Null  (temporals and Boolean are accepted)
+    - probed-valid non-preserving cells (mirrors cum_sum's overflow guard):
+        rolling_sum: Int8/Int16/UInt8/UInt16 -> Int64, Boolean -> UInt32
+    - every other probed cell preserves the receiver dtype
+      (Int32/Int64/UInt32/UInt64/Int128/UInt128/Float32/Float64; plus
+      Boolean/Date/Datetime/Time/Duration for rolling_min/max).
+    - nullability follows the rolling-window rule (issue #57): Nullable
+      unless an explicit literal min_samples<=1 / window_size=1 fills
+      every window; a Nullable receiver always stays Nullable.
+    """
+
+    def _run(self, receiver, method: str, call: str = "(window_size=3)"):
+        frame = FrameType({"v": receiver})
+        return _run_body(frame, f'out = df.select(c=pl.col("v").{method}{call})')
+
+    @pytest.mark.parametrize(
+        ("method", "receiver"),
+        [
+            ("rolling_sum", Utf8()),
+            ("rolling_sum", Date()),
+            ("rolling_sum", Datetime()),
+            ("rolling_sum", Time()),
+            ("rolling_sum", Duration()),
+            ("rolling_sum", Decimal(10, 2)),
+            ("rolling_sum", Categorical()),
+            ("rolling_sum", Enum()),
+            ("rolling_sum", ListT(Int64())),
+            ("rolling_sum", Array(Int64())),
+            ("rolling_sum", Struct({"x": Int64()})),
+            ("rolling_sum", Null()),
+            ("rolling_min", Utf8()),
+            ("rolling_min", Decimal(10, 2)),
+            ("rolling_min", ListT(Int64())),
+            ("rolling_max", Struct({"x": Int64()})),
+            ("rolling_max", Categorical()),
+            ("rolling_max", Null()),
+        ],
+        ids=lambda p: str(p),
+    )
+    def test_invalid_receiver_flags_ply016_and_degrades(self, method, receiver):
+        analyzer = self._run(receiver, method)
+        assert len(analyzer.errors) == 1, analyzer.errors
+        err = analyzer.errors[0]
+        assert "PLY016" in err and method in err, err
+        assert "InvalidOperationError" in err, err
+        assert analyzer.var_types["out"].columns["c"].dtype == Unknown()
+
+    @pytest.mark.parametrize(
+        ("receiver", "expected"),
+        [
+            (Int8(), Int64()),
+            (Int16(), Int64()),
+            (UInt8(), Int64()),
+            (UInt16(), Int64()),
+            (Boolean(), UInt32()),
+        ],
+        ids=lambda p: str(p),
+    )
+    def test_rolling_sum_widening_cells(self, receiver, expected):
+        analyzer = self._run(receiver, "rolling_sum")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["c"].dtype == Nullable(expected)
+
+    @pytest.mark.parametrize(
+        ("method", "receiver"),
+        [
+            ("rolling_sum", Int32()),
+            ("rolling_sum", UInt64()),
+            ("rolling_sum", Int128()),
+            ("rolling_sum", Float32()),
+            ("rolling_min", Boolean()),
+            ("rolling_min", Date()),
+            ("rolling_min", Int8()),
+            ("rolling_max", Duration()),
+            ("rolling_max", Datetime(tz="UTC")),
+            ("rolling_max", Float64()),
+        ],
+        ids=lambda p: str(p),
+    )
+    def test_dtype_preserving_cells_nullable_by_default(self, method, receiver):
+        analyzer = self._run(receiver, method)
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["c"].dtype == Nullable(receiver)
+
+    def test_rolling_sum_min_samples_one_total(self):
+        analyzer = self._run(Int64(), "rolling_sum", "(window_size=3, min_samples=1)")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["c"].dtype == Int64()
+
+    def test_rolling_min_window_size_one_total(self):
+        analyzer = self._run(Float64(), "rolling_min", "(1)")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["c"].dtype == Float64()
+
+    def test_rolling_sum_nullable_receiver_stays_nullable(self):
+        # min_samples=1 cannot help an all-null window; upcast still applies.
+        analyzer = self._run(Nullable(Int8()), "rolling_sum", "(window_size=3, min_samples=1)")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["c"].dtype == Nullable(Int64())
+
+    def test_rolling_sum_unknown_receiver_stays_silent(self):
+        analyzer = self._run(Unknown(), "rolling_sum")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["c"].dtype == Unknown()
 
 
 class TestM5GroupByDynamic:
