@@ -5,7 +5,7 @@ from __future__ import annotations
 import ast
 import copy
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -277,7 +277,7 @@ def _unify_literal_values(values: list[object]) -> DataType:
 
 def _frame_literal_value_dtype(
     node: ast.expr,
-    lookup_const: Callable[[str], str | list[str] | None] | None = None,
+    lookup_const: Callable[[str], str | list[str] | int | None] | None = None,
 ) -> DataType:
     """Per-column dtype for one value of a ``pl.DataFrame({...})`` data dict.
 
@@ -286,7 +286,8 @@ def _frame_literal_value_dtype(
       non-unifiable element → ``Unknown``.
     - a ``Name`` bound to a string(-list) constant (issue #39): resolved
       through ``lookup_const`` — a ``list[str]`` value behaves like the
-      equivalent list literal, a ``str`` like the broadcast scalar.
+      equivalent list literal, a ``str`` like the broadcast scalar. Other
+      constant kinds (ints, recorded for backlog B-5) stay ``Unknown``.
     - recognised eager range constructors (``pl.date_range(...)`` etc.)
       → their fixed Series dtype.
     - a bare scalar constant (broadcast) → ``infer_lit``.
@@ -1141,40 +1142,52 @@ def _stdvar_ddof_zero(call: ast.Call) -> bool:
     return _int_literal(_call_arg(call, position=0, name="ddof")) == 0
 
 
-def _rolling_min_samples_total(method: str, call: ast.Call) -> bool:
+def _rolling_min_samples_total(
+    method: str,
+    call: ast.Call,
+    const_int: Callable[[ast.expr | None], int | None] = _int_literal,
+) -> bool:
     """True when a ``rolling_*`` call provably fills every row's window.
 
     Rows whose window holds fewer than ``min_samples`` (default:
     ``window_size``) non-null values are null (probed, polars 1.41.2). The
-    window always contains the row itself, so an explicit literal
-    ``min_samples`` of 0/1 — or ``window_size=1`` with min_samples unset —
-    makes the rolling output total on a non-null receiver. ``min_samples``
-    is keyword-only; ``min_periods`` is its deprecated pre-1.21 spelling
+    window always contains the row itself, so an explicit ``min_samples``
+    of 0/1 — or ``window_size=1`` with min_samples unset — makes the
+    rolling output total on a non-null receiver. ``min_samples`` is
+    keyword-only; ``min_periods`` is its deprecated pre-1.21 spelling
     (still accepted, with a warning). ``window_size`` is the first
     positional parameter except for ``rolling_quantile(quantile,
-    interpolation, window_size, ...)``. Non-literal values stay
-    conservative (Nullable result).
+    interpolation, window_size, ...)``. Args resolve through ``const_int``
+    (a literal, or — backlog B-5 — a name bound to an int constant);
+    unresolvable values stay conservative (Nullable result). A literal
+    ``min_samples<=1`` is total for ANY accepted window_size (probed:
+    window_size=0 is an expanding window with no nulls; a negative
+    window_size raises OverflowError before producing a frame).
     """
     ms_node = next(
         (kw.value for kw in call.keywords if kw.arg in ("min_samples", "min_periods")),
         None,
     )
     if ms_node is not None:
-        return _int_literal(ms_node) in (0, 1)
+        return const_int(ms_node) in (0, 1)
     ws_position = 2 if method == "rolling_quantile" else 0
-    return _int_literal(_call_arg(call, position=ws_position, name="window_size")) == 1
+    return const_int(_call_arg(call, position=ws_position, name="window_size")) == 1
 
 
-def _rolling_ddof_zero(call: ast.Call) -> bool:
-    """Explicit literal ``ddof=0`` on ``rolling_std``/``rolling_var``.
+def _rolling_ddof_zero(
+    call: ast.Call,
+    const_int: Callable[[ast.expr | None], int | None] = _int_literal,
+) -> bool:
+    """Explicit ``ddof=0`` on ``rolling_std``/``rolling_var``.
 
     Unlike ``Expr.std``/``Expr.var``, the rolling variants take ``ddof``
     as keyword-only (probed signature, polars 1.41.2). The default
     ``ddof=1`` is null on 1-sample windows even with ``min_samples=1``;
-    ``ddof=0`` restores totality (1-sample window -> 0.0).
+    ``ddof=0`` restores totality (1-sample window -> 0.0). The arg
+    resolves through ``const_int`` like the window args (backlog B-5).
     """
     ddof_node = next((kw.value for kw in call.keywords if kw.arg == "ddof"), None)
-    return _int_literal(ddof_node) == 0
+    return const_int(ddof_node) == 0
 
 
 def _time_zone_arg_dtype(method: str, call_node: ast.Call | None) -> DataType:
@@ -1757,6 +1770,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         warnings: list[str] | None = None,
         registry: FunctionRegistry | None = None,
         element_dtype: DataType | None = None,
+        int_consts: Mapping[str, int] | None = None,
     ):
         self.current_frame = current_frame
         self.errors: list[str] = []
@@ -1769,6 +1783,21 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         # the element to the list's inner dtype; ``None`` everywhere else
         # keeps ``pl.element()`` unresolved (silent).
         self.element_dtype = element_dtype
+        # Name -> int constant bindings snapshot (function locals shadowing
+        # module-level), passed in by the body analyzer (backlog B-5). Feeds
+        # ``_const_int`` so int-valued call args (rolling min_samples /
+        # window_size / ddof) resolve like literals. Empty when standalone.
+        self.int_consts: Mapping[str, int] = int_consts if int_consts is not None else {}
+
+    def _const_int(self, node: ast.expr | None) -> int | None:
+        """Resolve ``node`` to an int: a literal, or a ``Name`` bound to an
+        int constant (mirrors the body analyzer's ``_const_str``)."""
+        value = _int_literal(node)
+        if value is not None:
+            return value
+        if isinstance(node, ast.Name):
+            return self.int_consts.get(node.id)
+        return None
 
     def analyze_agg_expr(self, node: ast.expr) -> AggExpr | None:
         """Analyze an aggregation expression like pl.col("x").sum().alias("total")."""
@@ -2587,6 +2616,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             warnings=self.warnings,
             registry=self.registry,
             element_dtype=element_dtype,
+            int_consts=self.int_consts,
         )
         _, body_dtype = child.analyze_select_expr(call_node.args[0])
         self.errors.extend(child.errors)
@@ -3444,9 +3474,9 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         # min_samples=1).
         if method in self._ROLLING_FLOAT_METHODS and receiver_type is not None:
             inner = receiver_type.inner if isinstance(receiver_type, Nullable) else receiver_type
-            total = _rolling_min_samples_total(method, node)
+            total = _rolling_min_samples_total(method, node, self._const_int)
             if method in ("rolling_std", "rolling_var"):
-                total = total and _rolling_ddof_zero(node)
+                total = total and _rolling_ddof_zero(node, self._const_int)
             if (
                 total
                 and not isinstance(receiver_type, Nullable)
@@ -3482,7 +3512,9 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                     result_inner = Int64()
                 elif isinstance(inner, Boolean):
                     result_inner = UInt32()
-            if isinstance(receiver_type, Nullable) or not _rolling_min_samples_total(method, node):
+            if isinstance(receiver_type, Nullable) or not _rolling_min_samples_total(
+                method, node, self._const_int
+            ):
                 return receiver_name, Nullable(result_inner)
             return receiver_name, result_inner
 
@@ -3660,7 +3692,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         warnings: list[str] | None = None,
         class_registry: ClassRegistry | None = None,
         current_class_name: str | None = None,
-        module_consts: dict[str, str | list[str]] | None = None,
+        module_consts: dict[str, str | list[str] | int] | None = None,
     ):
         self.input_types = input_types
         self.errors = errors
@@ -3673,10 +3705,10 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         # module-level functions). Used to resolve ``self.method()`` /
         # ``cls.method()`` to a class-local method's return annotation.
         self.current_class_name = current_class_name
-        # Module-level ``NAME = "lit"`` / ``NAME = ["a", "b"]`` constants,
-        # collected by ``analyze_source``. Read-only here; function-local
-        # constants in ``var_consts`` shadow them.
-        self.module_consts: dict[str, str | list[str]] = module_consts or {}
+        # Module-level ``NAME = "lit"`` / ``NAME = ["a", "b"]`` / ``N = 1``
+        # constants, collected by ``analyze_source``. Read-only here;
+        # function-local constants in ``var_consts`` shadow them.
+        self.module_consts: dict[str, str | list[str] | int] = module_consts or {}
         # Track variable -> FrameType mapping
         self.var_types: dict[str, FrameType] = dict(input_types)
         # Track variable -> FrameList element type (for partition_by results
@@ -3685,11 +3717,13 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         # Track variable -> class name for ``var = ClassName()`` assignments,
         # so a later ``var.method()`` call can resolve to the class's method.
         self.var_classes: dict[str, str] = {}
-        # Track function-local ``var = "lit"`` / ``var = ["a", "b"]``
-        # string(-list) constants so column-spec arguments passed by name
-        # (``join(on=key)``, ``unpivot(on=cols)``, ...) can be resolved.
-        # Reassigning the name to anything non-constant drops the entry.
-        self.var_consts: dict[str, str | list[str]] = {}
+        # Track function-local ``var = "lit"`` / ``var = ["a", "b"]`` /
+        # ``var = 1`` constants so column-spec arguments passed by name
+        # (``join(on=key)``, ``unpivot(on=cols)``, ...) and int-valued call
+        # args (rolling ``min_samples``/``window_size``/``ddof``; backlog
+        # B-5) can be resolved. Reassigning the name to anything
+        # non-constant drops the entry.
+        self.var_consts: dict[str, str | list[str] | int] = {}
         self.return_type: FrameType | None = None
         # Bare ``Schema.validate(df)`` narrowing only fires at the function's
         # top level. We toggle this off when descending into if/for/while/try.
@@ -3794,11 +3828,14 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     self.var_types.pop(var_name, None)
                     self.var_lists.pop(var_name, None)
                 else:
-                    # ``key = "id"`` / ``cols = ["a", "b"]`` — record the
-                    # string(-list) constant for column-spec resolution.
-                    const_val: str | list[str] | None = _str_constant(node.value)
+                    # ``key = "id"`` / ``cols = ["a", "b"]`` / ``ms = 1`` —
+                    # record the constant for column-spec / int-arg
+                    # resolution.
+                    const_val: str | list[str] | int | None = _str_constant(node.value)
                     if const_val is None:
                         const_val = _str_list_or_tuple(node.value)
+                    if const_val is None:
+                        const_val = _int_literal(node.value)
                     if const_val is not None:
                         self.var_consts[var_name] = const_val
                         self.var_types.pop(var_name, None)
@@ -3819,7 +3856,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
 
     # -- constant resolution ----------------------------------------------
 
-    def _lookup_const(self, name: str) -> str | list[str] | None:
+    def _lookup_const(self, name: str) -> str | list[str] | int | None:
         """Look up a constant binding: function-locals shadow module-level."""
         if name in self.var_consts:
             return self.var_consts[name]
@@ -3848,6 +3885,15 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             if isinstance(val, list):
                 return val
         return None
+
+    def _int_consts(self) -> dict[str, int]:
+        """Snapshot of the int-constant bindings visible at this statement
+        (function locals shadow module-level; backlog B-5). Handed to
+        ``ExpressionAnalyzer`` so int-valued call args resolve like
+        literals. ``type(...) is int`` keeps bools out, mirroring
+        ``_int_literal``."""
+        merged: dict[str, str | list[str] | int] = {**self.module_consts, **self.var_consts}
+        return {name: val for name, val in merged.items() if type(val) is int}
 
     def _resolve_method_call(self, node: ast.Call) -> FrameType | None:
         """Resolve ``self.foo() / cls.foo() / Class().foo() / obj.foo()`` to
@@ -3909,11 +3955,13 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 if inferred:
                     self.var_types[var_name] = inferred
                 else:
-                    # ``key: str = "id"`` — record string(-list) constants
-                    # the same way un-annotated assignments do.
-                    const_val: str | list[str] | None = _str_constant(node.value)
+                    # ``key: str = "id"`` / ``ms: int = 1`` — record
+                    # constants the same way un-annotated assignments do.
+                    const_val: str | list[str] | int | None = _str_constant(node.value)
                     if const_val is None:
                         const_val = _str_list_or_tuple(node.value)
+                    if const_val is None:
+                        const_val = _int_literal(node.value)
                     if const_val is not None:
                         self.var_consts[var_name] = const_val
         self.generic_visit(node)
@@ -4553,7 +4601,10 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
 
         # Extract aggregation expressions
         expr_analyzer = ExpressionAnalyzer(
-            input_frame, warnings=self.warnings, registry=self.registry
+            input_frame,
+            warnings=self.warnings,
+            registry=self.registry,
+            int_consts=self._int_consts(),
         )
         agg_exprs: list[AggExpr] = []
         for arg in node.args:
@@ -4760,7 +4811,10 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
     def _infer_select_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
         """Infer type of .select() call."""
         expr_analyzer = ExpressionAnalyzer(
-            input_frame, warnings=self.warnings, registry=self.registry
+            input_frame,
+            warnings=self.warnings,
+            registry=self.registry,
+            int_consts=self._int_consts(),
         )
         result_columns: dict[str, DataType] = {}
         # Output names produced by THIS call — a repeat is a runtime
@@ -4881,7 +4935,10 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         result_columns: dict[str, ColumnSpec | DataType] = dict(input_frame.columns)
 
         expr_analyzer = ExpressionAnalyzer(
-            input_frame, warnings=self.warnings, registry=self.registry
+            input_frame,
+            warnings=self.warnings,
+            registry=self.registry,
+            int_consts=self._int_consts(),
         )
         # Output names produced by THIS call — a repeat within the call is a
         # runtime duplicate-name error (issue #36). Collision with a
@@ -5481,7 +5538,10 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         boolean by construction, so only their value expressions are walked.
         """
         expr_analyzer = ExpressionAnalyzer(
-            input_frame, warnings=self.warnings, registry=self.registry
+            input_frame,
+            warnings=self.warnings,
+            registry=self.registry,
+            int_consts=self._int_consts(),
         )
         for arg in node.args:
             dtype: DataType | None
@@ -5523,7 +5583,10 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 key_nodes.append(kw.value)
 
         expr_analyzer = ExpressionAnalyzer(
-            input_frame, warnings=self.warnings, registry=self.registry
+            input_frame,
+            warnings=self.warnings,
+            registry=self.registry,
+            int_consts=self._int_consts(),
         )
         for key_node in key_nodes:
             if _resolve_selector(key_node, input_frame) is not None:
@@ -5633,7 +5696,7 @@ def analyze_function(
     schema_registry: SchemaRegistry | None = None,
     class_registry: ClassRegistry | None = None,
     current_class_name: str | None = None,
-    module_consts: dict[str, str | list[str]] | None = None,
+    module_consts: dict[str, str | list[str] | int] | None = None,
 ) -> FunctionAnalysis | None:
     """Analyze a single function definition."""
     schema_registry = schema_registry or SchemaRegistry()
@@ -5720,15 +5783,18 @@ def analyze_function(
     )
 
 
-def _collect_module_consts(tree: ast.Module) -> dict[str, str | list[str]]:
-    """Collect top-level ``NAME = "lit"`` / ``NAME = ["a", "b"]`` constants.
+def _collect_module_consts(tree: ast.Module) -> dict[str, str | list[str] | int]:
+    """Collect top-level ``NAME = "lit"`` / ``NAME = ["a", "b"]`` / ``N = 1``
+    constants.
 
     Only single-``Name``-target ``Assign`` / ``AnnAssign`` statements whose
-    value is a string constant or a list/tuple of string constants are
-    recorded. These feed constant resolution for column-spec arguments
-    (``join(on=KEY)``, ``unpivot(on=ON_COLS)``, ...).
+    value is a string constant, a list/tuple of string constants, or an int
+    literal (bools excluded) are recorded. These feed constant resolution
+    for column-spec arguments (``join(on=KEY)``, ``unpivot(on=ON_COLS)``,
+    ...) and int-valued call args (rolling ``min_samples``/``window_size``/
+    ``ddof``; backlog B-5).
     """
-    consts: dict[str, str | list[str]] = {}
+    consts: dict[str, str | list[str] | int] = {}
     for node in tree.body:
         target: ast.expr | None = None
         value: ast.expr | None = None
@@ -5740,9 +5806,11 @@ def _collect_module_consts(tree: ast.Module) -> dict[str, str | list[str]]:
             value = node.value
         if not isinstance(target, ast.Name) or value is None:
             continue
-        const_val: str | list[str] | None = _str_constant(value)
+        const_val: str | list[str] | int | None = _str_constant(value)
         if const_val is None:
             const_val = _str_list_or_tuple(value)
+        if const_val is None:
+            const_val = _int_literal(value)
         if const_val is not None:
             consts[target.id] = const_val
         else:

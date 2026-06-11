@@ -2827,6 +2827,152 @@ class TestM5RollingNullability:
         assert ft.columns["m"].dtype == Nullable(Float64())
 
 
+class TestRollingIntConstArgs:
+    """Int-constant ``min_samples``/``window_size``/``ddof`` resolve like
+    literals (backlog B-5).
+
+    A function-local ``ms = 1`` or module-level ``MIN_SAMPLES = 1`` binding
+    feeds the same totality rules as a literal argument, through the same
+    constant machinery that resolves string column-spec args (function
+    locals shadow module constants; any reassignment invalidates the
+    binding). Unresolvable names stay conservative (Nullable).
+    """
+
+    def _ft(self, source: str):
+        results = analyze_source(textwrap.dedent(PANDERA_HEADER + source))
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        return ft
+
+    def test_local_const_min_samples_one_total(self):
+        ft = self._ft(
+            """
+            class S(pa.DataFrameModel):
+                v: pl.Float64
+
+            def f(data: DataFrame[S]):
+                ms = 1
+                return data.select(
+                    pl.col("v").rolling_mean(window_size=3, min_samples=ms).alias("m")
+                )
+        """
+        )
+        assert ft.columns["m"].dtype == Float64()
+
+    def test_module_const_min_samples_one_total(self):
+        ft = self._ft(
+            """
+            MIN_SAMPLES = 1
+
+            class S(pa.DataFrameModel):
+                v: pl.Float64
+
+            def f(data: DataFrame[S]):
+                return data.select(
+                    pl.col("v").rolling_mean(window_size=3, min_samples=MIN_SAMPLES).alias("m")
+                )
+        """
+        )
+        assert ft.columns["m"].dtype == Float64()
+
+    def test_local_const_min_samples_two_stays_nullable(self):
+        ft = self._ft(
+            """
+            class S(pa.DataFrameModel):
+                v: pl.Float64
+
+            def f(data: DataFrame[S]):
+                ms = 2
+                return data.select(
+                    pl.col("v").rolling_mean(window_size=3, min_samples=ms).alias("m")
+                )
+        """
+        )
+        assert ft.columns["m"].dtype == Nullable(Float64())
+
+    def test_local_const_window_size_one_total(self):
+        ft = self._ft(
+            """
+            class S(pa.DataFrameModel):
+                v: pl.Float64
+
+            def f(data: DataFrame[S]):
+                w = 1
+                return data.select(pl.col("v").rolling_mean(w).alias("m"))
+        """
+        )
+        assert ft.columns["m"].dtype == Float64()
+
+    def test_reassigned_const_invalidated_stays_nullable(self):
+        # ``ms`` is re-bound to a non-constant before the call — the
+        # earlier literal must not leak through (same invalidation rule as
+        # the string constants).
+        ft = self._ft(
+            """
+            class S(pa.DataFrameModel):
+                v: pl.Float64
+
+            def f(data: DataFrame[S], n: int):
+                ms = 1
+                ms = n
+                return data.select(
+                    pl.col("v").rolling_mean(window_size=3, min_samples=ms).alias("m")
+                )
+        """
+        )
+        assert ft.columns["m"].dtype == Nullable(Float64())
+
+    def test_rolling_sum_const_min_samples_preserves_dtype_total(self):
+        ft = self._ft(
+            """
+            class S(pa.DataFrameModel):
+                v: int
+
+            def f(data: DataFrame[S]):
+                ms = 1
+                return data.select(
+                    pl.col("v").rolling_sum(window_size=3, min_samples=ms).alias("m")
+                )
+        """
+        )
+        assert ft.columns["m"].dtype == Int64()
+
+    def test_rolling_std_const_ddof_zero_total(self):
+        ft = self._ft(
+            """
+            DDOF = 0
+
+            class S(pa.DataFrameModel):
+                v: pl.Float64
+
+            def f(data: DataFrame[S]):
+                return data.select(
+                    pl.col("v").rolling_std(window_size=3, min_samples=1, ddof=DDOF).alias("s")
+                )
+        """
+        )
+        assert ft.columns["s"].dtype == Float64()
+
+    def test_bool_const_is_not_an_int(self):
+        # ``ms = True`` would be accepted by polars (bool is int at
+        # runtime) but the analyzer's int-literal rule excludes bools —
+        # stays conservative.
+        ft = self._ft(
+            """
+            class S(pa.DataFrameModel):
+                v: pl.Float64
+
+            def f(data: DataFrame[S]):
+                ms = True
+                return data.select(
+                    pl.col("v").rolling_mean(window_size=3, min_samples=ms).alias("m")
+                )
+        """
+        )
+        assert ft.columns["m"].dtype == Nullable(Float64())
+
+
 class TestRollingStrictDtypes:
     """``rolling_sum``/``rolling_min``/``rolling_max`` are strictly typed
     instead of blindly dtype-preserving (issue #57; #49 deferred this family).
@@ -2937,6 +3083,37 @@ class TestRollingStrictDtypes:
         analyzer = self._run(Nullable(Int8()), "rolling_sum", "(window_size=3, min_samples=1)")
         assert analyzer.errors == [], analyzer.errors
         assert analyzer.var_types["out"].columns["c"].dtype == Nullable(Int64())
+
+    @pytest.mark.parametrize(
+        ("method", "receiver", "expected"),
+        [
+            ("rolling_sum", Int64(), Int64()),
+            ("rolling_sum", Int8(), Int64()),  # overflow-guard upcast survives
+            ("rolling_min", Float32(), Float32()),
+            ("rolling_max", Date(), Date()),
+        ],
+        ids=lambda p: str(p),
+    )
+    def test_non_literal_window_preserves_dtype_family(self, method, receiver, expected):
+        # Backlog B-5 regression pin: an unresolvable ``window_size`` only
+        # loses nullability precision (Nullable is the sound upper bound,
+        # T <: Nullable[T]); the dtype family stays determined by
+        # (method, receiver dtype) — probed (polars 1.41.2): rolling_sum
+        # dtype is identical across window_size/min_samples combinations.
+        # It must NOT degrade to Nullable[Float64] (pre-issue-#57 behavior).
+        analyzer = self._run(receiver, method, "(n)")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["c"].dtype == Nullable(expected)
+
+    def test_literal_min_samples_one_with_non_literal_window_total(self):
+        # Probed (polars 1.41.2): min_samples=1 fills every window for any
+        # accepted window_size (window_size=0 is an expanding window with 0
+        # nulls; negative raises OverflowError before producing a frame),
+        # so a literal min_samples<=1 is total even when window_size is
+        # unresolvable.
+        analyzer = self._run(Int64(), "rolling_sum", "(window_size=n, min_samples=1)")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["c"].dtype == Int64()
 
     def test_rolling_sum_unknown_receiver_stays_silent(self):
         analyzer = self._run(Unknown(), "rolling_sum")

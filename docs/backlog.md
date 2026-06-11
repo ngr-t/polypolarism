@@ -8,34 +8,51 @@ Status legend: `[ ]` open / `[x]` done / `[-]` deliberately deferred.
 
 ## A. Short-term (low cost, ready to pick up)
 
-- [ ] **A-1: Finish valid/invalid fixture pairing (7 known gaps)**
-  `tests/fixtures/README.md` lists rules without a valid/invalid twin
-  (pivot, partition_by, landmark dtypes, frame literals, plural col,
-  hstack, ...). Each is a small per-rule fixture + golden addition
-  (ADR-0003 pairing convention).
-- [ ] **A-2: Centralize duplicated numeric type sets**
-  Same numeric-dtype sets defined in `expr_infer.py`, `ops/groupby.py`,
-  and `analyzer.py`. Consolidate into one shared module.
-- [ ] **A-3: Document Unknown-fallback (leniency) points**
-  `analyzer.py` has ~15 explicit `return Unknown()` sites plus many
-  `return None` paths that degrade to Unknown. All intentional, but the
-  "where we give up" list is not user-visible. Add a README section so
-  users can tell "checked" from "passed via Unknown".
+- [x] **A-1: Finish valid/invalid fixture pairing (7 known gaps)**
+  Done 2026-06-11: 9 invalid twins added (pivot, partition_by, landmark
+  dtypes, frame literals, pl constructors, variable annotations, plural
+  col, struct rename, hstack); pair audit table updated. Discovered
+  **N-1** below in the process.
+- [x] **A-2: Centralize duplicated numeric type sets**
+  Done 2026-06-11: `unwrap_nullable`/`wrap_nullable` moved to `types.py`.
+  The three numeric sets are intentionally different (13-width coercion
+  set / 4-width promotion lattice / 6-width probed agg subset) and now
+  carry comments saying why widening each needs probing first.
+- [x] **A-3: Document Unknown-fallback (leniency) points**
+  Done 2026-06-11: README section "Leniency: when 'no error' is not a
+  proof".
 
 ## B. Mid-term (precision improvements)
 
 - [ ] **B-4: Warn on unsupported/unprobed Polars methods**
   Methods absent from the dispatch tables silently fall through to
-  Unknown. Add a warning diagnostic (new PLW code) so drift against new
-  polars releases becomes visible instead of silent.
-- [ ] **B-5: Rolling-window inference with non-literal args**
-  `rolling_*` falls back to `Nullable[Float64]` when
-  `window_size`/`min_samples` are not literals (`analyzer.py` ~1143).
-  Constant propagation for simple cases would tighten the result.
-- [ ] **B-6: Fill probed-matrix gaps in namespace methods**
-  - `arr.eval(as_list=True)` → Unknown (polars 1.41 arg, issue #53 area)
-  - `str.to_datetime(format=<non-literal>)` → Unknown
-  - `dt.replace_time_zone/convert_time_zone(<non-literal tz>)` → Unknown
+  Unknown. Add a warning diagnostic (next free PLW code) so drift against
+  new polars releases becomes visible instead of silent.
+- [x] **B-5: Rolling-window inference with non-literal args**
+  Done 2026-06-11 — see decision notes below. The reported fallback was
+  stale (fixed since issue #57); int-constant propagation added for
+  `min_samples`/`window_size`/`ddof`. Discovered **N-2** below.
+- [x] **B-6: Fill probed-matrix gaps in namespace methods**
+  Done 2026-06-11: `arr.eval(as_list=True)` → `List(body dtype)`;
+  `str.to_datetime` resolves `Datetime[UTC]` for all chrono offset
+  directives (`%z`, `%:z`, `%::z`, `%:::z`, `%#z`). Non-literal
+  `format`/`time_zone` stay Unknown (no "tz wildcard" in `types.Datetime`
+  — imprecision-pinned with upgrade triggers).
+
+## N. Discovered while working the backlog (2026-06-11)
+
+- [ ] **N-1: Variable annotation contradicting an inferable RHS passes
+  silently (false negative).** `visit_AnnAssign`
+  (`src/polypolarism/analyzer.py`, ~3853) lets the annotation win
+  unconditionally: `x: DataFrame[A] = df.select(...)` where the select
+  infers B≠A produces zero diagnostics. Design question to settle first:
+  is the annotation a *checked* declaration (error/warn on contradiction)
+  or a trusted assertion like validate-narrowing? Deserves an ADR.
+- [ ] **N-2: rolling_mean/std/var/median/quantile on Float32 infer Float64
+  (wrong width, false positive).** Probed (polars 1.41.2): these return
+  **Float32** on a Float32 receiver. Affects literal-arg calls too — a
+  `Float32` declaration over a Float32 rolling mean is falsely rejected.
+  Needs a full float-family receiver probe before fixing.
 
 ## C. Long-term (design decisions required)
 
@@ -63,7 +80,39 @@ Status legend: `[ ]` open / `[x]` done / `[-]` deliberately deferred.
 
 ## Non-issues (verified healthy)
 
-- Test discipline: 146 golden fixture pairs, hypothesis type-algebra
-  laws, runtime differential harness at 96.1% with a justified skip list.
+- Test discipline: 146+ golden fixture pairs, hypothesis type-algebra
+  laws, runtime differential harness with a justified skip list.
 - No bare excepts, no TODO/FIXME comments, zero runtime dependencies.
 - Polars support floor fixed at 1.37 with corpus evidence (ADR-0004).
+
+---
+
+# Decision notes
+
+Records for backlog items that did not warrant a full ADR
+(see `docs/adr/` for the convention on larger design decisions).
+
+## B-5 — rolling_* inference with non-literal window args (2026-06-11)
+
+**Investigated.** The reported symptom ("non-literal `window_size` /
+`min_samples` falls back to `Nullable[Float64]`") was stale: since issue
+#57 (commit 8b10020) the dtype family is determined by (method, receiver
+dtype) on every path — `rolling_sum(Int64, n)` infers `Int64?`, never
+`Float64?` — and only nullability widens, which is the sound upper bound
+(`T <: Nullable[T]`). Regression tests now pin this.
+
+**Improved:** int-constant propagation for `min_samples` / `window_size` /
+`ddof` (commit f6df123). A function-local `ms = 1` or module-level
+`MIN_SAMPLES = 1` resolves like a literal through the existing
+`var_consts` / `module_consts` machinery (issue #39), so const-bound
+totality (`min_samples<=1`, `window_size=1`, `ddof=0`) is recognized.
+Probed (polars 1.41.2): `min_samples in (0, 1)` fills every window for any
+accepted `window_size` (`window_size=0` is an expanding window with no
+nulls; negative raises before producing a frame).
+
+**Deliberately skipped:** flow-sensitive constant tracking. The const
+machinery is visit-order based and a rebinding inside an `if`/`for` branch
+overwrites the recorded value — the same accepted hazard as the string
+constants that resolve join keys. Building per-branch environments would be
+new infrastructure for a niche gain (window constants are rarely
+conditionally rebound) and stays out.
