@@ -445,3 +445,124 @@ class TestDefinitionErrors:
         assert parent is not None and "v" in parent.definition_errors
         assert child is not None
         assert child.definition_errors == {}
+
+
+class TestUnrecognizedAnnotationDegrade:
+    """Issue #77: a field annotation the parser cannot translate must NOT
+    silently vanish from the schema (phantom "extra column" FPs on strict
+    schemas, vanished-column FNs on open ones). The column registers with
+    Unknown dtype and the schema records a per-field definition warning
+    that the analyzer surfaces as PLW011 on every referencing function.
+
+    Probed (pandera 0.31.1): a genuinely-unresolvable annotation makes
+    pandera raise TypeError at FIRST USE (to_schema/validate), not at the
+    class statement — but a bare name may equally be a runtime alias of a
+    real dtype (``MyAlias = pl.Int64`` resolves fine), so this is a
+    warning, not a provably-broken PLY041 error.
+    """
+
+    def test_unrecognized_field_registers_unknown_column(self):
+        from polypolarism.types import Unknown
+
+        registry = _collect(
+            """
+            import pandera.polars as pa
+
+            class CustomThing:
+                pass
+
+            class S(pa.DataFrameModel):
+                a: int
+                mystery: CustomThing
+            """
+        )
+        schema = registry.get("S")
+        assert schema is not None
+        assert schema.columns["a"] == ColumnSpec(Int64(), required=True)
+        assert schema.columns["mystery"] == ColumnSpec(Unknown(), required=True)
+        assert "mystery" in schema.definition_warnings
+        assert "CustomThing" in schema.definition_warnings["mystery"]
+
+    def test_optional_unrecognized_field_is_not_required(self):
+        from polypolarism.types import Unknown
+
+        registry = _collect(
+            """
+            import typing
+            import pandera.polars as pa
+
+            class S(pa.DataFrameModel):
+                mystery: typing.Optional[CustomThing]
+            """
+        )
+        schema = registry.get("S")
+        assert schema is not None
+        assert schema.columns["mystery"] == ColumnSpec(Unknown(), required=False)
+        assert "mystery" in schema.definition_warnings
+
+    def test_legal_schema_has_no_definition_warnings(self):
+        registry = _collect(
+            """
+            import polars as pl
+            import pandera.polars as pa
+
+            class S(pa.DataFrameModel):
+                a: int
+                b: pl.Utf8
+            """
+        )
+        schema = registry.get("S")
+        assert schema is not None
+        assert schema.definition_warnings == {}
+
+    def test_child_inherits_definition_warning(self):
+        registry = _collect(
+            """
+            import pandera.polars as pa
+
+            class Parent(pa.DataFrameModel):
+                mystery: CustomThing
+
+            class Child(Parent):
+                extra: int
+            """
+        )
+        child = registry.get("Child")
+        assert child is not None
+        assert "mystery" in child.definition_warnings
+        assert "mystery" in child.columns
+
+    def test_child_override_with_recognized_annotation_clears_warning(self):
+        registry = _collect(
+            """
+            import pandera.polars as pa
+
+            class Parent(pa.DataFrameModel):
+                mystery: CustomThing
+
+            class Child(Parent):
+                mystery: int
+            """
+        )
+        child = registry.get("Child")
+        assert child is not None
+        assert child.definition_warnings == {}
+        assert child.columns["mystery"] == ColumnSpec(Int64(), required=True)
+
+    def test_arity_broken_field_is_not_double_reported(self):
+        # A wrong-arity ``Annotated`` form already carries the PLY041
+        # verdict (issue #69) — it must not ALSO get a PLW011 warning.
+        registry = _collect(
+            """
+            import typing
+            import polars as pl
+            import pandera.polars as pa
+
+            class S(pa.DataFrameModel):
+                v: typing.Annotated[pl.Array, pl.Int64(), 2]
+            """
+        )
+        schema = registry.get("S")
+        assert schema is not None
+        assert "v" in schema.definition_errors
+        assert schema.definition_warnings == {}

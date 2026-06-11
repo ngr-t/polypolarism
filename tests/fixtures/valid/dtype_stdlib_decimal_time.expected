@@ -1,0 +1,3 @@
+qualified_decimal: OK
+qualified_time: OK
+bare_imports: OK

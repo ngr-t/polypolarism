@@ -72,6 +72,8 @@ PLW008 = "PLW008"  # variable annotation narrows the inferred RHS without runtim
 # Environment / version
 PLW010 = "PLW010"  # detected polars or pandera version below polypolarism's supported floor
 
+PLW011 = "PLW011"  # schema field annotation unrecognized; column degrades to Unknown dtype (#77)
+
 
 def tag(code: str, message: str) -> str:
     """Return ``"[CODE] message"``; idempotent if message is already tagged."""
