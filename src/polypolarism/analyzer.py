@@ -749,16 +749,24 @@ def _cast_category(dtype: DataType) -> str | None:
         return "enum"
     if isinstance(dtype, ListT):
         return "list"
+    if isinstance(dtype, Array):
+        return "array"
     if isinstance(dtype, Struct):
         return "struct"
     return None
 
 
 # Directional (source_category, target_category) pairs that fail in both
-# strict modes. Struct *sources* never appear: polars casts a Struct's
-# fields instead of rejecting (``Struct -> Utf8`` yields String). Scalar
-# -> List/Struct only fails for temporal/categorical sources (numeric,
-# str and bool sources wrap).
+# strict modes. Struct *sources* mostly never appear: polars casts a
+# Struct's fields instead of rejecting (``Struct -> Utf8`` yields String) —
+# except Struct -> Array, probed InvalidOperationError. Scalar ->
+# List/Struct only fails for temporal/categorical sources (numeric, str
+# and bool sources wrap) but EVERY probed scalar -> Array cast fails
+# (issue #53: int/float/str/bool/date/datetime/time/dur InvalidOperation-
+# Error, cat/enum ComputeError, both modes). Array -> any non-list-like
+# target is "cannot cast Array type" in both modes; Array -> List is
+# probed-OK for every probed element pair and ``list -> array`` is
+# value-dependent (width) — both handled in ``_cast_invalid``.
 _CAST_INVALID_PAIRS: frozenset[tuple[str, str]] = frozenset(
     {("str", "bool"), ("bool", "cat"), ("bool", "enum")}
     | {("date", t) for t in ("bool", "time", "dur", "cat", "enum", "list", "struct")}
@@ -789,22 +797,58 @@ _CAST_INVALID_PAIRS: frozenset[tuple[str, str]] = frozenset(
             "struct",
         )
     }
+    | {
+        ("array", t)
+        for t in (
+            "int",
+            "float",
+            "str",
+            "bool",
+            "date",
+            "datetime",
+            "time",
+            "dur",
+            "cat",
+            "enum",
+            "struct",
+        )
+    }
+    | {
+        (s, "array")
+        for s in (
+            "int",
+            "float",
+            "str",
+            "bool",
+            "date",
+            "datetime",
+            "time",
+            "dur",
+            "cat",
+            "enum",
+            "struct",
+        )
+    }
 )
 
 
 def _cast_invalid(source_inner: DataType, target_inner: DataType) -> bool:
     """True when polars provably rejects the cast even with ``strict=False``.
 
-    ``list -> list`` recurses on the element dtypes (``List(Date) ->
-    List(Duration)`` fails in both modes); an Unknown element on either
-    side stays silent.
+    ``list -> list`` and ``array -> array`` recurse on the element dtypes
+    (``List(Date) -> List(Duration)`` and ``Array(Date) -> Array(Duration)``
+    fail in both modes); an Unknown element on either side stays silent.
+    ``array -> list`` is probed-OK for every probed element pair (even
+    ``Array(Date) -> List(Duration)``) and ``list -> array`` only fails
+    when the list lengths don't match the width (value-dependent) — both
+    stay silent (issue #53).
     """
     scat = _cast_category(source_inner)
     tcat = _cast_category(target_inner)
     if scat is None or tcat is None:
         return False
-    if scat == "list" and tcat == "list":
-        assert isinstance(source_inner, ListT) and isinstance(target_inner, ListT)
+    if (scat == "list" and tcat == "list") or (scat == "array" and tcat == "array"):
+        assert isinstance(source_inner, (ListT, Array)) and isinstance(target_inner, (ListT, Array))
         source_elem = source_inner.inner
         target_elem = target_inner.inner
         if isinstance(source_elem, Nullable):
@@ -812,6 +856,8 @@ def _cast_invalid(source_inner: DataType, target_inner: DataType) -> bool:
         if isinstance(target_elem, Nullable):
             target_elem = target_elem.inner
         return _cast_invalid(source_elem, target_elem)
+    if {scat, tcat} == {"list", "array"}:
+        return False
     return (scat, tcat) in _CAST_INVALID_PAIRS
 
 
@@ -1704,8 +1750,11 @@ class ExpressionAnalyzer(ast.NodeVisitor):
     # List / Struct / Null) and keeps its own branch. The rolling_* family
     # is NOT mirrored here — polars accepts e.g. rolling_mean on String
     # (all-null Float64, probed), so it stays in the silent path.
+    # Array receivers probed too (issue #53): cum_sum/cum_prod/cum_min/
+    # cum_max all raise "operation not supported for dtype array[...]";
+    # cum_count is fine (UInt32 for every receiver, Array included).
     _CUM_INVALID_RECEIVERS: dict[str, tuple[type[DataType], ...]] = {
-        "cum_sum": (Utf8, Date, Datetime, Time, ListT, Struct, Categorical, Enum, Null),
+        "cum_sum": (Utf8, Date, Datetime, Time, ListT, Array, Struct, Categorical, Enum, Null),
         "cum_prod": (
             Utf8,
             Date,
@@ -1714,13 +1763,14 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             Duration,
             Decimal,
             ListT,
+            Array,
             Struct,
             Categorical,
             Enum,
             Null,
         ),
-        "cum_min": (Utf8, ListT, Struct, Null),
-        "cum_max": (Utf8, ListT, Struct, Null),
+        "cum_min": (Utf8, ListT, Array, Struct, Null),
+        "cum_max": (Utf8, ListT, Array, Struct, Null),
     }
 
     # Probed-valid non-preserving cells. cum_sum upcasts narrow ints to
@@ -2418,9 +2468,10 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         - list/tuple/set literal of constants → ``infer_lit`` per element,
           folded with ``unify_types`` (``[1, None]`` → ``Nullable[Int64]``;
           the caller unwraps). Empty, non-constant or non-unifiable → ``None``.
-        - any other expression → its inferred dtype; a ``List(T)`` expr
-          contributes ``T``, and a non-List expr of dtype ``T`` is imploded
-          by polars so it contributes ``T`` as well (probed).
+        - any other expression → its inferred dtype; a ``List(T)`` or
+          ``Array(T)`` expr contributes ``T`` (both probed), and a
+          non-container expr of dtype ``T`` is imploded by polars so it
+          contributes ``T`` as well (probed).
         - a bare scalar constant is outside the understood surface → ``None``.
         """
         if isinstance(arg, (ast.List, ast.Tuple, ast.Set)):
@@ -2446,7 +2497,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         if arg_dtype is None:
             return None
         inner = arg_dtype.inner if isinstance(arg_dtype, Nullable) else arg_dtype
-        if isinstance(inner, ListT):
+        if isinstance(inner, (ListT, Array)):
             return inner.inner
         return inner
 
@@ -4598,9 +4649,11 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     unknown_elem = Nullable(unknown_elem)
                 result_columns[col] = ColumnSpec(dtype=unknown_elem, required=spec.required)
                 continue
-            if not isinstance(inner, ListT):
+            # Both containers explode to their element dtype (probed:
+            # Array(Int64, 3) explodes to Int64; issue #53).
+            if not isinstance(inner, (ListT, Array)):
                 self.errors.append(
-                    tag(PLY021, f"explode: column '{col}' is {spec.dtype}, not List[T]")
+                    tag(PLY021, f"explode: column '{col}' is {spec.dtype}, not List/Array")
                 )
                 continue
             elem_dtype: DataType = inner.inner

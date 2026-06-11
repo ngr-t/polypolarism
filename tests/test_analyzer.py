@@ -8405,6 +8405,168 @@ class TestCastImpossibleFrameLevel:
         assert analyzer.var_types["out"].columns["u"].dtype == Int64()
 
 
+class TestArrayCastDtypes:
+    """Issue #53: Array cells in the PLY013 cast layer.
+
+    Probed (polars 1.41.2, both strict modes):
+
+    - Array -> any scalar/categorical/struct target: InvalidOperationError
+      ("cannot cast Array type") — flagged.
+    - scalar/temporal/categorical/struct -> Array: InvalidOperationError /
+      ComputeError — flagged.
+    - Array -> Array recurses on the element pair (Array(Int64) ->
+      Array(Date) is probed-OK via the int->date element cast; Array(Date)
+      -> Array(Duration) fails in both modes).
+    - Array -> List: probed-OK for EVERY probed element pair (even
+      Array(Date) -> List(Duration)) — never flagged.
+    - List -> Array: ComputeError only when the list lengths don't match
+      the width (value-dependent; equal-width probe succeeds) — silent.
+    """
+
+    def _frame(self) -> FrameType:
+        return FrameType(
+            {
+                "q": Array(Int64()),
+                "qd": Array(Date()),
+                "li": ListT(Int64()),
+                "i": Int64(),
+                "s": Utf8(),
+                "d": Date(),
+                "qu": Array(Unknown()),
+                "nq": Nullable(Array(Int64())),
+            }
+        )
+
+    @pytest.mark.parametrize(
+        "expr",
+        [
+            # Array -> scalar targets
+            "pl.col('q').cast(pl.Int64)",
+            "pl.col('q').cast(pl.Utf8)",
+            "pl.col('q').cast(pl.Boolean)",
+            "pl.col('q').cast(pl.Float64)",
+            "pl.col('q').cast(pl.Date)",
+            "pl.col('q').cast(pl.Categorical)",
+            "pl.col('q').cast(pl.Int64, strict=False)",
+            # sources -> Array targets
+            "pl.col('i').cast(pl.Array(pl.Int64, 1))",
+            "pl.col('s').cast(pl.Array(pl.Utf8, 1))",
+            "pl.col('d').cast(pl.Array(pl.Date, 1))",
+            # Array -> Array element recursion
+            "pl.col('qd').cast(pl.Array(pl.Duration, 1))",
+            # Nullable receiver unwraps
+            "pl.col('nq').cast(pl.Int64)",
+        ],
+    )
+    def test_impossible_array_cast_flags_ply013(self, expr: str) -> None:
+        analyzer = _run_body(self._frame(), f"out = df.select(r={expr})")
+        assert len(analyzer.errors) == 1, (expr, analyzer.errors)
+        assert "PLY013" in analyzer.errors[0]
+
+    @pytest.mark.parametrize(
+        ("expr", "expected"),
+        [
+            # Array -> List always allowed (probed)
+            ("pl.col('q').cast(pl.List(pl.Int64))", ListT(Int64())),
+            ("pl.col('q').cast(pl.List(pl.Utf8))", ListT(Utf8())),
+            ("pl.col('qd').cast(pl.List(pl.Duration))", ListT(Duration())),
+            # List -> Array is width/value-dependent — silent
+            ("pl.col('li').cast(pl.Array(pl.Int64, 3))", Array(Int64())),
+            # Array -> Array with a castable element pair
+            ("pl.col('q').cast(pl.Array(pl.Float64, 3))", Array(Float64())),
+            ("pl.col('q').cast(pl.Array(pl.Date, 3))", Array(Date())),
+            # Unknown element on either side stays silent
+            ("pl.col('qu').cast(pl.Array(pl.Int64, 3))", Array(Int64())),
+        ],
+    )
+    def test_allowed_array_cast_infers_target(self, expr: str, expected) -> None:
+        analyzer = _run_body(self._frame(), f"out = df.select(r={expr})")
+        assert analyzer.errors == [], (expr, analyzer.errors)
+        assert analyzer.var_types["out"].columns["r"].dtype == expected
+
+
+class TestArrayOperationLayers:
+    """Issue #53: remaining Array decisions in the operation layers."""
+
+    def _frame(self) -> FrameType:
+        return FrameType(
+            {
+                "q": Array(Int64()),
+                "nq": Nullable(Array(Int64())),
+                "li": ListT(Int64()),
+                "i": Int64(),
+                "s": Utf8(),
+            }
+        )
+
+    # -- explode (probed: Array explodes to its element dtype) ------------------
+
+    def test_explode_array_column_yields_element(self):
+        analyzer = _run_body(self._frame(), 'out = df.explode("q")')
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["q"].dtype == Int64()
+
+    def test_explode_nullable_array_column_yields_nullable_element(self):
+        analyzer = _run_body(self._frame(), 'out = df.explode("nq")')
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["nq"].dtype == Nullable(Int64())
+
+    def test_explode_scalar_column_message_mentions_both_containers(self):
+        analyzer = _run_body(self._frame(), 'out = df.explode("i")')
+        assert len(analyzer.errors) == 1
+        assert "PLY021" in analyzer.errors[0]
+        assert "List/Array" in analyzer.errors[0]
+
+    # -- is_in (probed: an Array(T) expression argument contributes T) ----------
+
+    def test_is_in_array_expr_arg_matching_element_passes(self):
+        analyzer = _run_body(self._frame(), 'out = df.select(r=pl.col("i").is_in(pl.col("q")))')
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["r"].dtype == Boolean()
+
+    def test_is_in_array_expr_arg_mismatched_element_flags_ply009(self):
+        # Probed: Utf8.is_in(Array(Int64)) raises InvalidOperationError.
+        analyzer = _run_body(self._frame(), 'out = df.select(r=pl.col("s").is_in(pl.col("q")))')
+        assert any("PLY009" in e for e in analyzer.errors), analyzer.errors
+
+    def test_is_in_array_receiver_stays_silent(self):
+        # An Array receiver is outside the probed is_in category set.
+        analyzer = _run_body(self._frame(), 'out = df.select(r=pl.col("q").is_in([1, 2]))')
+        assert analyzer.errors == [], analyzer.errors
+
+    # -- cum_* (probed: cum_sum/cum_prod/cum_min/cum_max reject Array) ----------
+
+    @pytest.mark.parametrize("method", ["cum_sum", "cum_prod", "cum_min", "cum_max"])
+    def test_cum_methods_on_array_flag_ply016(self, method: str):
+        analyzer = _run_body(self._frame(), f'out = df.select(r=pl.col("q").{method}())')
+        assert any("PLY016" in e for e in analyzer.errors), (method, analyzer.errors)
+
+    def test_cum_count_on_array_is_fine(self):
+        # Probed: cum_count returns UInt32 for every receiver, Array included.
+        analyzer = _run_body(self._frame(), 'out = df.select(r=pl.col("q").cum_count())')
+        assert analyzer.errors == [], analyzer.errors
+
+    # -- arithmetic / comparison stay silent (probed: Array * 2 and == work) ----
+
+    def test_array_arithmetic_stays_silent(self):
+        analyzer = _run_body(self._frame(), 'out = df.select(r=pl.col("q") * 2)')
+        assert analyzer.errors == [], analyzer.errors
+
+    def test_array_comparison_stays_silent(self):
+        analyzer = _run_body(self._frame(), 'out = df.select(r=pl.col("q") == pl.col("q"))')
+        assert analyzer.errors == [], analyzer.errors
+
+    # -- concat (unify_types path: equal Array unifies, mismatch flags) ---------
+
+    def test_concat_same_array_columns_passes(self):
+        analyzer = _run_body(
+            FrameType({"q": Array(Int64())}),
+            "out = pl.concat([df, df])",
+        )
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["q"].dtype == Array(Int64())
+
+
 class TestWhenConditionDtype:
     """Issue #37: ``pl.when(<cond>)`` with a non-Boolean condition is PLY008.
 
