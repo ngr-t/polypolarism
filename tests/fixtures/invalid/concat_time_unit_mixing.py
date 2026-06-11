@@ -9,10 +9,11 @@ False-positive twin: ``valid/concat_time_unit_same``.
 
 from __future__ import annotations
 
+from typing import Annotated
+
 import pandera.polars as pa
 import polars as pl
 from pandera.typing.polars import DataFrame
-from typing import Annotated
 
 
 class EventsUs(pa.DataFrameModel):

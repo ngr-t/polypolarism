@@ -24,5 +24,10 @@ class KeyedA(pa.DataFrameModel):
         coerce = True
 
 
-def join_reintroduces_dropped(df: pl.DataFrame, g: DataFrame[KeyedA]) -> pl.DataFrame:
+# Executable default for the differential harness (bare params are not
+# synthesizable): carries 'a' (to be dropped) and the join key.
+_LEFT = pl.DataFrame({"k": [1, 2], "a": [10, 20]})
+
+
+def join_reintroduces_dropped(g: DataFrame[KeyedA], df: pl.DataFrame = _LEFT) -> pl.DataFrame:
     return df.drop("a").join(g, on="k").select(pl.col("a"))

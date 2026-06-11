@@ -24,5 +24,11 @@ class KeyedOnly(pa.DataFrameModel):
         coerce = True
 
 
-def join_does_not_reintroduce(df: pl.DataFrame, g: DataFrame[KeyedOnly]) -> pl.DataFrame:
+# The default is the runtime witness: a frame that really carries 'a'
+# and the join key, so the drop -> join -> select chain executes for real
+# in the differential harness (bare params are not synthesizable).
+_LEFT = pl.DataFrame({"k": [1, 2], "a": [10, 20]})
+
+
+def join_does_not_reintroduce(g: DataFrame[KeyedOnly], df: pl.DataFrame = _LEFT) -> pl.DataFrame:
     return df.drop("a").join(g, on="k").select(pl.col("a"))  # WRONG: 'a' is still absent
