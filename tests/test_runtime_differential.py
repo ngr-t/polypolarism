@@ -55,6 +55,7 @@ from pandera.polars import DataFrameModel  # noqa: E402
 from pandera.typing.polars import DataFrame as PanderaDataFrame  # noqa: E402
 from pandera.typing.polars import LazyFrame as PanderaLazyFrame  # noqa: E402
 from polars.datatypes import DataTypeClass  # noqa: E402
+from polars.exceptions import PanicException  # noqa: E402
 
 pytestmark = pytest.mark.runtime
 
@@ -563,11 +564,17 @@ def test_runtime_agrees_with_static_verdict(
             _validate_return(return_frame[0], result)
     else:
         # Static FAIL: the call or the return validation must raise.
+        # ``PanicException`` (a rust panic surfaced by pyo3) derives from
+        # BaseException, not Exception; a static FAIL predicting a
+        # guaranteed crash (e.g. grouped Float16 mean, backlog N-5) is
+        # confirmed by it exactly like by a regular polars error. Probed
+        # (polars 1.41.2): these panics are catchable and leave the
+        # process healthy.
         try:
             result = _invoke(fn, kwargs)
             if return_frame is not None:
                 _validate_return(return_frame[0], result)
-        except Exception:
+        except (Exception, PanicException):
             return
         pytest.fail(
             f"{case.case_key}: static verdict is FAIL but the function ran and "

@@ -1,0 +1,5 @@
+select_small_int_reductions: OK
+agg_small_int_reductions: OK
+select_float16_reductions: OK
+select_sum_int128_keeps_width: OK
+agg_sum_uint128_keeps_width: OK

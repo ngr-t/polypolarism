@@ -1,0 +1,6 @@
+agg_mean_float16: FAIL
+  error: [PLY011] Cannot apply mean to type Float16 in a grouped context (group_by().agg() / over window): polars panics in rust at runtime — probed (polars 1.41.2). The same reduction is valid in a plain select; cast the column to a wider dtype before grouping
+over_median_float16: FAIL
+  error: [PLY011] over: median on Float16 panics in rust at runtime in a grouped (window) context — probed (polars 1.41.2). The same reduction is valid in a plain select; cast the column to a wider dtype first
+agg_product_uint128: FAIL
+  error: [PLY011] Cannot apply product to type UInt128 in a grouped context (group_by().agg() / over window): polars panics in rust at runtime — probed (polars 1.41.2). The same reduction is valid in a plain select; cast the column to a wider dtype before grouping

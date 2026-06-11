@@ -313,9 +313,7 @@ class TestSmallIntAndLandmarkReceivers:
         result = infer_agg_result_type(func, Float16(), context="select")
         assert result == expected
 
-    @pytest.mark.parametrize(
-        "func", [AggFunction.MEAN, AggFunction.MEDIAN, AggFunction.QUANTILE]
-    )
+    @pytest.mark.parametrize("func", [AggFunction.MEAN, AggFunction.MEDIAN, AggFunction.QUANTILE])
     def test_float16_grouped_float_reductions_raise(self, func):
         # Probed (polars 1.41.2): mean/median/quantile on Float16 panic in
         # rust in grouped contexts ("not implemented for dtype Float16").

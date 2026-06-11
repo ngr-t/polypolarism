@@ -12090,18 +12090,14 @@ class TestSmallIntLandmarkReductionContexts:
             self._frame(Float16()),
             'out = df.select(a=pl.col("v").mean().over("g"))',
         )
-        assert any("PLY011" in e and "panic" in e.lower() for e in analyzer.errors), (
-            analyzer.errors
-        )
+        assert any("PLY011" in e and "panic" in e.lower() for e in analyzer.errors), analyzer.errors
 
     def test_over_product_uint128_errors(self):
         analyzer = _run_body(
             self._frame(UInt128()),
             'out = df.select(a=pl.col("v").product().over("g"))',
         )
-        assert any("PLY011" in e and "panic" in e.lower() for e in analyzer.errors), (
-            analyzer.errors
-        )
+        assert any("PLY011" in e and "panic" in e.lower() for e in analyzer.errors), analyzer.errors
 
     def test_over_mean_float64_stays_clean(self):
         analyzer = _run_body(

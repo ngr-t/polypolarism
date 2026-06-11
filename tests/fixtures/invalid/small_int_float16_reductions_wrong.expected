@@ -1,0 +1,5 @@
+select_small_int_reductions_wrong: FAIL
+  error: Column 'total_i8' has type Int64, but declared type is Int8
+  error: Column 'avg_u16' has type Float64, but declared type is Float32
+select_float16_mean_wrong: FAIL
+  error: Column 'avg_half' has type Float16, but declared type is Float64
