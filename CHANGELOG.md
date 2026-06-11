@@ -132,6 +132,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- UDF expressions inside `group_by().agg()` now model the implicit list
+  aggregation (issue #86): a terminal `map_elements` / `map_batches` /
+  `pl.map_groups` in an agg entry infers `List(return_dtype)` instead of
+  the scalar element dtype, fixing both the false positive (a correct
+  `List[...]` declaration was rejected) and the false negative (a wrong
+  scalar declaration passed statically, then crashed under
+  `@pa.check_types`). `returns_scalar=True` on `map_batches` /
+  `pl.map_groups` keeps the scalar `return_dtype` (the
+  custom-aggregation-function pattern) — on `map_elements` the flag is
+  deprecated (polars 1.32.0) and ignored, so the List wrap applies
+  regardless. A native aggregation chained after the UDF reduces as
+  before, and elementwise contexts (`select`/`with_columns`) keep the
+  scalar typing. `pl.map_groups(exprs, fn, return_dtype=...)` is now
+  inferred at all (output named after the first input expression;
+  missing `return_dtype=` falls back with `PLW001` like the Expr UDFs).
+  Probed identical on polars 1.41.2 and 1.37.0.
+
+- `group_by(...).map_groups(fn)` no longer dies into the generic
+  "Could not infer return type" (issue #87): the output schema depends
+  on the group function's body — statically unknowable, same family as
+  `pivot`/`to_dummies` — so it now gets the `PLW005`
+  assign-to-an-annotated-variable guidance (suggesting
+  `LazyFrame[Schema]` on a lazy receiver), and the annotated-assignment
+  escape hatch keeps working. `GroupBy.apply`, the old alias, no longer
+  exists on probed polars 1.37.0/1.41.2, so no alias handling was added.
+
 - Optional (`required=False`) columns are no longer treated as provable
   extras at strict boundaries (issue #84, boundary of #82): a column
   that MAY be absent admits runtime inputs on which the call succeeds,

@@ -1330,6 +1330,44 @@ def _stdvar_ddof_zero(call: ast.Call) -> bool:
     return _int_literal(_call_arg(call, position=0, name="ddof")) == 0
 
 
+def _udf_list_wraps_in_agg(node: ast.expr) -> bool:
+    """True when an ``agg(...)`` entry's terminal call is a UDF whose result
+    polars implicitly list-aggregates in grouped context (issue #86).
+
+    Probed on polars 1.41.2 and 1.37.0 (identical):
+
+    - ``Expr.map_elements(...)`` -> ``List(return_dtype)`` regardless of
+      ``returns_scalar=`` (deprecated since polars 1.32.0 and ignored:
+      ``returns_scalar=True`` still yields the List);
+    - ``Expr.map_batches(...)`` / ``pl.map_groups(...)`` ->
+      ``List(return_dtype)`` unless ``returns_scalar=True`` (then the
+      scalar ``return_dtype`` — the custom-aggregation-function pattern).
+
+    A native aggregation chained after the UDF (``.map_elements(...).sum()``)
+    reduces as usual and never reaches this check — the UDF is then not the
+    terminal call. Elementwise contexts (``select``/``with_columns``) never
+    consult this; they keep the scalar dtype. A non-literal
+    ``returns_scalar=`` value stays conservative on the default (wrap).
+    """
+    if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+        return False
+    method = node.func.attr
+    if method == "map_elements":
+        return True
+    if method == "map_batches" or (
+        method == "map_groups"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "pl"
+    ):
+        return not any(
+            kw.arg == "returns_scalar"
+            and isinstance(kw.value, ast.Constant)
+            and kw.value.value is True
+            for kw in node.keywords
+        )
+    return False
+
+
 def _rolling_min_samples_total(
     method: str,
     call: ast.Call,
@@ -2212,6 +2250,16 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         finally:
             self._in_agg_chain = prev_in_agg
         if chain_dtype is not None:
+            # Implicit list aggregation of UDF results (issue #86): a
+            # terminal ``map_elements`` / ``map_batches`` / ``pl.map_groups``
+            # inside ``agg`` is non-aggregating, so polars wraps its result
+            # per group — ``agg(x=pl.col("v").map_elements(f,
+            # return_dtype=pl.Float64))`` is ``List(Float64)`` at runtime.
+            # The check runs on the alias-stripped node; see
+            # ``_udf_list_wraps_in_agg`` for the probed matrix (including
+            # the ``returns_scalar=True`` scalar cases that stay unwrapped).
+            if _udf_list_wraps_in_agg(agg_node):
+                chain_dtype = ListT(chain_dtype)
             # Anchor the AggExpr to the deepest pl.col so the column-existence
             # check elsewhere has a sensible source attribution; if there's no
             # bare pl.col (e.g. a literal-driven expression) we fall back to
@@ -2852,6 +2900,47 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 _, kw_dtype = self.analyze_select_expr(kw.value)
                 fields[kw.arg] = kw_dtype if kw_dtype is not None else Unknown()
             return None, Struct(fields)
+
+        # ``pl.map_groups(exprs, function, return_dtype=...)`` — a UDF over
+        # the input expressions (issue #86). The output column takes the
+        # first input expression's name (probed, polars 1.41.2/1.37.0).
+        # With ``return_dtype=`` (third positional or kwarg) the result
+        # dtype is the declared one; the implicit list-aggregation wrap in
+        # agg context (and its ``returns_scalar=True`` exemption) is applied
+        # by ``analyze_agg_expr``. Without it, polypolarism falls back to
+        # the first input column's dtype and warns (PLW001), mirroring
+        # map_elements / map_batches.
+        if name == "map_groups":
+            exprs_node: ast.expr | None = node.args[0] if node.args else None
+            declared_node: ast.expr | None = node.args[2] if len(node.args) >= 3 else None
+            for kw in node.keywords:
+                if kw.arg == "exprs":
+                    exprs_node = kw.value
+                elif kw.arg == "return_dtype":
+                    declared_node = kw.value
+            first_col: str | None = None
+            if exprs_node is not None:
+                elems = _flatten_expr_args([exprs_node])
+                if elems:
+                    first_col = self._extract_col_name(elems[0]) or _str_constant(elems[0])
+            declared = _resolve_pl_dtype(declared_node) if declared_node is not None else None
+            if declared is not None:
+                return first_col, declared
+            map_groups_fallback: DataType = Unknown()
+            if first_col is not None:
+                try:
+                    map_groups_fallback = infer_col(first_col, self.current_frame)
+                except ColumnNotFoundError as e:
+                    self.errors.append(tag(getattr(e, "code", PLY001), str(e)))
+            self.warnings.append(
+                tag(
+                    PLW001,
+                    "map_groups: no `return_dtype=` was supplied, so polypolarism "
+                    "falls back to the first input column's dtype. Add e.g. "
+                    "`return_dtype=pl.Float64` to make the result type precise.",
+                )
+            )
+            return first_col, map_groups_fallback
 
         # ``pl.<agg>("col")`` top-level shorthand — equivalent to
         # ``pl.col("col").<agg>()``. Recognised in ``select`` /
@@ -4811,6 +4900,34 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 if isinstance(receiver, ast.Call) and isinstance(receiver.func, ast.Attribute):
                     source = self._infer_expr_type(receiver.func.value)
                 return _lazy_like(self._infer_agg_call(receiver, node), source)
+
+            # ``group_by(...).map_groups(fn)`` (issue #87): the output
+            # schema depends on the group function's body — statically
+            # unknowable, same family as pivot/to_dummies — so emit the
+            # PLW005 annotate-the-result guidance instead of dying into the
+            # generic "Could not infer return type". The annotated-
+            # assignment escape then applies the user's schema through the
+            # AnnAssign path. (``GroupBy.apply``, the old alias, no longer
+            # exists on probed polars 1.37.0/1.41.2 — no alias handling.)
+            if (
+                method_name == "map_groups"
+                and isinstance(receiver, ast.Call)
+                and isinstance(receiver.func, ast.Attribute)
+                and receiver.func.attr in ("group_by", "group_by_dynamic", "rolling")
+            ):
+                source = self._infer_expr_type(receiver.func.value)
+                kind = "LazyFrame" if source is not None and source.is_lazy else "DataFrame"
+                self.warnings.append(
+                    tag(
+                        PLW005,
+                        f"group_by(...).map_groups: the output schema depends "
+                        f"on the group function's body, so polypolarism cannot "
+                        f"infer it. Assign the result to a "
+                        f"`{kind}[Schema]`-annotated variable to give the "
+                        f"analyser a schema to check against.",
+                    )
+                )
+                return None
 
             # Handle other DataFrame methods
             receiver_type = self._infer_expr_type(receiver)
