@@ -146,17 +146,32 @@ class TestPolarsLandmarkDtypes:
             Nullable(Time()), required=True
         )
 
-    def test_pl_decimal_bare_uses_default(self):
+    def test_pl_decimal_bare_uses_pandera_default(self):
         from polypolarism.types import Decimal
 
         # Landmark: polars 1.35 (Decimal stabilized).
-        # Bare ``pl.Decimal`` resolves to polars' default precision=38, scale=0.
-        assert _parse("pl.Decimal") == ColumnSpec(Decimal(38, 0), required=True)
+        # A bare ``pl.Decimal`` annotation resolves through PANDERA's
+        # engine default — (28, 0), not polars' materialized (38, 0)
+        # (issue #75; probed: ``validate`` rejects a (38, 0) column).
+        assert _parse("pl.Decimal") == ColumnSpec(Decimal(28, 0), required=True)
+        assert _parse("Optional[pl.Decimal]") == ColumnSpec(Decimal(28, 0), required=False)
 
     def test_pl_decimal_call_no_args(self):
         from polypolarism.types import Decimal
 
+        # Call forms carry a polars instance — polars' 38 (probed).
         assert _parse("pl.Decimal()") == ColumnSpec(Decimal(38, 0), required=True)
+        assert _parse("pl.Decimal(scale=2)") == ColumnSpec(Decimal(38, 2), required=True)
+
+    def test_pl_decimal_nested_bare_is_runtime_wildcard(self):
+        # Probed (issue #75): ``pl.List(pl.Decimal)`` validates BOTH
+        # List(Decimal(38,0)) and List(Decimal(28,0)) — the nested bare
+        # class is a runtime wildcard, so claiming any precision would be
+        # a false-positive trap.
+        assert _parse("pl.List(pl.Decimal)") == ColumnSpec(List(Unknown()), required=True)
+
+    def test_pl_decimal_unreadable_call_args_degrade_to_unknown(self):
+        assert _parse("pl.Decimal(P, S)") == ColumnSpec(Unknown(), required=True)
 
     def test_pl_decimal_positional_args_preserved(self):
         from polypolarism.types import Decimal

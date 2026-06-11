@@ -106,6 +106,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A bare `pl.Decimal` field annotation registers pandera's engine default
+  `Decimal(28, 0)` instead of polars' materialized `Decimal(38, 0)`
+  (issue #75; probed: `to_schema()` reports 28 and `validate` rejects a
+  (38, 0) column) — both the false positive on a correct (28, 0) return
+  and the false negative on a (38, 0) one are gone. Call forms
+  (`pl.Decimal()`, omitted/`None` args) carry a polars instance and keep
+  38; a NESTED bare class (`pl.List(pl.Decimal)`, struct fields) is a
+  probed runtime wildcard and parses to `Unknown`; unreadable call
+  arguments degrade to `Unknown` instead of claiming the bare default.
 - `pct_change()` is no longer typed as dtype-preserving (issue #71): it
   divides, so an int receiver (any width — Boolean, the temporals,
   Decimal and Null too) infers `Float64?` and float receivers keep their

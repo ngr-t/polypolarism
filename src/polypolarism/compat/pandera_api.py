@@ -18,10 +18,24 @@ Versioning notes:
 
 from __future__ import annotations
 
+from polypolarism.types import Decimal
+
 # Class names treated as Pandera schema base classes. Qualified forms
 # (``pa.DataFrameModel``, ``pandera.polars.DataFrameModel``) are matched
 # on the trailing attribute name.
 SCHEMA_BASE_NAMES: frozenset[str] = frozenset({"DataFrameModel", "SchemaModel"})
+
+# What pandera builds for a BARE ``d: pl.Decimal`` class-name annotation
+# (issue #75). Pandera's engine resolves the bare class through its own
+# Decimal default — precision 28 (Python's ``decimal`` module default) —
+# NOT polars' materialized (38, 0). Probed (pandera 0.31.1):
+# ``to_schema()`` reports ``Decimal(precision=28, scale=0)``, ``validate``
+# passes a (28, 0) column and rejects (38, 0), and the value is stable
+# under ``decimal.getcontext()`` changes (pandera pins 28 at import time).
+# Every CALL form (``pl.Decimal()``, omitted/None arguments) carries a
+# polars instance instead and keeps polars' 38 — see
+# ``polars_api.DECIMAL_DEFAULT``.
+PANDERA_BARE_DECIMAL: Decimal = Decimal(28, 0)
 
 # Annotation head names recognised in ``DataFrame[Schema]`` /
 # ``LazyFrame[Schema]``. Qualified prefixes are stripped before matching.

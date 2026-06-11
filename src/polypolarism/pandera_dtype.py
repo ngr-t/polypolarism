@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import ast
 
-from polypolarism.compat.pandera_api import FIELD_CALLABLE_NAME
+from polypolarism.compat.pandera_api import FIELD_CALLABLE_NAME, PANDERA_BARE_DECIMAL
 from polypolarism.compat.polars_api import (
     DTYPE_NAME_MAP,
     parse_array_shape,
@@ -141,6 +141,15 @@ def _parse_dtype_expr(node: ast.expr) -> tuple[DataType, bool] | None:
     if _is_annotated(node):
         return _parse_annotated(node)
 
+    # A TOP-LEVEL bare ``pl.Decimal`` annotation resolves through pandera's
+    # engine default — (28, 0), not polars' materialized (38, 0) (issue
+    # #75; probed: ``to_schema()`` reports 28 and ``validate`` rejects 38).
+    # Call forms (``pl.Decimal()``, omitted/None args) carry a polars
+    # instance and keep polars' 38; nested bare forms are runtime
+    # wildcards and parse to Unknown in ``_parse_plain_dtype``.
+    if _is_pl_attr(node, "Decimal"):
+        return PANDERA_BARE_DECIMAL, True
+
     dtype = _parse_plain_dtype(node)
     if dtype is None:
         return None
@@ -160,6 +169,16 @@ def _parse_plain_dtype(node: ast.expr) -> DataType | None:
     if isinstance(node, ast.Attribute):
         if isinstance(node.value, ast.Name):
             if node.value.id == "pl":
+                # A bare ``pl.Decimal`` in a NESTED position (container
+                # element / struct field / unreadable-call fallback) is a
+                # class-level wildcard at runtime — probed (issue #75):
+                # ``pl.List(pl.Decimal)`` validates List(Decimal(38,0))
+                # AND List(Decimal(28,0)) — so claiming any precision
+                # would be a false-positive trap. The TOP-LEVEL bare form
+                # enforces pandera's (28, 0) instead and is special-cased
+                # in ``_parse_dtype_expr``.
+                if node.attr == "Decimal":
+                    return Unknown()
                 resolved = _PL_DTYPE_MAP.get(node.attr)
                 if resolved is not None:
                     return resolved
@@ -196,8 +215,10 @@ def _parse_plain_dtype(node: ast.expr) -> DataType | None:
         if _is_pl_attr(node.func, "Struct"):
             return _parse_struct_call(node)
         # ``pl.Decimal(precision, scale)`` preserves its arguments (shared
-        # parser in compat; omitted args take polars' defaults). Non-literal
-        # args fall through to the bare ``pl.Decimal`` default below.
+        # parser in compat; omitted args take polars' defaults — probed:
+        # pandera keeps a call-form instance's 38, issue #75). Non-literal
+        # args fall through to the bare-attribute branch above — Unknown,
+        # the honest claim for unreadable parameters.
         if _is_pl_attr(node.func, "Decimal"):
             decimal_dt = parse_decimal_call(node)
             if decimal_dt is not None:
