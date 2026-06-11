@@ -107,6 +107,42 @@ Status legend: `[ ]` open / `[x]` done / `[-]` deliberately deferred.
 - [-] **C-10: when/then mixed non-literal int branches degrade to Int32**
   (`expr_infer.py`, issue #40 area) — polars itself has no integer
   literal type; accepted leniency.
+- [ ] **C-11: Programmatic / dynamic schema generation** (user request
+  2026-06-11). Three feasibility tiers, cheapest first:
+  1. *Statically-readable object API*: `pa.DataFrameSchema({"a":
+     pa.Column(int), ...})` with literal dicts parses exactly like the
+     class form — a second front-end onto `pandera_schema`, no new
+     theory.
+  2. *Constant-foldable construction*: fields built by comprehensions /
+     loops over literal lists. The B-5 int-constant propagation is the
+     precedent; needs a bounded partial evaluator, diminishing returns.
+  3. *Genuinely dynamic* (config/env/IO-driven class bodies,
+     `type(...)` calls): statically undecidable. Options: degrade to an
+     open frame (`rest` + Unknown — zero false positives, partial
+     checking survives downstream); a user-declared schema stub/registry
+     in `[tool.polypolarism]`; or a "schema provider" mode that imports
+     the user module at check time and reads `Model.to_schema()` —
+     crosses the current never-execute-user-code line (only the runtime
+     differential harness crosses it today), so it needs an ADR.
+- [ ] **C-12: Implicit schemas for unannotated frames** (user request
+  2026-06-11). Two independent halves:
+  1. *Open-frame propagation from unannotated sources*:
+     `pl.read_parquet(...)` / unannotated params start as
+     `FrameType({}, rest=RowVar)`; every `with_columns` / `select` /
+     `cast` pins the columns it provably determines, and diagnostics
+     fire only on provable contradictions — exactly the
+     row-polymorphism design intent. The type machinery (`rest`,
+     Unknown, open-frame leniency notes) already exists; the work is
+     wiring `read_*` constructors into body analysis and deciding the
+     diagnostics policy (likely warn-only at first).
+  2. *Source-schema snapshots*: parquet/IPC footers carry exact schemas
+     (`pl.read_parquet_schema` reads them without loading data). A
+     `polypolarism snapshot` command could write a committed
+     path -> schema snapshot file consumed at check time, keeping checks
+     hermetic (no IO during checking, CI-safe, staleness reviewed as a
+     diff). CSV has no embedded schema — inference only, lower
+     confidence tier. Needs an ADR: literal-path resolution root,
+     staleness policy, opt-in surface.
 
 ## D. Tooling / distribution
 
