@@ -1,0 +1,2 @@
+bug_int_declared: FAIL
+  error: [PLY040] Column 'x' has type Float64?, but declared type is Int64?

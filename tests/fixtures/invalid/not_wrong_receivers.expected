@@ -1,0 +1,5 @@
+bug_bool_declared: FAIL
+  error: [PLY040] Column 'x' has type Int64, but declared type is Boolean
+bug_not_on_float: FAIL
+  error: [PLY016] not_: operation not supported for dtype Float64 — polars raises InvalidOperationError at runtime
+  via: column 'x': passed via Unknown
