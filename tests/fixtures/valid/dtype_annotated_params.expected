@@ -1,0 +1,6 @@
+decimal_annotated_exact: OK
+datetime_unit_cast: OK
+duration_unit_from_diff: OK
+enum_annotated_passthrough: OK
+datetime_unit_coarsened_by_coerce: OK
+  via: column 't': Datetime[us] -> Datetime[ms] via coerce

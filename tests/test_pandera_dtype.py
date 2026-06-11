@@ -10,6 +10,9 @@ from polypolarism.types import (
     Boolean,
     ColumnSpec,
     Datetime,
+    Decimal,
+    Duration,
+    Enum,
     Float64,
     Int64,
     List,
@@ -229,8 +232,11 @@ class TestPolarsDatetimeTimezone:
         )
 
     def test_time_unit_only_is_naive(self):
+        # Issue #66: the unit participates in dtype identity (tz stays None).
         assert _parse('pl.Datetime("us")') == ColumnSpec(Datetime(), required=True)
-        assert _parse('pl.Datetime(time_unit="ms")') == ColumnSpec(Datetime(), required=True)
+        assert _parse('pl.Datetime(time_unit="ms")') == ColumnSpec(
+            Datetime(unit="ms"), required=True
+        )
 
     def test_explicit_none_time_zone_is_naive(self):
         assert _parse('pl.Datetime("us", None)') == ColumnSpec(Datetime(), required=True)
@@ -272,6 +278,93 @@ class TestPolarsDatetimeTimezone:
         assert _parse('pl.Datetime(time_zone="UTC")') != _parse(
             'pl.Datetime(time_zone="Asia/Tokyo")'
         )
+
+
+class TestDatetimeDurationTimeUnit:
+    """Issue #66: the time unit participates in dtype identity.
+
+    Probed against pandera 0.31.1 / polars 1.41.2: the Annotated metadata
+    are the dtype's positional arguments (ALL required — wrong arity is a
+    pandera TypeError); a ``None`` literal takes the polars default.
+    """
+
+    def test_annotated_datetime_carries_unit(self):
+        assert _parse('Annotated[pl.Datetime, "ns", None]') == ColumnSpec(
+            Datetime(unit="ns"), required=True
+        )
+        assert _parse('Annotated[pl.Datetime, None, "UTC"]') == ColumnSpec(
+            Datetime(tz="UTC"), required=True
+        )
+
+    def test_annotated_datetime_non_literal_unit_degrades_to_unknown(self):
+        assert _parse('Annotated[pl.Datetime, UNIT, "UTC"]') == ColumnSpec(Unknown(), required=True)
+
+    def test_annotated_duration_carries_unit(self):
+        assert _parse('Annotated[pl.Duration, "ms"]') == ColumnSpec(
+            Duration(unit="ms"), required=True
+        )
+
+    def test_annotated_duration_wrong_arity_degrades_to_unknown(self):
+        assert _parse('Annotated[pl.Duration, "ms", "extra"]') == ColumnSpec(
+            Unknown(), required=True
+        )
+
+    def test_duration_call_form_carries_unit(self):
+        assert _parse('pl.Duration("ms")') == ColumnSpec(Duration(unit="ms"), required=True)
+        assert _parse('pl.Duration(time_unit="ns")') == ColumnSpec(
+            Duration(unit="ns"), required=True
+        )
+
+    def test_bare_duration_is_polars_default(self):
+        assert _parse("pl.Duration") == ColumnSpec(Duration(unit="us"), required=True)
+
+    def test_non_literal_duration_unit_degrades_to_unknown(self):
+        assert _parse("pl.Duration(UNIT)") == ColumnSpec(Unknown(), required=True)
+
+
+class TestAnnotatedDecimal:
+    """Issue #65: ``Annotated[pl.Decimal, p, s]`` was parsed as the bare
+    ``Decimal(38, 0)`` default, rejecting exactly-matching code."""
+
+    def test_annotated_decimal_carries_precision_and_scale(self):
+        assert _parse("Annotated[pl.Decimal, 12, 4]") == ColumnSpec(Decimal(12, 4), required=True)
+
+    def test_none_literal_takes_polars_default(self):
+        # Probed: ``Annotated[pl.Decimal, None, 4]`` -> Decimal(38, 4).
+        assert _parse("Annotated[pl.Decimal, None, 4]") == ColumnSpec(Decimal(38, 4), required=True)
+
+    def test_wrong_arity_degrades_to_unknown(self):
+        # Probed: pandera raises TypeError for the 1-arg form (requires
+        # all positional dtype arguments).
+        assert _parse("Annotated[pl.Decimal, 12]") == ColumnSpec(Unknown(), required=True)
+
+    def test_non_literal_args_degrade_to_unknown(self):
+        assert _parse("Annotated[pl.Decimal, P, S]") == ColumnSpec(Unknown(), required=True)
+
+
+class TestEnumCategories:
+    """Issue #67: Enum categories are an ordered part of dtype identity."""
+
+    def test_call_form_carries_ordered_categories(self):
+        assert _parse('pl.Enum(["a", "b"])') == ColumnSpec(
+            Enum(categories=("a", "b")), required=True
+        )
+
+    def test_category_order_is_identity(self):
+        assert _parse('pl.Enum(["a", "b"])') != _parse('pl.Enum(["b", "a"])')
+
+    def test_annotated_form_carries_categories(self):
+        # Probed: pandera builds Enum(categories=['a', 'b']) for this form.
+        assert _parse('Annotated[pl.Enum, ["a", "b"]]') == ColumnSpec(
+            Enum(categories=("a", "b")), required=True
+        )
+
+    def test_bare_and_non_literal_forms_keep_unknown_categories(self):
+        # Still provably SOME Enum — the categories=None wildcard, not
+        # Unknown (cross-class mismatches stay detectable).
+        assert _parse("pl.Enum") == ColumnSpec(Enum(), required=True)
+        assert _parse("pl.Enum(CATS)") == ColumnSpec(Enum(), required=True)
+        assert _parse("Annotated[pl.Enum, CATS]") == ColumnSpec(Enum(), required=True)
 
 
 class TestOptional:

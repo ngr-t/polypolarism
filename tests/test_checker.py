@@ -14,6 +14,9 @@ from polypolarism.checker import (
 )
 from polypolarism.types import (
     Array,
+    Datetime,
+    Duration,
+    Enum,
     Float64,
     FrameType,
     Int64,
@@ -2453,7 +2456,7 @@ class TestDiffTemporalEndToEnd:
         assert results[0].passed is False
         diffs = [e for e in results[0].errors if isinstance(e, TypeDifference)]
         assert len(diffs) == 1
-        assert "Duration?" in str(diffs[0])
+        assert "Duration[us]?" in str(diffs[0])
         assert "Date" not in str(diffs[0])
 
 
@@ -3266,3 +3269,67 @@ class TestArrayWidthVerdict:
         # coerce-tolerated (the List->Array cast is value-dependent).
         assert _is_coercible_difference(ListType(Int64()), Array(Int64(), 3)) is True
         assert _is_coercible_difference(Array(Int64(), 3), ListType(Int64())) is True
+
+
+class TestEnumCategoriesVerdict:
+    """Enum categories participate in the subtype verdict (issue #67).
+
+    Probed (polars 1.41.2): polars treats Enums with different category
+    sequences — different sets AND reorderings — as distinct dtypes, and
+    pandera validation rejects the mismatch; coerce cannot be relied on
+    (the Enum -> Enum cast is value-dependent on category membership).
+    Statically unknown categories on either side pass leniently
+    (ADR-0003 visibility), mirroring the unknown Array width.
+    """
+
+    def test_same_categories_pass_precisely(self):
+        verdict = _subtype_verdict(Enum(("a", "b")), Enum(("a", "b")))
+        assert verdict.ok and verdict.reason is None
+
+    def test_category_set_mismatch_fails(self):
+        assert not _subtype_verdict(Enum(("a", "c")), Enum(("a", "b"))).ok
+
+    def test_category_order_mismatch_fails(self):
+        assert not _subtype_verdict(Enum(("b", "a")), Enum(("a", "b"))).ok
+
+    def test_unknown_categories_pass_with_leniency_note(self):
+        for inferred, declared in (
+            (Enum(), Enum(("a", "b"))),
+            (Enum(("a", "b")), Enum()),
+        ):
+            verdict = _subtype_verdict(inferred, declared)
+            assert verdict.ok
+            assert verdict.reason is not None and "categories" in verdict.reason
+
+    def test_both_unknown_pass_silently(self):
+        # Mirrors Array(None) == Array(None): structural equality, no note.
+        verdict = _subtype_verdict(Enum(), Enum())
+        assert verdict.ok and verdict.reason is None
+
+    def test_nullable_widening_still_applies(self):
+        assert _subtype_verdict(Enum(("a", "b")), Nullable(Enum(("a", "b")))).ok
+        assert not _subtype_verdict(Nullable(Enum(("a", "b"))), Enum(("a", "b"))).ok
+
+    def test_coerce_cannot_fix_category_mismatch(self):
+        # Enum targets are value-dependent (issue #58 policy): coerce may
+        # fail on out-of-category values, so the difference stays an error.
+        assert _is_coercible_difference(Enum(("a", "c")), Enum(("a", "b"))) is False
+
+
+class TestTimeUnitVerdict:
+    """Datetime/Duration time units participate in dtype identity (issue #66)."""
+
+    def test_unit_mismatch_fails(self):
+        assert not _subtype_verdict(Datetime(unit="us"), Datetime(unit="ns")).ok
+        assert not _subtype_verdict(Duration(unit="us"), Duration(unit="ms")).ok
+
+    def test_same_unit_passes(self):
+        assert _subtype_verdict(Datetime(unit="ns"), Datetime(unit="ns")).ok
+
+    def test_coerce_repairs_coarsening_only(self):
+        # us -> ms divides (value-independent, probed); us -> ns multiplies
+        # and overflows for extreme values (probed InvalidOperationError).
+        assert _is_coercible_difference(Datetime(unit="us"), Datetime(unit="ms")) is True
+        assert _is_coercible_difference(Datetime(unit="us"), Datetime(unit="ns")) is False
+        assert _is_coercible_difference(Duration(unit="us"), Duration(unit="ms")) is True
+        assert _is_coercible_difference(Duration(unit="us"), Duration(unit="ns")) is False

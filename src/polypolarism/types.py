@@ -302,34 +302,45 @@ class Time(DataType):
 
 @dataclass(frozen=True)
 class Datetime(DataType):
-    """Datetime type with optional timezone."""
+    """Datetime type with optional timezone and a time unit (issue #66).
+
+    ``unit`` is one of ``"ms"`` / ``"us"`` / ``"ns"``; polars' own default
+    is ``"us"`` (bare ``pl.Datetime``, casts, ``str.to_datetime``, literals
+    — all probed). The unit participates in equality exactly like ``tz``:
+    pandera validation rejects a unit mismatch at runtime. There is no
+    "unknown unit" wildcard — statically unreadable units degrade to
+    ``Unknown`` at the parse sites instead.
+    """
 
     tz: str | None = None
+    unit: str = "us"
 
     def __eq__(self, other: object) -> bool:
-        return isinstance(other, Datetime) and self.tz == other.tz
+        return isinstance(other, Datetime) and self.tz == other.tz and self.unit == other.unit
 
     def __hash__(self) -> int:
-        return hash(("Datetime", self.tz))
+        return hash(("Datetime", self.tz, self.unit))
 
     def __str__(self) -> str:
         if self.tz:
-            return f"Datetime[{self.tz}]"
-        return "Datetime"
+            return f"Datetime[{self.unit}, {self.tz}]"
+        return f"Datetime[{self.unit}]"
 
 
 @dataclass(frozen=True)
 class Duration(DataType):
-    """Duration type."""
+    """Duration type with a time unit (issue #66; same model as Datetime)."""
+
+    unit: str = "us"
 
     def __eq__(self, other: object) -> bool:
-        return isinstance(other, Duration)
+        return isinstance(other, Duration) and self.unit == other.unit
 
     def __hash__(self) -> int:
-        return hash("Duration")
+        return hash(("Duration", self.unit))
 
     def __str__(self) -> str:
-        return "Duration"
+        return f"Duration[{self.unit}]"
 
 
 @dataclass(frozen=True)
@@ -372,20 +383,29 @@ class Enum(DataType):
     """Enum type (polars 1.25+ stabilized).
 
     Distinct from ``Categorical`` because the value space is fixed at
-    schema-declaration time. The analyzer treats every ``pl.Enum`` as
-    structurally equal to every other for now — the variant lists from
-    ``pa.Field(..., dtype_kwargs={"categories": [...]})`` are not yet
-    inspected.
+    schema-declaration time. ``categories`` is the ordered variant tuple
+    (issue #67) — polars treats Enums with different category *sequences*
+    as distinct dtypes (probed: ``pl.Enum(["a","b"]) != pl.Enum(["b","a"])``
+    and pandera validation rejects the order swap), so equality is exact
+    and order-sensitive. ``categories=None`` means "statically unknown"
+    (a bare ``pl.Enum`` reference or a non-literal category list);
+    structural equality is exact (``None != ("a",)``) and the wildcard
+    treatment of unknown categories lives in the checker's subtype
+    verdict, mirroring ``Array.width``.
     """
 
+    categories: tuple[str, ...] | None = None
+
     def __eq__(self, other: object) -> bool:
-        return isinstance(other, Enum)
+        return isinstance(other, Enum) and self.categories == other.categories
 
     def __hash__(self) -> int:
-        return hash("Enum")
+        return hash(("Enum", self.categories))
 
     def __str__(self) -> str:
-        return "Enum"
+        if self.categories is None:
+            return "Enum"
+        return f"Enum[{', '.join(repr(c) for c in self.categories)}]"
 
 
 @dataclass(frozen=True)

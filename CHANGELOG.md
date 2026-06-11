@@ -62,6 +62,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `Annotated[pl.Decimal, 12, 4]` schema annotations register the declared
+  precision/scale instead of the bare `Decimal(38, 0)` default, so
+  exactly-matching code is no longer rejected with `PLY033` and real
+  mismatches report the true declared dtype (issue #65; a `None` literal
+  takes the polars default, wrong arity — a pandera runtime TypeError —
+  degrades to `Unknown`).
+- `Datetime`/`Duration` now carry their `time_unit` (issue #66): a
+  declared `Datetime[ns]` over an inferred `Datetime[us]` (or
+  `Duration[ms]` over `Duration[us]`) is an error, matching pandera's
+  runtime SchemaError — both were silent false negatives while only the
+  tz was modeled. Units flow through inference per probed polars 1.41.2
+  semantics: mixed-unit arithmetic and `when/then` resolve to the
+  coarser unit, `diff` keeps the receiver's unit (Date is us-based, Time
+  ns-based), `str.to_datetime` honors `time_unit=` and the `%.3f`/`%.9f`
+  format directives, `pl.datetime_range` honors `time_unit=` and a
+  ns-bearing interval, and `dt.replace_time_zone`/`convert_time_zone`
+  preserve the receiver's unit. Under `Config.coerce` a unit *coarsening*
+  (us -> ms, a value-independent division) is tolerated; *refining*
+  (us -> ns) stays an error — the cast overflows for extreme values.
+  `Annotated[pl.Datetime, "ns", None]`, `Annotated[pl.Duration, "ms"]`
+  and the `pl.Duration("ms")` call form parse their unit.
+- `Enum` category tuples are compared (issue #67): an inferred
+  `Enum['a', 'c']` no longer satisfies a declared `Enum['a', 'b']` —
+  polars treats different category *sequences* (sets and reorderings
+  alike) as distinct dtypes and pandera rejects them at runtime.
+  `pl.Enum([...])` call forms and `Annotated[pl.Enum, [...]]` carry the
+  ordered categories; a bare `pl.Enum` or a non-literal category list
+  models as "some Enum, categories unknown" and acts as a wildcard with
+  a `via:` leniency note (mirroring unknown Array widths), while still
+  catching cross-dtype mismatches.
 - Numeric aggregations accept every numeric width (probed on polars
   1.41.2): Int8/Int16/UInt8/UInt16/Int128/UInt128/Float16 receivers were
   falsely rejected. Small-int `sum`/`product` infer Int64 (unsigned

@@ -31,13 +31,18 @@ from polypolarism.compat.polars_api import (
     LIST_NAMESPACE_ELEMENT_RETURN,
     LIST_NAMESPACE_PRESERVING,
     STR_NAMESPACE_RETURN,
+    TIME_UNITS,
     ContainerAggInvalid,
     agg_function_for,
     canonicalize_method,
+    coarser_time_unit,
     container_agg_return,
     parse_array_shape,
     parse_datetime_call,
     parse_decimal_call,
+    parse_duration_call,
+    parse_enum_call,
+    time_unit_refines,
 )
 from polypolarism.diagnostics import (
     PLW001,
@@ -213,11 +218,19 @@ def _resolve_pl_dtype(node: ast.expr) -> DataType | None:
             # the bare default, which would be a false-positive trap.
             if node.func.attr == "Decimal":
                 return parse_decimal_call(node)
-            # ``pl.Datetime("us", "UTC")`` preserves the time zone (shared
-            # parser in compat; issue #50). A non-literal time_zone is
-            # unknowable — unresolved (None), like Decimal above.
+            # ``pl.Datetime("us", "UTC")`` preserves the time unit and zone
+            # (shared parser in compat; issues #50/#66). A non-literal
+            # argument is unknowable — unresolved (None), like Decimal above.
             if node.func.attr == "Datetime":
                 return parse_datetime_call(node)
+            # ``pl.Duration("ms")`` preserves the time unit (issue #66).
+            if node.func.attr == "Duration":
+                return parse_duration_call(node)
+            # ``pl.Enum(["a", "b"])`` preserves the ordered category tuple
+            # (issue #67). A non-literal category list still provably
+            # constructs SOME Enum — categories=None, the checker wildcard.
+            if node.func.attr == "Enum":
+                return parse_enum_call(node)
             return _PL_DTYPE_NAME_MAP.get(node.func.attr)
     return None
 
@@ -234,12 +247,44 @@ _PY_BUILTIN_DTYPE_MAP: dict[str, DataType] = {
 
 # Eager range constructors usable as ``pl.DataFrame({...})`` dict values:
 # ``pl.<name>(..., eager=True)`` produces a Series of a fixed dtype.
+# ``datetime_range`` is argument-dependent (tz / unit) and resolved by the
+# dedicated branch in ``_frame_literal_value_dtype``; the entry documents
+# the no-argument default.
 _RANGE_CONSTRUCTOR_DTYPES: dict[str, DataType] = {
     "date_range": Date(),
     "datetime_range": Datetime(),
     "time_range": Time(),
     "int_range": Int64(),
 }
+
+
+def _datetime_range_unit(node: ast.Call) -> str | None:
+    """Time unit of ``pl.datetime_range(...)`` (issue #66).
+
+    The ``time_unit=`` keyword wins; otherwise polars derives ns from an
+    interval string containing "ns" and defaults to us (probed 1.41.2:
+    ``interval="1500ns"`` -> ns; ``"1us"`` / ``"1h"`` / the default
+    ``"1d"`` -> us). ``None`` means a non-literal argument made the unit
+    statically unknowable.
+    """
+    for kw in node.keywords:
+        if kw.arg == "time_unit":
+            if isinstance(kw.value, ast.Constant):
+                if kw.value.value is None:
+                    break  # explicit None — the interval decides
+                if isinstance(kw.value.value, str) and kw.value.value in TIME_UNITS:
+                    return kw.value.value
+            return None
+    interval_node: ast.expr | None = node.args[2] if len(node.args) > 2 else None
+    for kw in node.keywords:
+        if kw.arg == "interval":
+            interval_node = kw.value
+    if interval_node is None:
+        return "us"
+    interval = _str_constant(interval_node)
+    if interval is None:
+        return None  # a variable / timedelta object — unknowable
+    return "ns" if "ns" in interval else "us"
 
 
 def _resolve_schema_dtype(node: ast.expr) -> DataType:
@@ -326,17 +371,25 @@ def _frame_literal_value_dtype(
         range_dtype = _RANGE_CONSTRUCTOR_DTYPES.get(node.func.attr)
         if range_dtype is not None:
             # ``pl.datetime_range(..., time_zone="UTC", eager=True)`` is
-            # probed to yield a tz-aware Series (issue #50 collateral). A
-            # non-literal time_zone is unknowable -> Unknown.
+            # probed to yield a tz-aware Series (issue #50 collateral),
+            # with the unit from ``time_unit=`` / the interval (issue #66).
+            # A non-literal time_zone / time_unit / interval is unknowable
+            # -> Unknown.
             if node.func.attr == "datetime_range":
+                tz: str | None = None
                 for kw in node.keywords:
                     if kw.arg == "time_zone":
                         if isinstance(kw.value, ast.Constant):
                             if isinstance(kw.value.value, str):
-                                return Datetime(tz=kw.value.value)
+                                tz = kw.value.value
+                                continue
                             if kw.value.value is None:
-                                return Datetime()
+                                continue
                         return Unknown()
+                unit = _datetime_range_unit(node)
+                if unit is None:
+                    return Unknown()
+                return Datetime(tz=tz, unit=unit)
             return range_dtype
 
     if isinstance(node, ast.Constant) and (
@@ -480,48 +533,71 @@ def _numeric_arith(
     return _promote_or_none(left, right)
 
 
+def _datetime_plus_duration(dt: Datetime, dur: Duration) -> Datetime:
+    """``Datetime ± Duration`` keeps the Datetime's tz; mixed units resolve
+    to the coarser one (probed: Datetime[us] + Duration[ms] -> Datetime[ms],
+    every unit pair, both operand orders)."""
+    return Datetime(tz=dt.tz, unit=coarser_time_unit(dt.unit, dur.unit))
+
+
 def _temporal_arith(
     op: ast.operator, left: DataType, lcat: str, right: DataType, rcat: str
 ) -> DataType | object | None:
     """Arithmetic where at least one operand is Date/Datetime/Time/Duration.
 
     The non-temporal side can only be numeric or Boolean here (string pairs
-    are resolved before this is called).
+    are resolved before this is called). Time units (issue #66) follow the
+    probed mixed-unit rule: the coarser operand unit wins; ``Date`` carries
+    no unit and adopts the other operand's (Date - Date is ``us``,
+    Time - Time is ``ns`` — both probed on 1.41.2).
     """
     if isinstance(op, ast.Add):
         if lcat == "date" and rcat == "dur" or lcat == "dur" and rcat == "date":
             return Date()
         if lcat == "datetime" and rcat == "dur":
-            return left  # keep the operand instance — tz is preserved
+            assert isinstance(left, Datetime) and isinstance(right, Duration)
+            return _datetime_plus_duration(left, right)
         if lcat == "dur" and rcat == "datetime":
-            return right
+            assert isinstance(left, Duration) and isinstance(right, Datetime)
+            return _datetime_plus_duration(right, left)
         if lcat == "dur" and rcat == "dur":
-            return Duration()
+            assert isinstance(left, Duration) and isinstance(right, Duration)
+            return Duration(unit=coarser_time_unit(left.unit, right.unit))
         return _ARITH_INVALID  # Time+Duration errors too (verified)
     if isinstance(op, ast.Sub):
         if lcat in ("date", "datetime") and rcat in ("date", "datetime"):
             # Two Datetimes must agree on tz (probed: aware - naive and
             # UTC - Asia/Tokyo both raise SchemaError; issue #50). Date vs
             # tz-aware Datetime is probed-valid in either order.
-            if isinstance(left, Datetime) and isinstance(right, Datetime) and left.tz != right.tz:
-                return _ARITH_INVALID
-            return Duration()
+            if isinstance(left, Datetime) and isinstance(right, Datetime):
+                if left.tz != right.tz:
+                    return _ARITH_INVALID
+                return Duration(unit=coarser_time_unit(left.unit, right.unit))
+            # Date x Datetime[u] (either order) -> Duration[u]; Date x Date
+            # -> Duration[us] (both probed).
+            if isinstance(left, Datetime):
+                return Duration(unit=left.unit)
+            if isinstance(right, Datetime):
+                return Duration(unit=right.unit)
+            return Duration(unit="us")
         if lcat == "time" and rcat == "time":
-            return Duration()
+            return Duration(unit="ns")  # Time is ns-based (probed)
         if lcat == "date" and rcat == "dur":
             return Date()
         if lcat == "datetime" and rcat == "dur":
-            return left  # tz preserved
+            assert isinstance(left, Datetime) and isinstance(right, Duration)
+            return _datetime_plus_duration(left, right)
         if lcat == "dur" and rcat == "dur":
-            return Duration()
+            assert isinstance(left, Duration) and isinstance(right, Duration)
+            return Duration(unit=coarser_time_unit(left.unit, right.unit))
         return _ARITH_INVALID  # Duration-Date, Time-Duration, ... all error
     if isinstance(op, ast.Mult):
         if (lcat, rcat) in (("dur", "num"), ("num", "dur")):
-            return Duration()
+            return left if lcat == "dur" else right  # unit preserved (probed)
         return _ARITH_INVALID  # Duration*bool and Duration*Duration error
     if isinstance(op, ast.Div):
         if lcat == "dur" and rcat == "num":
-            return Duration()
+            return left  # unit preserved (probed)
         if lcat == "dur" and rcat == "dur":
             return Float64()
         return _ARITH_INVALID  # num/Duration, Duration/bool, Date/... error
@@ -890,7 +966,9 @@ _CAST_INVALID_PAIRS: frozenset[tuple[str, str]] = frozenset(
 #   datetime -> time (extraction), time -> dur (since midnight);
 # - any string is a valid Categorical category; Enum categories are
 #   strings;
-# - datetime -> datetime tz changes (issue #50; time_unit is not modeled).
+# - datetime -> datetime and duration -> duration changes are handled
+#   structurally in ``_cast_verdict`` (issues #50/#66): tz changes and
+#   unit coarsening are value-independent; unit refining is not.
 #
 # Deliberately absent: numeric -> numeric (narrowing overflows are
 # value-dependent — pandera coerce of Float64(-1e308) into Float32 is a
@@ -906,7 +984,6 @@ _CAST_ALWAYS_PAIRS: frozenset[tuple[str, str]] = frozenset(
     | {("bool", "int"), ("bool", "float"), ("int", "bool"), ("float", "bool")}
     | {("date", "datetime"), ("datetime", "date"), ("datetime", "time"), ("time", "dur")}
     | {("str", "cat"), ("enum", "cat")}
-    | {("datetime", "datetime")}
 )
 
 
@@ -970,6 +1047,21 @@ def _cast_verdict(source_inner: DataType, target_inner: DataType) -> CastVerdict
         return "value-dependent"
     if {scat, tcat} == {"list", "array"}:
         return "value-dependent"
+    if isinstance(source_inner, Datetime) and isinstance(target_inner, Datetime):
+        # tz changes are probed value-independent (issue #50). Unit changes
+        # (issue #66) are value-independent only toward a coarser-or-equal
+        # unit (a division); refining multiplies and overflows for extreme
+        # values (probed: Datetime[us] year 9999 -> ns raises
+        # InvalidOperationError strict / nulls non-strict).
+        if time_unit_refines(source_inner.unit, target_inner.unit):
+            return "value-dependent"
+        return "always"
+    if isinstance(source_inner, Duration) and isinstance(target_inner, Duration):
+        # Same unit rule as Datetime (probed: extreme Duration[ms] -> ns
+        # raises InvalidOperationError; coarsening always succeeds).
+        if time_unit_refines(source_inner.unit, target_inner.unit):
+            return "value-dependent"
+        return "always"
     if (scat, tcat) in _CAST_INVALID_PAIRS:
         return "never"
     if (scat, tcat) in _CAST_ALWAYS_PAIRS:
@@ -1235,15 +1327,16 @@ def _rolling_ddof_zero(
     return const_int(ddof_node) == 0
 
 
-def _time_zone_arg_dtype(method: str, call_node: ast.Call | None) -> DataType:
+def _time_zone_arg_dtype(method: str, call_node: ast.Call | None, receiver: Datetime) -> DataType:
     """Result dtype of ``dt.replace_time_zone(...)`` / ``dt.convert_time_zone(...)``
     on a Datetime receiver (issue #50 collateral).
 
     Probed (polars 1.41.2): both methods yield ``Datetime[arg]`` for naive
-    AND aware receivers; ``replace_time_zone(None)`` strips the tz;
-    ``convert_time_zone(None)`` raises TypeError at expression-construction
-    time ("argument 'time_zone': 'None' is not an instance of 'str'"), so
-    its silent Unknown is sound — no frame ever materializes.
+    AND aware receivers, preserving the receiver's time unit (issue #66);
+    ``replace_time_zone(None)`` strips the tz; ``convert_time_zone(None)``
+    raises TypeError at expression-construction time ("argument
+    'time_zone': 'None' is not an instance of 'str'"), so its silent
+    Unknown is sound — no frame ever materializes.
 
     A non-literal time_zone stays Unknown deliberately (backlog B-6): the
     result is always SOME Datetime (or naive, if a variable None reaches
@@ -1254,9 +1347,9 @@ def _time_zone_arg_dtype(method: str, call_node: ast.Call | None) -> DataType:
     tz_node = _call_arg(call_node, position=0, name="time_zone")
     if isinstance(tz_node, ast.Constant):
         if isinstance(tz_node.value, str):
-            return Datetime(tz=tz_node.value)
+            return Datetime(tz=tz_node.value, unit=receiver.unit)
         if tz_node.value is None and method == "replace_time_zone":
-            return Datetime()
+            return Datetime(unit=receiver.unit)
     return Unknown()
 
 
@@ -1268,37 +1361,62 @@ def _time_zone_arg_dtype(method: str, call_node: ast.Call | None) -> DataType:
 # UTC (probed), so a plain scan — not an escape-aware one — is faithful.
 _TZ_DIRECTIVE_RE = re.compile(r"%(?::{0,3}|#)z")
 
+# chrono fractional-second directives: %f / %.f / %3f / %.3f / %6f / %.6f /
+# %9f / %.9f. Probed (polars 1.41.2): the 3-digit forms resolve
+# ``str.to_datetime`` to Datetime[ms] and the 9-digit forms to Datetime[ns];
+# every other variant (and no directive at all) keeps the us default.
+_FRACTION_DIRECTIVE_RE = re.compile(r"%\.?([369])?f")
+_FRACTION_DIGIT_UNIT: dict[str | None, str] = {"3": "ms", "9": "ns"}
+
 
 def _str_to_datetime_dtype(call_node: ast.Call | None) -> DataType:
-    """Result dtype of ``str.to_datetime(...)`` (issue #50 collateral).
+    """Result dtype of ``str.to_datetime(...)`` (issues #50/#66 collateral).
 
     Probed (polars 1.41.2): no tz-affecting arguments -> naive Datetime;
     ``time_zone="X"`` (string literal) -> ``Datetime[X]``; a format literal
     containing an offset directive (``%z`` and its ``%:z`` / ``%::z`` /
-    ``%:::z`` / ``%#z`` variants) -> ``Datetime[UTC]``. A non-literal
-    ``time_zone`` / format degrades to Unknown: the result is always SOME
-    Datetime, but ``types.Datetime`` equality/subtyping is exact on tz and
-    has no "aware, tz unknown" wildcard, so claiming naive (or any
-    concrete tz) would be a guess.
+    ``%:::z`` / ``%#z`` variants) -> ``Datetime[UTC]``. The unit defaults
+    to us; ``time_unit=`` (string literal) wins, otherwise a fractional-
+    second format directive selects it (``%.3f`` -> ms, ``%.9f`` -> ns).
+    A non-literal ``time_zone`` / ``time_unit`` / format degrades to
+    Unknown: the result is always SOME Datetime, but ``types.Datetime``
+    equality/subtyping is exact on tz and unit and has no wildcard, so
+    claiming the defaults would be a guess.
     """
+    tz: str | None = None
+    tz_from_kw = False
+    unit: str | None = None
     if call_node is not None:
         for kw in call_node.keywords:
             if kw.arg == "time_zone":
                 if isinstance(kw.value, ast.Constant):
                     if isinstance(kw.value.value, str):
-                        return Datetime(tz=kw.value.value)
+                        tz = kw.value.value
+                        tz_from_kw = True
+                        continue
                     if kw.value.value is None:
-                        break  # explicit None — same as omitted
+                        continue  # explicit None — same as omitted
+                return Unknown()
+            if kw.arg == "time_unit":
+                if isinstance(kw.value, ast.Constant):
+                    if kw.value.value is None:
+                        continue  # explicit None — the format decides
+                    if isinstance(kw.value.value, str) and kw.value.value in TIME_UNITS:
+                        unit = kw.value.value
+                        continue
                 return Unknown()
     fmt_node = _call_arg(call_node, position=0, name="format")
-    if fmt_node is None:
-        return Datetime()
-    fmt = _str_constant(fmt_node)
-    if fmt is None:
-        return Unknown()
-    if _TZ_DIRECTIVE_RE.search(fmt):
-        return Datetime(tz="UTC")
-    return Datetime()
+    if fmt_node is not None:
+        fmt = _str_constant(fmt_node)
+        if fmt is None:
+            return Unknown()
+        if not tz_from_kw and _TZ_DIRECTIVE_RE.search(fmt):
+            tz = "UTC"
+        if unit is None:
+            match = _FRACTION_DIRECTIVE_RE.search(fmt)
+            if match is not None:
+                unit = _FRACTION_DIGIT_UNIT.get(match.group(1), "us")
+    return Datetime(tz=tz, unit=unit if unit is not None else "us")
 
 
 def _str_to_decimal_dtype(call_node: ast.Call | None) -> DataType:
@@ -2763,7 +2881,8 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 # These SET the tz — blanket receiver-preservation would
                 # claim the old tz and manufacture false positives now
                 # that tz mismatches are flagged (issue #50 collateral).
-                result = _time_zone_arg_dtype(method, call_node)
+                # The receiver's time unit is preserved (issue #66).
+                result = _time_zone_arg_dtype(method, call_node, receiver_inner)
             elif method in self._DT_RETURN:
                 result = self._DT_RETURN[method]
             elif method in self._DT_PRESERVING and receiver_inner is not None:
@@ -3552,13 +3671,19 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 # ``diff`` is a subtraction, not a dtype-preserving window
                 # (issue #46). Probed (polars 1.41.2): a temporal receiver
                 # (Date / Datetime — any tz — / Time / Duration) yields
-                # Duration; an unsigned-int receiver widens to the signed
-                # dtype of the next width (UInt8 -> Int16, UInt16 -> Int32,
+                # Duration, keeping the receiver's time unit (issue #66;
+                # Date is us-based and Time ns-based, both probed); an
+                # unsigned-int receiver widens to the signed dtype of the
+                # next width (UInt8 -> Int16, UInt16 -> Int32,
                 # UInt32 -> Int64, UInt64 -> Int64; UInt128 has no wider
                 # signed dtype and stays UInt128). Signed ints and floats
                 # keep their dtype — the generic wrap below.
-                if isinstance(inner, (Date, Datetime, Time, Duration)):
-                    return receiver_name, Nullable(Duration())
+                if isinstance(inner, (Datetime, Duration)):
+                    return receiver_name, Nullable(Duration(unit=inner.unit))
+                if isinstance(inner, Date):
+                    return receiver_name, Nullable(Duration(unit="us"))
+                if isinstance(inner, Time):
+                    return receiver_name, Nullable(Duration(unit="ns"))
                 widened = _DIFF_UNSIGNED_WIDENING.get(type(inner))
                 if widened is not None:
                     return receiver_name, Nullable(widened)

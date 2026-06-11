@@ -177,38 +177,120 @@ def parse_array_shape(node: ast.Call) -> int | None:
     return parse_int_shape(arg)
 
 
+# The three time units polars 1.x accepts for Datetime / Duration, ordered
+# coarse -> fine. Mixed-unit operations (arithmetic, when/then, concat)
+# resolve to the COARSER operand unit (probed 1.41.2: us + ns -> us,
+# ms + ns -> ms, in every operand order). Casting toward a coarser unit is
+# value-independent (a division); casting toward a finer unit multiplies
+# and overflows for extreme values (probed: Datetime[us] year 9999 -> ns
+# raises InvalidOperationError).
+TIME_UNITS: tuple[str, ...] = ("ms", "us", "ns")
+
+_TIME_UNIT_RANK: dict[str, int] = {u: i for i, u in enumerate(TIME_UNITS)}
+
+
+def coarser_time_unit(left: str, right: str) -> str:
+    """The coarser of two time units (the probed mixed-unit result)."""
+    return left if _TIME_UNIT_RANK[left] <= _TIME_UNIT_RANK[right] else right
+
+
+def time_unit_refines(source: str, target: str) -> bool:
+    """True when casting ``source -> target`` moves to a finer unit
+    (multiplication — overflows for extreme values, hence value-dependent)."""
+    return _TIME_UNIT_RANK[target] > _TIME_UNIT_RANK[source]
+
+
+def parse_time_unit(node: ast.expr | None) -> str | None:
+    """One time_unit argument: ``None`` literal / omitted -> polars' "us"
+    default; a literal in TIME_UNITS -> itself; anything else (a variable,
+    an invalid literal) -> ``None`` for "not statically readable"."""
+    if node is None:
+        return "us"
+    if isinstance(node, ast.Constant):
+        if node.value is None:
+            return "us"
+        if isinstance(node.value, str) and node.value in TIME_UNITS:
+            return node.value
+    return None
+
+
 def parse_datetime_call(node: ast.Call) -> Datetime | None:
     """Parse a ``pl.Datetime(...)`` call form into a ``Datetime`` dtype.
 
     Shared by the analyzer (``cast`` targets, ``schema=`` dicts) and
-    ``pandera_dtype`` (schema field annotations) — issue #50. The polars
-    signature is ``pl.Datetime(time_unit="us", time_zone=None)``;
-    ``time_unit`` is not modeled (the ``Datetime`` dtype only carries
-    ``tz``), so only the second positional argument / ``time_zone=``
-    keyword matters. A string literal sets the tz; an omitted argument or
-    an explicit ``None`` literal is tz-naive (polars' own default).
+    ``pandera_dtype`` (schema field annotations) — issues #50 / #66. The
+    polars signature is ``pl.Datetime(time_unit="us", time_zone=None)``:
+    the first positional argument / ``time_unit=`` keyword sets the unit
+    (omitted or an explicit ``None`` literal -> polars' "us" default), the
+    second positional argument / ``time_zone=`` keyword sets the tz (a
+    string literal; omitted or ``None`` -> tz-naive).
 
-    Returns ``None`` when a time_zone argument is present but not
-    statically readable (a variable, a ``timezone`` object, ...): the tz is
-    unknowable and each caller picks its own fallback (the analyzer
-    degrades to unresolved; ``pandera_dtype`` uses ``Unknown``). Claiming
-    tz-naive would be a false-positive trap now that tz mismatches are
-    flagged.
+    Returns ``None`` when either argument is present but not statically
+    readable (a variable, a ``timezone`` object, an invalid unit literal):
+    the dtype is unknowable and each caller picks its own fallback (the
+    analyzer degrades to unresolved; ``pandera_dtype`` uses ``Unknown``).
+    Claiming the default would be a false-positive trap now that tz and
+    unit mismatches are flagged.
     """
+    unit_node: ast.expr | None = node.args[0] if node.args else None
     tz_node: ast.expr | None = None
     if len(node.args) >= 2:
         tz_node = node.args[1]
     for kw in node.keywords:
+        if kw.arg == "time_unit":
+            unit_node = kw.value
         if kw.arg == "time_zone":
             tz_node = kw.value
+    unit = parse_time_unit(unit_node)
+    if unit is None:
+        return None
     if tz_node is None:
-        return Datetime()
+        return Datetime(unit=unit)
     if isinstance(tz_node, ast.Constant):
         if tz_node.value is None:
-            return Datetime()
+            return Datetime(unit=unit)
         if isinstance(tz_node.value, str):
-            return Datetime(tz=tz_node.value)
+            return Datetime(tz=tz_node.value, unit=unit)
     return None
+
+
+def parse_duration_call(node: ast.Call) -> Duration | None:
+    """Parse a ``pl.Duration(...)`` call form into a ``Duration`` dtype
+    (issue #66; signature ``pl.Duration(time_unit="us")``). ``None`` when
+    the unit argument is present but not statically readable."""
+    unit_node: ast.expr | None = node.args[0] if node.args else None
+    for kw in node.keywords:
+        if kw.arg == "time_unit":
+            unit_node = kw.value
+    unit = parse_time_unit(unit_node)
+    if unit is None:
+        return None
+    return Duration(unit=unit)
+
+
+def parse_enum_call(node: ast.Call) -> Enum:
+    """Parse a ``pl.Enum([...])`` call form into an ``Enum`` dtype (issue #67).
+
+    The category list is the first positional argument or the
+    ``categories=`` keyword; a list/tuple literal of string constants
+    yields the ordered category tuple. Anything else (a variable, a
+    ``pl.Series``, mixed elements) is statically unreadable — the result
+    is ``Enum(categories=None)``, the "some Enum, categories unknown"
+    wildcard (the call still provably constructs an Enum, so degrading
+    all the way to Unknown would lose precision). Total — never ``None``.
+    """
+    cats_node: ast.expr | None = node.args[0] if node.args else None
+    for kw in node.keywords:
+        if kw.arg == "categories":
+            cats_node = kw.value
+    if isinstance(cats_node, (ast.List, ast.Tuple)):
+        cats: list[str] = []
+        for elt in cats_node.elts:
+            if not (isinstance(elt, ast.Constant) and isinstance(elt.value, str)):
+                return Enum()
+            cats.append(elt.value)
+        return Enum(categories=tuple(cats))
+    return Enum()
 
 
 # Single source of truth for ``pl.<Name>`` attribute → DataType. Both the

@@ -550,6 +550,22 @@ class TestSupertype:
         assert supertype(Decimal(10, 2), Decimal(10, 2)) == Decimal(10, 2)
         assert supertype(Struct({"f": Int64()}), Struct({"f": Int64()})) == Struct({"f": Int64()})
 
+    def test_mixed_time_units_resolve_to_coarser(self) -> None:
+        # Probed (polars 1.41.2, issue #66): when/then of Datetime[ms] vs
+        # Datetime[ns] -> Datetime[ms]; same rule for Duration pairs. A tz
+        # mismatch still fails regardless of units.
+        assert supertype(Datetime(unit="ms"), Datetime(unit="ns")) == Datetime(unit="ms")
+        assert supertype(Datetime(unit="ns"), Datetime(unit="us")) == Datetime(unit="us")
+        assert supertype(Datetime(tz="UTC", unit="ms"), Datetime(tz="UTC", unit="ns")) == Datetime(
+            tz="UTC", unit="ms"
+        )
+        assert supertype(Duration(unit="ms"), Duration(unit="ns")) == Duration(unit="ms")
+        assert supertype(Datetime(tz="UTC", unit="ms"), Datetime(unit="ns")) is None
+
+    def test_date_vs_datetime_keeps_datetime_unit(self) -> None:
+        # Probed: when/then Date vs Datetime[ns] -> Datetime[ns].
+        assert supertype(Date(), Datetime(unit="ns")) == Datetime(unit="ns")
+
 
 class TestInferShiftFill:
     """Probed dtype rules for ``Expr.shift(n, fill_value=...)`` (issue #43).

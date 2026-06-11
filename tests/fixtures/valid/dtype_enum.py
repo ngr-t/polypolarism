@@ -1,13 +1,14 @@
 """Valid fixture: ``pl.Enum`` (polars 1.25+ stabilized) as a Pandera schema dtype.
 
 Exercises landmark version 1.25 — ``Enum`` becoming a stable dtype
-distinct from ``Categorical``. The analyzer treats every ``pl.Enum`` as
-structurally equal for now; the variant list is not yet inspected (a
-future enhancement when we model `Enum(["a", "b"])` calls explicitly).
-``priority`` keeps the bare class form; ``status`` carries categories
-because a *cast* target must — ``cast(pl.Enum)`` without categories is
-``Enum([])`` at runtime and raises ``InvalidOperationError`` for every
-non-null value (probed on polars 1.41.2).
+distinct from ``Categorical``. ``Enum(["a", "b"])`` calls carry their
+ordered category tuple (issue #67; mismatches are flagged — see
+``invalid/dtype_enum_categories.py``). ``priority`` keeps the bare class
+form, which models as "some Enum, categories statically unknown" — a
+checker wildcard; ``status`` carries categories because a *cast* target
+must — ``cast(pl.Enum)`` without categories is ``Enum([])`` at runtime
+and raises ``InvalidOperationError`` for every non-null value (probed on
+polars 1.41.2).
 """
 
 import pandera.polars as pa

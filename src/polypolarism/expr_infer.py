@@ -2,6 +2,7 @@
 
 from typing import Any
 
+from polypolarism.compat.polars_api import coarser_time_unit
 from polypolarism.types import (
     Array,
     Binary,
@@ -447,9 +448,18 @@ def _supertype_base(left: DataType, right: DataType) -> DataType | None:
             return right
         if isinstance(left, Datetime) and isinstance(right, Date):
             return left
+        # Same-tz Datetime pairs and Duration pairs resolve mixed time
+        # units to the coarser one (probed 1.41.2: when/then of
+        # Datetime[ms] vs Datetime[ns] -> Datetime[ms]; issue #66).
+        if isinstance(left, Datetime) and isinstance(right, Datetime):
+            if left.tz != right.tz:
+                return None  # probed SchemaError (issue #50)
+            return Datetime(tz=left.tz, unit=coarser_time_unit(left.unit, right.unit))
+        if isinstance(left, Duration) and isinstance(right, Duration):
+            return Duration(unit=coarser_time_unit(left.unit, right.unit))
         # Equal pairs were handled above; what remains is probed to fail:
-        # Datetime tz mismatch, Date/Time, Time/Datetime and every
-        # Duration/other-temporal pairing.
+        # Date/Time, Time/Datetime and every Duration/other-temporal
+        # pairing.
         return None
     if l_temporal or r_temporal:
         temp, other = (left, right) if l_temporal else (right, left)

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from polypolarism.analyzer import FunctionAnalysis, _cast_verdict, analyze_source
-from polypolarism.types import NUMERIC_DTYPES, Array, DataType, List, Nullable, Unknown
+from polypolarism.types import NUMERIC_DTYPES, Array, DataType, Enum, List, Nullable, Unknown
 
 
 class TypeMismatch:
@@ -149,6 +149,19 @@ def _subtype_verdict(inferred: DataType, declared: DataType) -> Verdict:
 
     inferred_base = _get_base_type(inferred)
     declared_base = _get_base_type(declared)
+
+    # Enum categories are part of dtype identity (issue #67): polars and
+    # pandera reject a category-sequence mismatch at runtime, so two
+    # concrete category tuples must be exactly equal (order included).
+    # A statically-unknown side (``categories=None`` — a bare ``pl.Enum``
+    # reference or a non-literal list) is a wildcard, surfaced as a
+    # leniency note like the unknown Array width below.
+    if isinstance(inferred_base, Enum) and isinstance(declared_base, Enum):
+        if inferred_base.categories is None or declared_base.categories is None:
+            if inferred_base.categories == declared_base.categories:
+                return Verdict(True)  # both unknown — nothing to compare
+            return Verdict(True, "passed via unknown Enum categories")
+        return Verdict(inferred_base.categories == declared_base.categories)
 
     # List / Array containers: compare element types with the same rules so
     # the Unknown leniency reaches nested dtypes. Array vs List falls

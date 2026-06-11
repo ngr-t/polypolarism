@@ -2561,22 +2561,33 @@ class TestDiffTemporalAndUnsigned:
 
     Probed (polars 1.41.2):
     - Date.diff / Datetime.diff (any tz) / Time.diff / Duration.diff
-      -> Duration (nullable: head slot is null)
+      -> Duration (nullable: head slot is null), keeping the receiver's
+      time unit (issue #66) — Date is us-based, Time ns-based
     - UInt8.diff -> Int16, UInt16.diff -> Int32, UInt32.diff -> Int64,
       UInt64.diff -> Int64; UInt128.diff stays UInt128
     - signed ints / floats keep their dtype (Int8 -> Int8, Float32 -> Float32)
     """
 
     @pytest.mark.parametrize(
-        "receiver",
-        [Date(), Datetime(), Datetime(tz="UTC"), Time(), Duration()],
-        ids=["date", "datetime", "datetime_tz", "time", "duration"],
+        ("receiver", "expected_unit"),
+        [
+            (Date(), "us"),
+            (Datetime(), "us"),
+            (Datetime(tz="UTC"), "us"),
+            (Datetime(unit="ns"), "ns"),
+            (Time(), "ns"),
+            (Duration(), "us"),
+            (Duration(unit="ms"), "ms"),
+        ],
+        ids=["date", "datetime", "datetime_tz", "datetime_ns", "time", "duration", "duration_ms"],
     )
-    def test_temporal_diff_is_nullable_duration(self, receiver):
+    def test_temporal_diff_is_nullable_duration(self, receiver, expected_unit):
         frame = FrameType({"t": receiver})
         analyzer = _run_body(frame, 'out = df.select(d=pl.col("t").diff())')
         assert analyzer.errors == []
-        assert analyzer.var_types["out"].columns["d"].dtype == Nullable(Duration())
+        assert analyzer.var_types["out"].columns["d"].dtype == Nullable(
+            Duration(unit=expected_unit)
+        )
 
     def test_nullable_temporal_diff_is_nullable_duration(self):
         frame = FrameType({"t": Nullable(Date())})
@@ -6393,13 +6404,14 @@ class TestArithmeticIncompatibleDtypes:
             ("pl.col('i') / pl.col('b')", Float64()),
             ("pl.col('b') // pl.col('i')", Int64()),
             ("pl.col('b') % pl.col('i')", Int64()),
-            # temporal differences -> Duration
+            # temporal differences -> Duration (Date is us-based, Time
+            # ns-based — issue #66)
             ("pl.col('d') - pl.col('d')", Duration()),
             ("pl.col('d') - pl.col('dt')", Duration()),
             ("pl.col('dt') - pl.col('d')", Duration()),
             ("pl.col('dt') - pl.col('dt')", Duration()),
             ("pl.col('tz') - pl.col('tz')", Duration()),
-            ("pl.col('t') - pl.col('t')", Duration()),
+            ("pl.col('t') - pl.col('t')", Duration(unit="ns")),
             # date/datetime shifted by a duration
             ("pl.col('d') + pl.col('du')", Date()),
             ("pl.col('du') + pl.col('d')", Date()),
@@ -10561,13 +10573,25 @@ class TestResolvePlDtypeDatetime:
     def test_explicit_none_tz_is_naive(self):
         assert self._resolve('pl.Datetime("us", None)') == Datetime()
 
-    def test_time_unit_only_is_naive(self):
-        assert self._resolve('pl.Datetime("ms")') == Datetime()
+    def test_time_unit_is_tracked(self):
+        # Issue #66: the unit participates in dtype identity.
+        assert self._resolve('pl.Datetime("ms")') == Datetime(unit="ms")
+        assert self._resolve('pl.Datetime(time_unit="ns")') == Datetime(unit="ns")
 
     def test_non_literal_tz_is_unresolved(self):
         # A variable time zone is unknowable; claiming naive would be a
         # false-positive trap now that tz mismatches are flagged.
         assert self._resolve("pl.Datetime(time_zone=tz)") is None
+
+    def test_non_literal_time_unit_is_unresolved(self):
+        # Same rule for the unit (issue #66).
+        assert self._resolve("pl.Datetime(unit_var)") is None
+
+    def test_duration_call_carries_unit(self):
+        # Issue #66: ``pl.Duration("ms")`` call form.
+        assert self._resolve('pl.Duration("ms")') == Duration(unit="ms")
+        assert self._resolve("pl.Duration()") == Duration()
+        assert self._resolve("pl.Duration(unit_var)") is None
 
     def test_cast_target_carries_tz(self):
         # End-to-end: ``cast(pl.Datetime("us", "UTC"))`` pins the tz-aware

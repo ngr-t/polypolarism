@@ -1,5 +1,5 @@
 enum_declared_categorical: FAIL
-  error: Column 'status' has type Enum, but declared type is Categorical
+  error: Column 'status' has type Enum['new', 'paid'], but declared type is Categorical
 float16_declared_float32: FAIL
   error: Column 'embedding_dim_0' has type Float16, but declared type is Float32
 int128_declared_int64: FAIL

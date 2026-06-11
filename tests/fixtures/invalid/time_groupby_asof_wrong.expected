@@ -3,5 +3,5 @@ dynamic_agg_wrong_dtype: FAIL
 asof_nonnullable_declared: FAIL
   error: Column 'bid' has type Float64?, but declared type is Float64
 asof_key_dtype_mismatch: FAIL
-  error: [PLY010] Join key dtype mismatch: left 'ts' is Datetime, right 'ts' is Date
+  error: [PLY010] Join key dtype mismatch: left 'ts' is Datetime[us], right 'ts' is Date
   error: Could not infer return type

@@ -45,6 +45,7 @@ from polypolarism.types import (
     Date,
     Datetime,
     Duration,
+    Enum,
     Float32,
     Float64,
     FrameType,
@@ -84,8 +85,18 @@ _SIMPLE: tuple[DataType, ...] = (
     Time(),
     Datetime(),
     Datetime(tz="UTC"),
+    Datetime(unit="ns"),
+    Datetime(tz="UTC", unit="ms"),
     Duration(),
+    Duration(unit="ms"),
     Categorical(),
+    # Concrete category tuples only (issue #67): the categories=None
+    # wildcard relates to EVERY concrete Enum in both directions (a
+    # gradual-consistency rule like Unknown / the unknown Array width),
+    # which is deliberately not antisymmetric — keep it out of the order
+    # laws, mirroring how Array widths never mix here.
+    Enum(categories=("a", "b")),
+    Enum(categories=("b", "a")),
 )
 
 

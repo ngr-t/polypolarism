@@ -10,10 +10,18 @@ Recognised annotation shapes:
 - ``Annotated[pl.List, pl.Int64()]`` -> ``List(Int64())``
 - ``Annotated[pl.Array, pl.Int64(), 3]`` -> ``Array(Int64(), 3)`` (width tracked; C-7)
 - ``Annotated[pl.Struct, {"a": pl.Utf8(), "b": pl.Float64()}]`` -> ``Struct({...})``
+- Parametrized scalars, Annotated form (pandera passes the metadata as the
+  dtype's positional arguments and requires all of them):
+  ``Annotated[pl.Datetime, "ns", None]`` -> ``Datetime(unit="ns")`` (#66),
+  ``Annotated[pl.Duration, "ms"]`` -> ``Duration("ms")`` (#66),
+  ``Annotated[pl.Decimal, 12, 4]`` -> ``Decimal(12, 4)`` (#65),
+  ``Annotated[pl.Enum, ["a", "b"]]`` -> ``Enum(("a", "b"))`` (#67).
 - Call-form containers: ``pl.List(pl.Int64)`` -> ``List(Int64())``,
   ``pl.Array(pl.Int64, 4)`` -> ``Array(Int64(), 4)`` (width tracked; C-7),
   ``pl.Struct({"a": pl.Utf8})`` -> ``Struct({...})``. Unparseable element /
   field dtypes fall back to ``Unknown()``.
+- Call-form parametrized scalars: ``pl.Decimal(12, 4)``,
+  ``pl.Datetime("ns")``, ``pl.Duration("ms")``, ``pl.Enum(["a", "b"])``.
 - Bare containers: ``pl.List`` -> ``List(Unknown())``; ``pl.Array`` ->
   ``Array(Unknown())``; ``pl.Struct`` -> ``Unknown()`` (a struct without
   field info has no usable shape — ``Struct({})`` would wrongly mean
@@ -34,7 +42,10 @@ from polypolarism.compat.polars_api import (
     parse_array_shape,
     parse_datetime_call,
     parse_decimal_call,
+    parse_duration_call,
+    parse_enum_call,
     parse_int_shape,
+    parse_time_unit,
 )
 from polypolarism.types import (
     Array,
@@ -44,7 +55,9 @@ from polypolarism.types import (
     DataType,
     Date,
     Datetime,
+    Decimal,
     Duration,
+    Enum,
     Float64,
     Int64,
     List,
@@ -190,12 +203,21 @@ def _parse_plain_dtype(node: ast.expr) -> DataType | None:
             if decimal_dt is not None:
                 return decimal_dt
         # ``pl.Datetime("us", "UTC")`` / ``pl.Datetime(time_zone=...)``
-        # preserves the time zone (shared parser in compat; issue #50).
-        # A non-literal time_zone argument is unknowable — degrade to
-        # ``Unknown`` rather than claiming tz-naive.
+        # preserves the time unit and zone (shared parser in compat;
+        # issues #50/#66). A non-literal argument is unknowable — degrade
+        # to ``Unknown`` rather than claiming the defaults.
         if _is_pl_attr(node.func, "Datetime"):
             datetime_dt = parse_datetime_call(node)
             return datetime_dt if datetime_dt is not None else Unknown()
+        # ``pl.Duration("ms")`` preserves the time unit (issue #66).
+        if _is_pl_attr(node.func, "Duration"):
+            duration_dt = parse_duration_call(node)
+            return duration_dt if duration_dt is not None else Unknown()
+        # ``pl.Enum(["a", "b"])`` preserves the ordered category tuple
+        # (issue #67); a non-literal category list keeps the Enum with
+        # unknown categories (the checker treats that as a wildcard).
+        if _is_pl_attr(node.func, "Enum"):
+            return parse_enum_call(node)
         return _parse_plain_dtype(node.func)
 
     return None
@@ -282,19 +304,70 @@ def _parse_annotated(node: ast.expr) -> tuple[DataType, bool] | None:
         return Struct(fields), True
 
     # ``Annotated[pl.Datetime, "us", "UTC"]`` — pandera passes the metadata
-    # as the dtype's positional arguments (probed: this form enforces UTC).
-    # Anything other than the full 2-arg form with a literal time zone is
-    # either a pandera TypeError at runtime (probed for the 1-arg form:
-    # "requires all positional arguments") or unknowable — ``Unknown``.
+    # as the dtype's positional arguments and requires ALL of them (probed:
+    # the 1-arg form is a pandera TypeError "requires all positional
+    # arguments"). meta[0] is the time unit (issue #66), meta[1] the time
+    # zone (issue #50); a ``None`` literal takes the polars default.
+    # Anything else (wrong arity, non-literal arguments) is either that
+    # runtime TypeError or unknowable — ``Unknown``.
     if _is_pl_attr(head, "Datetime") and meta:
         if len(meta) == 2 and isinstance(meta[1], ast.Constant):
-            if meta[1].value is None:
-                return Datetime(), True
-            if isinstance(meta[1].value, str):
-                return Datetime(tz=meta[1].value), True
+            unit = parse_time_unit(meta[0])
+            if unit is not None:
+                if meta[1].value is None:
+                    return Datetime(unit=unit), True
+                if isinstance(meta[1].value, str):
+                    return Datetime(tz=meta[1].value, unit=unit), True
         return Unknown(), True
 
+    # ``Annotated[pl.Duration, "ms"]`` — the single positional argument is
+    # the time unit (issue #66; probed against pandera 0.31.1).
+    if _is_pl_attr(head, "Duration") and meta:
+        if len(meta) == 1:
+            unit = parse_time_unit(meta[0])
+            if unit is not None:
+                return Duration(unit=unit), True
+        return Unknown(), True
+
+    # ``Annotated[pl.Decimal, 12, 4]`` — precision and scale, both required
+    # by pandera (issue #65; probed: the 1-arg form is a TypeError, a
+    # ``None`` literal takes the polars default — ``Annotated[pl.Decimal,
+    # None, 4]`` -> Decimal(38, 4)).
+    if _is_pl_attr(head, "Decimal") and meta:
+        if len(meta) == 2:
+            precision = _decimal_annotated_arg(meta[0], default=38)
+            scale = _decimal_annotated_arg(meta[1], default=0)
+            if precision is not None and scale is not None:
+                return Decimal(precision, scale), True
+        return Unknown(), True
+
+    # ``Annotated[pl.Enum, ["a", "b"]]`` — the single positional argument
+    # is the category list (issue #67; probed: pandera builds
+    # ``Enum(categories=['a', 'b'])``). An unreadable list keeps the Enum
+    # with unknown categories — the declared slot is provably SOME Enum.
+    if _is_pl_attr(head, "Enum") and meta:
+        if len(meta) == 1 and isinstance(meta[0], (ast.List, ast.Tuple)):
+            cats: list[str] = []
+            for elt in meta[0].elts:
+                if not (isinstance(elt, ast.Constant) and isinstance(elt.value, str)):
+                    return Enum(), True
+                cats.append(elt.value)
+            return Enum(categories=tuple(cats)), True
+        return Enum(), True
+
     return _parse_dtype_expr(head)
+
+
+def _decimal_annotated_arg(node: ast.expr, *, default: int) -> int | None:
+    """One ``Annotated[pl.Decimal, ...]`` metadata element: an int literal,
+    or a ``None`` literal standing for the polars default. Non-literals are
+    statically unreadable -> ``None``."""
+    if isinstance(node, ast.Constant):
+        if node.value is None:
+            return default
+        if isinstance(node.value, int) and not isinstance(node.value, bool):
+            return node.value
+    return None
 
 
 def _is_pl_attr(node: ast.expr, attr: str) -> bool:
