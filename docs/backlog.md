@@ -46,12 +46,26 @@ Status legend: `[ ]` open / `[x]` done / `[-]` deliberately deferred.
 ## N. Discovered while working the backlog (2026-06-11)
 
 - [ ] **N-1: Variable annotation contradicting an inferable RHS passes
-  silently (false negative).** `visit_AnnAssign`
-  (`src/polypolarism/analyzer.py`, ~3853) lets the annotation win
-  unconditionally: `x: DataFrame[A] = df.select(...)` where the select
-  infers B≠A produces zero diagnostics. Design question to settle first:
-  is the annotation a *checked* declaration (error/warn on contradiction)
-  or a trusted assertion like validate-narrowing? Deserves an ADR.
+  silently (false negative).** Decided in **ADR-0005** (two-direction
+  rule: narrowing assertions allowed with PLW008; unrelated
+  contradictions are PLY033 errors; annotation still wins downstream).
+  Sub-tasks:
+  - [ ] **N-1a (案1)**: PLW008 on every provable annotation/inference
+    contradiction (warn-only phase). Comparison via the checker verdict
+    engine (Unknown/open-frame/coerce leniency — pivot annotations stay
+    silent). Warning fixture + golden; README PLW table row.
+  - [ ] **N-1b (案3)**: classify by the reverse direction — pure
+    narrowing (declared <: inferred, incl. optional→required) keeps
+    PLW008 with a `Schema.validate` remedy; neither-direction
+    (unrelated dtype, provably-absent column, strict extras, eager/lazy)
+    becomes PLY033. README PLY table row.
+  - [ ] **N-1c**: fixtures — invalid twin for the contradiction
+    (resolves the `variable_annotation` known gap in
+    tests/fixtures/README.md) + warning fixture for narrowing; runtime
+    differential SKIP entry (annotations are inert at runtime, same
+    family as the PLY032 skip).
+  - [ ] **N-1d**: docs — CHANGELOG entries; fixtures README pair-audit
+    update; close this item.
 - [ ] **N-2: rolling_mean/std/var/median/quantile on Float32 infer Float64
   (wrong width, false positive).** Probed (polars 1.41.2): these return
   **Float32** on a Float32 receiver. Affects literal-arg calls too — a
