@@ -2926,3 +2926,80 @@ class TestIssue55ListSumOnStringsEndToEnd:
 
         assert len(results) == 1
         assert results[0].passed is True, results[0].errors
+
+
+class TestIssue56NameNamespaceEndToEnd:
+    """Issue #56 repro: ``.name.*`` chains previously failed with
+    'Could not infer return type'."""
+
+    HEADER = textwrap.dedent("""
+        import polars as pl
+        import pandera.polars as pa
+        from pandera.typing.polars import DataFrame
+
+        class In(pa.DataFrameModel):
+            a: int
+            b: str
+
+            class Config:
+                strict = True
+    """)
+
+    def test_pl_all_prefix_against_strict_schema_passes(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            class PreO(pa.DataFrameModel):
+                pre_a: int
+                pre_b: str
+
+                class Config:
+                    strict = True
+
+            @pa.check_types
+            def add_prefix(df: DataFrame[In]) -> DataFrame[PreO]:
+                return df.select(pl.all().name.prefix("pre_"))
+            """
+        )
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is True, results[0].errors
+        assert results[0].errors == []
+
+    def test_prefix_wrong_declared_name_fails(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            class Wrong(pa.DataFrameModel):
+                a: int
+                pre_b: str
+
+            @pa.check_types
+            def add_prefix(df: DataFrame[In]) -> DataFrame[Wrong]:
+                return df.select(pl.all().name.prefix("pre_"))
+            """
+        )
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is False
+        assert any("a" in str(e) for e in results[0].errors), results[0].errors
+
+    def test_name_map_degrades_gracefully(self):
+        # Unknowable output names: the frame opens instead of failing with
+        # 'Could not infer return type'; PLW004 points at the callable.
+        source = self.HEADER + textwrap.dedent(
+            """
+            class Mapped(pa.DataFrameModel):
+                A: int
+                B: str
+
+            @pa.check_types
+            def upper_names(df: DataFrame[In]) -> DataFrame[Mapped]:
+                return df.select(pl.all().name.map(lambda c: c.upper()))
+            """
+        )
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is True, results[0].errors
+        assert any("PLW004" in str(w) for w in results[0].warnings), results[0].warnings

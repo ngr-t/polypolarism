@@ -10034,3 +10034,236 @@ class TestBytesLiterals:
     def test_frame_literal_bytes_mixed_with_str_is_unknown(self) -> None:
         analyzer = _run_body(FrameType({}), "out = pl.DataFrame({'b': [b'x', 'y']})")
         assert analyzer.var_types["out"].columns["b"].dtype == Unknown()
+
+
+class TestNameNamespace:
+    """Issue #56: ``.name.*`` manipulates OUTPUT column names (and struct
+    FIELD names) — the dtype is never changed.
+
+    Probed on polars 1.41.2: ``prefix`` / ``suffix`` / ``to_uppercase`` /
+    ``to_lowercase`` apply to the expression's CURRENT output name (an
+    earlier ``.alias`` included); ``keep`` restores the chain's ROOT
+    column name, overriding any earlier ``.alias``; a trailing ``.alias``
+    after a name transform wins; ``prefix_fields`` / ``suffix_fields``
+    rename Struct FIELD names (output name unchanged).
+    """
+
+    HEADER = textwrap.dedent(
+        PANDERA_HEADER
+        + """
+            import polars.selectors as cs
+
+            class In(pa.DataFrameModel):
+                a: int
+                b: str
+                n: float = pa.Field(nullable=True)
+        """
+    )
+
+    def _frame(self, body: str, *, expect_errors: bool = False):
+        source = self.HEADER + textwrap.dedent(
+            f"""
+            def f(df: DataFrame[In]):
+                return {body}
+            """
+        )
+        results = analyze_source(source)
+        if not expect_errors:
+            assert results[0].errors == [], (body, results[0].errors)
+        return results[0]
+
+    def _columns(self, body: str):
+        ft = self._frame(body).inferred_return_type
+        assert ft is not None, body
+        return {name: spec.dtype for name, spec in ft.columns.items()}
+
+    # -- single-expression name transforms ------------------------------
+
+    def test_prefix_literal(self):
+        cols = self._columns('df.select(pl.col("a").name.prefix("p_"))')
+        assert cols == {"p_a": Int64()}
+
+    def test_suffix_on_arithmetic_chain(self):
+        cols = self._columns('df.select((pl.col("a") * 2).name.suffix("_x2"))')
+        assert cols == {"a_x2": Int64()}
+
+    def test_prefix_applies_to_current_alias(self):
+        # Probed: the rename applies to the current name, alias included.
+        cols = self._columns('df.select(pl.col("a").alias("zz").name.prefix("p_"))')
+        assert cols == {"p_zz": Int64()}
+
+    def test_trailing_alias_wins(self):
+        cols = self._columns('df.select(pl.col("a").name.prefix("p_").alias("q"))')
+        assert cols == {"q": Int64()}
+
+    def test_keep_restores_root_overriding_alias(self):
+        # Probed: keep returns the ROOT column name, not the latest alias.
+        cols = self._columns('df.select((pl.col("a") * 2).alias("z").name.keep())')
+        assert cols == {"a": Int64()}
+
+    def test_keep_after_prefix(self):
+        cols = self._columns('df.select(pl.col("a").name.prefix("p_").name.keep())')
+        assert cols == {"a": Int64()}
+
+    def test_to_uppercase(self):
+        cols = self._columns('df.select(pl.col("a").name.to_uppercase())')
+        assert cols == {"A": Int64()}
+
+    def test_to_lowercase_applies_to_alias(self):
+        cols = self._columns('df.select(pl.col("a").alias("ZZ").name.to_lowercase())')
+        assert cols == {"zz": Int64()}
+
+    def test_dtype_and_nullability_preserved(self):
+        cols = self._columns('df.select(pl.col("n").name.prefix("p_"))')
+        assert cols == {"p_n": Nullable(Float64())}
+
+    def test_name_transform_on_namespace_chain(self):
+        cols = self._columns('df.select(pl.col("b").str.to_uppercase().name.suffix("_u"))')
+        assert cols == {"b_u": Utf8()}
+
+    # -- graceful degradation --------------------------------------------
+
+    def test_non_literal_prefix_opens_the_frame(self):
+        # The output name is unknowable — the column cannot be registered,
+        # so the result frame opens (rest set) instead of losing it.
+        source = self.HEADER + textwrap.dedent(
+            """
+            P = get_prefix()
+
+            def f(df: DataFrame[In]):
+                return df.select("b", pl.col("a").name.prefix(P))
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == [], results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert set(ft.columns) == {"b"}
+        assert ft.rest is not None
+
+    def test_name_map_warns_plw004_and_opens_the_frame(self):
+        result = self._frame('df.select(pl.col("a").name.map(lambda c: c.upper()))')
+        assert any("PLW004" in w for w in result.warnings), result.warnings
+        ft = result.inferred_return_type
+        assert ft is not None
+        assert ft.columns == {}
+        assert ft.rest is not None
+
+    def test_map_fields_warns_plw004_dtype_unknown_name_kept(self):
+        result = self._frame('df.select(pl.col("a").name.map_fields(lambda c: c.upper()))')
+        assert any("PLW004" in w for w in result.warnings), result.warnings
+        ft = result.inferred_return_type
+        assert ft is not None
+        assert {name: spec.dtype for name, spec in ft.columns.items()} == {"a": Unknown()}
+
+    # -- struct field renames --------------------------------------------
+
+    STRUCT_HEADER = textwrap.dedent(
+        PANDERA_HEADER
+        + """
+            class WithStruct(pa.DataFrameModel):
+                s: pl.Struct({"x": pl.Int64, "y": pl.Utf8}) = pa.Field()
+        """
+    )
+
+    def _struct_columns(self, body: str):
+        source = self.STRUCT_HEADER + textwrap.dedent(
+            f"""
+            def f(df: DataFrame[WithStruct]):
+                return {body}
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == [], (body, results[0].errors)
+        ft = results[0].inferred_return_type
+        assert ft is not None, body
+        return {name: spec.dtype for name, spec in ft.columns.items()}
+
+    def test_prefix_fields_renames_struct_fields(self):
+        cols = self._struct_columns('df.select(pl.col("s").name.prefix_fields("p_"))')
+        assert cols == {"s": Struct({"p_x": Int64(), "p_y": Utf8()})}
+
+    def test_suffix_fields_renames_struct_fields(self):
+        cols = self._struct_columns('df.select(pl.col("s").name.suffix_fields("_f"))')
+        assert cols == {"s": Struct({"x_f": Int64(), "y_f": Utf8()})}
+
+    def test_prefix_fields_unnest_round_trip(self):
+        cols = self._struct_columns('df.select(pl.col("s").name.prefix_fields("p_")).unnest("s")')
+        assert cols == {"p_x": Int64(), "p_y": Utf8()}
+
+    def test_prefix_fields_non_literal_degrades_to_unknown(self):
+        source = self.STRUCT_HEADER + textwrap.dedent(
+            """
+            P = get_prefix()
+
+            def f(df: DataFrame[WithStruct]):
+                return df.select(pl.col("s").name.prefix_fields(P))
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == [], results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["s"].dtype == Unknown()
+
+    def test_prefix_fields_on_non_struct_degrades_to_unknown(self):
+        # Runtime InvalidOperationError, but flagging is out of scope —
+        # silent Unknown (false negatives are acceptable).
+        cols = self._columns('df.select(pl.col("a").name.prefix_fields("p_"))')
+        assert cols == {"a": Unknown()}
+
+    # -- multi-column expansion (selector / plural roots) -----------------
+
+    def test_pl_all_prefix_expands_per_column(self):
+        # The issue #56 repro shape.
+        cols = self._columns('df.select(pl.all().name.prefix("pre_"))')
+        assert cols == {"pre_a": Int64(), "pre_b": Utf8(), "pre_n": Nullable(Float64())}
+
+    def test_cs_selector_suffix_expands_per_column(self):
+        cols = self._columns('df.select(cs.numeric().name.suffix("_n"))')
+        assert cols == {"a_n": Int64(), "n_n": Nullable(Float64())}
+
+    def test_plural_col_suffix_expands_per_column(self):
+        cols = self._columns('df.select(pl.col("a", "b").name.suffix("_s"))')
+        assert cols == {"a_s": Int64(), "b_s": Utf8()}
+
+    def test_with_columns_selector_prefix_adds_renamed_copies(self):
+        cols = self._columns('df.with_columns(pl.all().name.prefix("c_"))')
+        assert cols == {
+            "a": Int64(),
+            "b": Utf8(),
+            "n": Nullable(Float64()),
+            "c_a": Int64(),
+            "c_b": Utf8(),
+            "c_n": Nullable(Float64()),
+        }
+
+    def test_with_columns_non_literal_prefix_opens_the_frame(self):
+        # Mirrors the select degradation: the added column's name is
+        # unknowable, so the result frame opens; existing columns are kept.
+        source = self.HEADER + textwrap.dedent(
+            """
+            P = get_prefix()
+
+            def f(df: DataFrame[In]):
+                return df.with_columns(pl.col("a").name.prefix(P))
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == [], results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert set(ft.columns) == {"a", "b", "n"}
+        assert ft.rest is not None
+
+    def test_selector_chain_without_name_also_expands(self):
+        # The expansion keys on the selector being the chain ROOT, not on
+        # ``.name`` specifically — ``pl.all().sum()`` aggregates per column.
+        cols = self._columns("df.select(cs.integer().sum())")
+        assert cols == {"a": Int64()}
+
+    def test_selector_in_over_key_is_not_expanded(self):
+        # A selector in ARGUMENT position must not expand the surrounding
+        # expression — ``over(cs.by_name(...))`` is a partition key.
+        cols = self._columns('df.select(pl.col("a").sum().over(cs.by_name("b")))')
+        assert cols == {"a": Int64()}

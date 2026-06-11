@@ -1,0 +1,5 @@
+ok_prefix_all_columns: OK
+ok_suffix_on_arithmetic: OK
+ok_keep_restores_root_name: OK
+ok_to_uppercase: OK
+ok_prefix_fields_then_unnest: OK

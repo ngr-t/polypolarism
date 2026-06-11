@@ -948,6 +948,19 @@ class _ReplaceNode(ast.NodeTransformer):
         return self.generic_visit(node)
 
 
+def _contains_name_accessor(node: ast.expr) -> bool:
+    """Whether the expression tree contains a ``.name`` accessor (issue #56).
+
+    Consulted by the select / with_columns layers when a positional
+    expression resolved to a dtype but no output name: a ``.name.*`` chain
+    with a statically unknowable result name (``map``, a non-literal
+    prefix, ...) still produces a column at runtime, so the result frame
+    is opened (``rest`` set) instead of losing the column — a missing
+    declared column downstream would be a false positive.
+    """
+    return any(isinstance(sub, ast.Attribute) and sub.attr == "name" for sub in ast.walk(node))
+
+
 def _nonboolean_predicate_error(
     dtype: DataType | None, op: str = "filter", noun: str = "predicate"
 ) -> str | None:
@@ -2684,6 +2697,84 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             return None
         return infer_shift_fill(receiver_type, fill_dtype, fill_is_literal=False)
 
+    def _analyze_name_method(
+        self, method: str, inner_expr: ast.expr, call_node: ast.Call
+    ) -> tuple[str | None, DataType | None] | None:
+        """Resolve ``<expr>.name.<method>(...)`` to ``(output_name, dtype)``
+        (issue #56).
+
+        Probed (polars 1.41.2): the rename applies to the expression's
+        CURRENT output name — an earlier ``.alias`` included — while
+        ``keep`` restores the chain's ROOT column name, overriding any
+        earlier ``.alias`` or name transform. A trailing ``.alias`` after
+        the name method wins (handled naturally: ``analyze_select_expr``
+        strips it before this runs). The dtype is never changed; the
+        ``*_fields`` variants transform a Struct receiver's FIELD names
+        instead (dtype transform, output name unchanged).
+
+        ``(None, dtype)`` means the output name is unknowable (non-literal
+        argument, ``map``, unmodeled methods like ``replace``) — the
+        select / with_columns layer opens the result frame so the column
+        is not provably absent downstream. Returns ``None`` when the
+        receiver expression itself isn't recognised.
+        """
+        inner_name, inner_type = self.analyze_select_expr(inner_expr)
+        if inner_name is None and inner_type is None:
+            # Unrecognised receiver (a bare selector reaching expression
+            # level, a frame variable, ...) — not claimed as a chain.
+            return None
+        if method == "keep":
+            root = self._find_deep_col(inner_expr)
+            return (root if root is not None else inner_name), inner_type
+        if method in ("prefix", "suffix"):
+            arg = _call_arg(call_node, position=0, name=method)
+            lit = _str_constant(arg) if arg is not None else None
+            if lit is None or inner_name is None:
+                return None, inner_type
+            new_name = lit + inner_name if method == "prefix" else inner_name + lit
+            return new_name, inner_type
+        if method == "to_uppercase":
+            return (inner_name.upper() if inner_name is not None else None), inner_type
+        if method == "to_lowercase":
+            return (inner_name.lower() if inner_name is not None else None), inner_type
+        if method in ("prefix_fields", "suffix_fields"):
+            kwarg = "prefix" if method == "prefix_fields" else "suffix"
+            arg = _call_arg(call_node, position=0, name=kwarg)
+            lit = _str_constant(arg) if arg is not None else None
+            base = inner_type.inner if isinstance(inner_type, Nullable) else inner_type
+            if lit is not None and isinstance(base, Struct):
+                renamed = Struct(
+                    {
+                        (lit + f if method == "prefix_fields" else f + lit): t
+                        for f, t in base.fields.items()
+                    }
+                )
+                result: DataType = (
+                    Nullable(renamed) if isinstance(inner_type, Nullable) else renamed
+                )
+                return inner_name, result
+            # Non-literal argument, or a non-Struct / unresolved receiver
+            # (a probed runtime InvalidOperationError, but flagging it is
+            # out of scope) — the field names are unknowable.
+            return inner_name, None
+        if method in ("map", "map_fields"):
+            unknowable = "column name" if method == "map" else "struct field names"
+            self.warnings.append(
+                tag(
+                    PLW004,
+                    f"name.{method}: the callable cannot be evaluated statically, "
+                    f"so the output {unknowable} cannot be inferred. Rename with "
+                    f"explicit `.alias(...)` / literal prefix-suffix methods to "
+                    f"keep the schema precise.",
+                )
+            )
+            if method == "map_fields":
+                return inner_name, None
+            return None, inner_type
+        # Unmodeled ``.name`` method (``replace``, future additions): every
+        # name method preserves the dtype; the output name is unknowable.
+        return None, inner_type
+
     def _analyze_method_chain(self, node: ast.expr) -> tuple[str | None, DataType | None] | None:
         """Analyze ``pl.col("x").<method>(...)`` style chains.
 
@@ -2743,6 +2834,15 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             if ns_result is None:
                 return None
             return col_name, ns_result
+
+        # ``.name`` namespace (issue #56): renames the OUTPUT column (or
+        # struct FIELDS for the ``*_fields`` variants) — the dtype is
+        # never changed. NOT a dtype-validated namespace (works on any
+        # column), so it is deliberately absent from _NAMESPACE_VALID_DTYPES.
+        if isinstance(receiver, ast.Attribute) and receiver.attr == "name":
+            name_result = self._analyze_name_method(method, receiver.value, node)
+            if name_result is not None:
+                return name_result
 
         receiver_result = self.analyze_select_expr(receiver)
         receiver_name, receiver_type = receiver_result
@@ -4067,15 +4167,52 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         ``agg`` loop has no fast path) expands to bare ``pl.col(name)``.
         """
         walked = list(ast.walk(arg))
-        found: list[tuple[int, list[str]]] = []
-        for idx, sub in enumerate(walked):
+        found: list[tuple[ast.AST, list[str]]] = []
+        for sub in walked:
             if isinstance(sub, ast.expr):
                 names = self._resolve_plural_col(sub)
                 if names is not None:
-                    found.append((idx, names))
+                    found.append((sub, names))
         if len(found) != 1:
             return None
-        target_idx, names = found[0]
+        target, names = found[0]
+        return self._clone_per_column(arg, target, names)
+
+    def _expand_selector_chain(
+        self, arg: ast.expr, input_frame: FrameType
+    ) -> list[ast.expr] | None:
+        """Expand a method chain ROOTED at a multi-column selector (issue #56).
+
+        polars runs ``select(pl.all().name.prefix("p_"))`` /
+        ``select(cs.numeric().sum())`` once per selected column — model
+        that by cloning the chain per column with the selector swapped for
+        single-name ``pl.col(name)``, exactly like the plural-``pl.col``
+        expansion. Only the receiver spine is walked: a selector in
+        ARGUMENT position (``.over(cs.by_name("g"))``, ``pl.struct(cs.*)``)
+        is a column-set argument, not a per-column fan-out, and must NOT
+        expand the surrounding expression. Bare selector args never reach
+        this helper (the callers' fast paths consume them first).
+        """
+        node: ast.expr = arg
+        while True:
+            nxt: ast.expr | None = None
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                nxt = node.func.value
+            elif isinstance(node, ast.Attribute):
+                nxt = node.value
+            if nxt is None:
+                return None
+            names = _resolve_selector(nxt, input_frame)
+            if names is not None:
+                return self._clone_per_column(arg, nxt, names)
+            node = nxt
+
+    @staticmethod
+    def _clone_per_column(arg: ast.expr, target: ast.AST, names: list[str]) -> list[ast.expr]:
+        """One deep copy of ``arg`` per column name, with ``target`` (a node
+        of ``arg``, matched by identity) swapped for ``pl.col(name)``."""
+        walked = list(ast.walk(arg))
+        target_idx = next(i for i, sub in enumerate(walked) if sub is target)
         clones: list[ast.expr] = []
         for name in names:
             clone = copy.deepcopy(arg)
@@ -4156,6 +4293,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         # Output names produced by THIS call — a repeat is a runtime
         # DuplicateError (issue #36). Registration keeps the last dtype.
         seen_outputs: set[str] = set()
+        # A ``.name.*`` output whose result name is unknowable (issue #56)
+        # exists at runtime under SOME name — opens the result frame.
+        has_opaque_outputs = False
 
         for arg in node.args:
             sel = _resolve_selector(arg, input_frame)
@@ -4207,10 +4347,14 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     if registered is not None:
                         self._track_output_name(registered, seen_outputs, "select")
                 continue
-            # A plural ``pl.col`` nested inside an expression runs the
-            # expression once per column (issue #42) — analyze one clone
-            # per name through the unchanged single-expression path.
-            for expr in self._expand_plural_expr(arg) or [arg]:
+            # A plural ``pl.col`` nested inside an expression (issue #42) or
+            # a method chain rooted at a selector (issue #56) runs the
+            # expression once per column — analyze one clone per name
+            # through the unchanged single-expression path.
+            expanded = self._expand_plural_expr(arg)
+            if expanded is None:
+                expanded = self._expand_selector_chain(arg, input_frame)
+            for expr in expanded if expanded is not None else [arg]:
                 name, dtype = expr_analyzer.analyze_select_expr(expr)
                 if name and dtype:
                     result_columns[name] = dtype
@@ -4220,6 +4364,11 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     # Unknown so later references resolve (issue #8).
                     result_columns[name] = Unknown()
                     self._track_output_name(name, seen_outputs, "select")
+                elif dtype is not None and _contains_name_accessor(expr):
+                    # A ``.name.*`` output whose name is unknowable (issue
+                    # #56): the column exists at runtime under some name —
+                    # open the frame instead of losing it.
+                    has_opaque_outputs = True
 
         # Kwarg form ``select(name=expr)`` — polars treats it as
         # ``expr.alias("name")``. Same for ``with_columns``.
@@ -4246,8 +4395,11 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
 
         self.errors.extend(expr_analyzer.errors)
 
-        if result_columns:
-            return FrameType(columns=result_columns)
+        if result_columns or has_opaque_outputs:
+            return FrameType(
+                columns=result_columns,
+                rest=RowVar("name") if has_opaque_outputs else None,
+            )
         return None
 
     def _infer_with_columns_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
@@ -4263,6 +4415,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         # pre-existing input column is NOT an error (overwrite semantics),
         # so the set starts empty rather than seeded with the input columns.
         seen_outputs: set[str] = set()
+        # A ``.name.*`` output whose result name is unknowable (issue #56)
+        # exists at runtime under SOME name — opens the result frame.
+        has_opaque_outputs = False
 
         for arg in node.args:
             sel = _resolve_selector(arg, input_frame)
@@ -4312,10 +4467,14 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                         continue
                     self._track_output_name(c, seen_outputs, "with_columns")
                 continue
-            # A plural ``pl.col`` nested inside an expression runs the
-            # expression once per column (issue #42) — analyze one clone
-            # per name through the unchanged single-expression path.
-            for expr in self._expand_plural_expr(arg) or [arg]:
+            # A plural ``pl.col`` nested inside an expression (issue #42) or
+            # a method chain rooted at a selector (issue #56) runs the
+            # expression once per column — analyze one clone per name
+            # through the unchanged single-expression path.
+            expanded = self._expand_plural_expr(arg)
+            if expanded is None:
+                expanded = self._expand_selector_chain(arg, input_frame)
+            for expr in expanded if expanded is not None else [arg]:
                 name, dtype = expr_analyzer.analyze_select_expr(expr)
                 if name and dtype:
                     result_columns[name] = dtype
@@ -4325,6 +4484,11 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     # Unknown so later references resolve (issue #8).
                     result_columns[name] = Unknown()
                     self._track_output_name(name, seen_outputs, "with_columns")
+                elif dtype is not None and _contains_name_accessor(expr):
+                    # A ``.name.*`` output whose name is unknowable (issue
+                    # #56): the column exists at runtime under some name —
+                    # open the frame instead of losing it.
+                    has_opaque_outputs = True
 
         # Kwarg form ``with_columns(name=expr)`` — polars treats it as
         # ``expr.alias("name")``.
@@ -4364,7 +4528,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         return FrameType(
             columns=result_columns,
             strict=input_frame.strict,
-            rest=input_frame.rest,
+            rest=input_frame.rest or (RowVar("name") if has_opaque_outputs else None),
         )
 
     # -- frame methods --------------------------------------------------
