@@ -5,7 +5,10 @@ from __future__ import annotations
 import ast
 import textwrap
 
-from polypolarism.pandera_annotation import extract_dataframe_annotation
+from polypolarism.pandera_annotation import (
+    extract_dataframe_annotation,
+    frame_annotation_schema_name,
+)
 from polypolarism.pandera_schema import collect_schemas
 from polypolarism.types import ColumnSpec, Int64, Utf8
 
@@ -72,6 +75,41 @@ class TestForwardReferences:
         )
         assert ft is not None
         assert "id" in ft.columns
+
+
+class TestModuleQualifiedSchema:
+    """``DataFrame[mod.Schema]`` — module-qualified schema references (issue #68)."""
+
+    def test_schema_name_of_qualified_reference(self):
+        name = frame_annotation_schema_name(_annotation_node("DataFrame[mod.MySchema]"))
+        assert name == "mod.MySchema"
+
+    def test_schema_name_of_deeply_qualified_reference(self):
+        name = frame_annotation_schema_name(_annotation_node("LazyFrame[pkg.schemas.Out]"))
+        assert name == "pkg.schemas.Out"
+
+    def test_schema_name_with_qualified_head_and_slice(self):
+        name = frame_annotation_schema_name(_annotation_node("pa.DataFrame[mod.MySchema]"))
+        assert name == "mod.MySchema"
+
+    def test_schema_name_of_call_slice_is_none(self):
+        # Only Name/Attribute chains qualify — a call in the chain does not.
+        name = frame_annotation_schema_name(_annotation_node("DataFrame[get_mod().MySchema]"))
+        assert name is None
+
+    def test_extract_resolves_dotted_registry_key(self):
+        # The registry is flat; qualified imports register schemas under
+        # their dotted spelling (see pandera_schema._merge_module_imports).
+        registry = _registry_with_schema()
+        registry.schemas["mod.MySchema"] = registry.schemas["MySchema"]
+        ft = extract_dataframe_annotation(_annotation_node("DataFrame[mod.MySchema]"), registry)
+        assert ft is not None
+        assert "id" in ft.columns
+
+    def test_extract_unknown_qualified_returns_none(self):
+        registry = _registry_with_schema()
+        ft = extract_dataframe_annotation(_annotation_node("DataFrame[mod.Unknown]"), registry)
+        assert ft is None
 
 
 class TestNonMatching:

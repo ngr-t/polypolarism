@@ -129,3 +129,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `pl.mean_horizontal` returns Float32 when every operand is
   Float32. Previously all of these claimed Float64, falsely rejecting
   correct Float32 declarations.
+- Module-qualified schema annotations resolve (issue #68):
+  `DataFrame[mod.Schema]` after a project-local `import mod` (or
+  `import pkg.mod [as m]`) now type-checks like its `from mod import
+  Schema` spelling — previously the return side passed vacuously and a
+  param-side annotation silently de-registered the function. The
+  registry stays flat: plain imports mount the imported module's schemas
+  under their dotted spelling as written at the annotation site. A
+  qualified name that still doesn't resolve (third-party module, nested
+  class like `DataFrame[Outer.Inner]`) now warns `PLW006` with the full
+  dotted name instead of being silently ignored.

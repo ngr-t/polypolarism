@@ -17,10 +17,11 @@ from polypolarism.types import FrameType
 def frame_annotation_schema_name(annotation: ast.expr) -> str | None:
     """Return the schema name from a ``DataFrame[X]`` / ``LazyFrame[X]`` shape.
 
-    Returns the bare name ``X`` regardless of whether the registry knows
-    it — purely syntactic. Use this to detect annotations the user
-    *intended* as Pandera-backed even when import resolution failed
-    (so we can warn instead of silently treating the file as empty).
+    Returns the name ``X`` — bare (``Schema``) or dotted
+    (``mod.Schema``) — regardless of whether the registry knows it;
+    purely syntactic. Use this to detect annotations the user *intended*
+    as Pandera-backed even when import resolution failed (so we can warn
+    instead of silently treating the file as empty).
     Returns ``None`` for annotations not in this shape.
     """
     if not isinstance(annotation, ast.Subscript):
@@ -40,6 +41,9 @@ def extract_dataframe_annotation(
     - ``DataFrame[Schema]`` / ``LazyFrame[Schema]``
     - Qualified attribute paths whose tail is ``DataFrame``/``LazyFrame``
       (e.g. ``pa.DataFrame[Schema]``, ``pandera.typing.polars.DataFrame[Schema]``)
+    - Module-qualified schema references: ``DataFrame[mod.Schema]`` —
+      looked up under the flat dotted key the registry records for
+      ``import mod`` (see ``pandera_schema._merge_module_imports``)
     - Forward refs as string constants: ``DataFrame["Schema"]``
 
     The returned FrameType has ``is_lazy=True`` for ``LazyFrame[...]``
@@ -110,9 +114,29 @@ def _is_dataframe_head(node: ast.expr) -> bool:
 
 
 def _extract_schema_name(slice_: ast.expr) -> str | None:
-    """Pull the schema class name out of a subscript slice."""
+    """Pull the schema class name out of a subscript slice.
+
+    Handles bare names (``Schema``), dotted attribute chains
+    (``mod.Schema``, ``pkg.schemas.Out`` — returned as the dotted path
+    exactly as written), and string forward refs (``"Schema"``).
+    """
     if isinstance(slice_, ast.Name):
         return slice_.id
+    if isinstance(slice_, ast.Attribute):
+        return _dotted_name(slice_)
     if isinstance(slice_, ast.Constant) and isinstance(slice_.value, str):
         return slice_.value
     return None
+
+
+def _dotted_name(node: ast.expr) -> str | None:
+    """Render a ``Name``/``Attribute`` chain as ``a.b.c``; ``None`` if the
+    chain contains anything else (calls, subscripts, ...)."""
+    parts: list[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name):
+        return None
+    parts.append(node.id)
+    return ".".join(reversed(parts))

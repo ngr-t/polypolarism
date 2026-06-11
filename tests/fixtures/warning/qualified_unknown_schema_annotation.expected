@@ -1,0 +1,2 @@
+passthrough: WARN
+  warning: [PLW006] schema 'some_external_package.RemoteSchema' referenced in annotation but not found. Qualified references resolve through a top-level `import some_external_package` of a project-local module defining 'RemoteSchema'. Stdlib/third-party imports aren't followed, and nested classes aren't supported.
