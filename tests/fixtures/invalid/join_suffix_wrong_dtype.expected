@@ -1,0 +1,2 @@
+join_with_suffix: FAIL
+  error: Column 'v_new' has type Float64, but declared type is Int64

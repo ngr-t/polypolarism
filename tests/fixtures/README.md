@@ -73,6 +73,9 @@ Rules with both sides present (valid twin -> invalid twin):
 | when/then supertype | `when_supertype_shift` | `when_mixed_branches_declared_int`, `when_nonbool_condition` |
 | joins (keys, dtypes) | `basic_join` | `join_missing_column`, `join_type_mismatch` |
 | left-join nullability | `left_join_nullable` | `left_join_nonnullable_declared` |
+| join suffix | `constants_and_join_suffix` | `join_suffix_wrong_dtype` |
+| join coalesce / cross | `join_coalesce_cross` | `join_coalesce_cross_wrong` |
+| semi/anti joins | `semi_anti_gather` | `semi_anti_schema_change` |
 | group_by/agg | `groupby_agg_basic`, `m2_new_aggs` | `agg_type_error`, `groupby_nonexistent_col` |
 | str/dt/list namespaces | `m3_*_namespace` | `namespace_wrong_dtype`, `m3_str_method_missing_column` |
 | bin / cat namespaces | `bin_namespace`, `cat_namespace` | `bin_on_int`, `cat_on_int` |
@@ -106,9 +109,6 @@ Intentionally unpaired:
 - **pivot** — `m12_pivot_annotated` has a warning twin
   (`m12_pivot_unannotated`) but no wrong-declaration invalid twin.
 - **partition_by** — `m14_partition_by` unpaired (wrong element schema).
-- **join suffix / coalesce / cross / semi-anti** — `constants_and_join_suffix`,
-  `join_coalesce_cross`, `semi_anti_gather` unpaired (e.g. wrong dtype for a
-  `_right`-suffixed column; semi join must not widen the schema).
 - **coerce limits** — `coerce_len_agg` proves coerce *tolerates* numeric
   differences; no twin proving a non-coercible difference (e.g. Utf8 vs
   Int64) still fails under `Config.coerce`.
