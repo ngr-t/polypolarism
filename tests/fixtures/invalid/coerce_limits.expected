@@ -1,5 +1,5 @@
 counts_with_label: FAIL
-  error: Column 'label' has type Utf8, but declared type is Int64
+  error: [PLY040] Column 'label' has type Utf8, but declared type is Int64
   via: column 'n': UInt32 -> Int64 via coerce
 shifted: FAIL
-  error: Column 'prev' has type Int64?, but declared type is Int64
+  error: [PLY040] Column 'prev' has type Int64?, but declared type is Int64

@@ -136,6 +136,56 @@ class TestFormatJson:
         assert len(data["diagnostics"]) == 1
         assert "infer" in data["diagnostics"][0]["message"].lower()
 
+    def test_error_diagnostic_carries_structured_code(self):
+        """Tagged errors expose their diagnostic code as a structured field
+        (issue #70), not only as a message prefix."""
+        result = CheckResult(
+            function_name="process",
+            passed=False,
+            errors=[
+                MissingColumn("name", Utf8()),
+                "[PLY032] Return type expected DataFrame[...] but inferred LazyFrame[...]",
+            ],
+        )
+
+        output = format_json([result], "test.py", function_lines={"process": 10})
+        data = json.loads(output)
+
+        codes = [d["code"] for d in data["diagnostics"]]
+        assert codes == ["PLY040", "PLY032"]
+        # The message prefix stays for backward compatibility.
+        assert data["diagnostics"][0]["message"].startswith("[PLY040] ")
+
+    def test_warning_diagnostic_carries_structured_code(self):
+        """Tagged warnings expose their PLW code structurally too."""
+        result = CheckResult(
+            function_name="process",
+            passed=True,
+            warnings=["[PLW001] map_elements without return_dtype="],
+        )
+
+        output = format_json([result], "test.py", function_lines={"process": 3})
+        data = json.loads(output)
+
+        assert len(data["diagnostics"]) == 1
+        assert data["diagnostics"][0]["code"] == "PLW001"
+        assert data["diagnostics"][0]["severity"] == "warning"
+
+    def test_untagged_diagnostic_has_no_code_field(self):
+        """Untagged errors (e.g. parse failures) omit the code key entirely,
+        keeping the schema additive."""
+        result = CheckResult(
+            function_name="<broken.py>",
+            passed=False,
+            errors=["SyntaxError: invalid syntax"],
+        )
+
+        output = format_json([result], "broken.py")
+        data = json.loads(output)
+
+        assert len(data["diagnostics"]) == 1
+        assert "code" not in data["diagnostics"][0]
+
     def test_json_output_is_valid_json(self):
         """Output should be valid JSON."""
         result = CheckResult(

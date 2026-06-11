@@ -1,2 +1,2 @@
 parse: FAIL
-  error: Column 'price' has type Decimal(38, 2), but declared type is Decimal(38, 0)
+  error: [PLY040] Column 'price' has type Decimal(38, 2), but declared type is Decimal(38, 0)

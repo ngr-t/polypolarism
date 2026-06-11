@@ -449,6 +449,8 @@ def bad(data: DataFrame[InSchema]) -> DataFrame[OutSchema]:
         data = json.loads(result.stdout)
         assert len(data["diagnostics"]) >= 1
         assert any("missing" in d["message"].lower() for d in data["diagnostics"])
+        # Return-type mismatches carry the structured family code (issue #70).
+        assert any(d.get("code") == "PLY040" for d in data["diagnostics"])
 
     def test_format_text_is_default(self, tmp_path):
         """--format text is the default format."""

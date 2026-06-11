@@ -1,4 +1,4 @@
 enum_category_set_mismatch: FAIL
-  error: Column 'e' has type Enum['a', 'c'], but declared type is Enum['a', 'b']
+  error: [PLY040] Column 'e' has type Enum['a', 'c'], but declared type is Enum['a', 'b']
 enum_category_order_mismatch: FAIL
-  error: Column 'e' has type Enum['b', 'a'], but declared type is Enum['a', 'b']
+  error: [PLY040] Column 'e' has type Enum['b', 'a'], but declared type is Enum['a', 'b']

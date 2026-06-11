@@ -92,11 +92,12 @@ class TestCheckMissingColumn:
         assert any(e.column == "name" for e in missing_errors)
 
     def test_missing_column_error_message(self):
-        """Missing column error has helpful message."""
+        """Missing column error has helpful message with the family code."""
         error = MissingColumn("name", Utf8())
 
         message = str(error)
 
+        assert message.startswith("[PLY040] ")
         assert "name" in message
         assert "Utf8" in message
 
@@ -140,11 +141,12 @@ class TestCheckExtraColumn:
         assert result.passed is True
 
     def test_extra_column_error_message(self):
-        """Extra column error has helpful message."""
+        """Extra column error has helpful message with the family code."""
         error = ExtraColumn("extra", Float64())
 
         message = str(error)
 
+        assert message.startswith("[PLY040] ")
         assert "extra" in message
 
 
@@ -174,11 +176,12 @@ class TestCheckTypeDifference:
         )
 
     def test_type_difference_error_message(self):
-        """Type difference error has helpful message."""
+        """Type difference error has helpful message with the family code."""
         error = TypeDifference("value", declared=Float64(), inferred=Int64())
 
         message = str(error)
 
+        assert message.startswith("[PLY040] ")
         assert "value" in message
         assert "Float64" in message
         assert "Int64" in message
@@ -1157,6 +1160,14 @@ class TestNoReturnTypeInferred:
 
         assert result.passed is False
         assert any("infer" in str(e).lower() for e in result.errors)
+
+    def test_inference_failure_message_carries_family_code(self):
+        """InferenceFailure renders with the [PLY040] family code (issue #70)."""
+        from polypolarism.checker import InferenceFailure
+
+        message = str(InferenceFailure("Could not infer return type"))
+
+        assert message == "[PLY040] Could not infer return type"
 
 
 class TestIssue14TrueDivisionEndToEnd:

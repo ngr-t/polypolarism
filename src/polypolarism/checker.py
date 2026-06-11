@@ -7,13 +7,18 @@ from pathlib import Path
 from typing import NamedTuple
 
 from polypolarism.analyzer import FunctionAnalysis, _cast_verdict, analyze_source
+from polypolarism.diagnostics import PLY040, tag
 from polypolarism.types import NUMERIC_DTYPES, Array, DataType, Enum, List, Nullable, Unknown
 
 
 class TypeMismatch:
-    """Base class for type mismatch errors."""
+    """Base class for type mismatch errors.
 
-    pass
+    The whole declared-vs-inferred return-type family shares one diagnostic
+    code, ``PLY040`` (issue #70); the message distinguishes the kind.
+    """
+
+    code = PLY040
 
 
 @dataclass
@@ -24,7 +29,7 @@ class MissingColumn(TypeMismatch):
     expected_type: DataType
 
     def __str__(self) -> str:
-        return f"Missing column '{self.column}' of type {self.expected_type}"
+        return tag(self.code, f"Missing column '{self.column}' of type {self.expected_type}")
 
 
 @dataclass
@@ -35,8 +40,10 @@ class ExtraColumn(TypeMismatch):
     inferred_type: DataType
 
     def __str__(self) -> str:
-        return (
-            f"Extra column '{self.column}' of type {self.inferred_type} not in declared return type"
+        return tag(
+            self.code,
+            f"Extra column '{self.column}' of type {self.inferred_type} "
+            "not in declared return type",
         )
 
 
@@ -49,8 +56,10 @@ class TypeDifference(TypeMismatch):
     inferred: DataType
 
     def __str__(self) -> str:
-        return (
-            f"Column '{self.column}' has type {self.inferred}, but declared type is {self.declared}"
+        return tag(
+            self.code,
+            f"Column '{self.column}' has type {self.inferred}, "
+            f"but declared type is {self.declared}",
         )
 
 
@@ -58,10 +67,12 @@ class TypeDifference(TypeMismatch):
 class InferenceFailure:
     """Error when return type could not be inferred."""
 
+    code = PLY040
+
     message: str
 
     def __str__(self) -> str:
-        return self.message
+        return tag(self.code, self.message)
 
 
 CheckError = TypeMismatch | InferenceFailure | str

@@ -1,2 +1,2 @@
 eval_as_list: FAIL
-  error: Column 'doubled' has type List[Int64], but declared type is Array[Int64, 4]
+  error: [PLY040] Column 'doubled' has type List[Int64], but declared type is Array[Int64, 4]

@@ -1,3 +1,3 @@
 reference_missing_column: FAIL
   error: [PLY001] Column 'amount' not found. Available columns: ['id', 'value']
-  error: Column 'doubled' has type Int64, but declared type is Float64
+  error: [PLY040] Column 'doubled' has type Int64, but declared type is Float64

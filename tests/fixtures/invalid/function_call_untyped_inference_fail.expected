@@ -1,2 +1,2 @@
 caller: FAIL
-  error: Could not infer return type
+  error: [PLY040] Could not infer return type

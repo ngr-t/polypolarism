@@ -1,2 +1,2 @@
 bad_struct_rename: FAIL
-  error: Column 'q' has type Int64, but declared type is Utf8
+  error: [PLY040] Column 'q' has type Int64, but declared type is Utf8
