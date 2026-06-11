@@ -2097,6 +2097,27 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         ),
     }
 
+    # Probed matrix for ``_FLOAT_RETURN_METHODS`` (issue #62). The error
+    # class varies per cell (InvalidOperationError / ComputeError / rust
+    # panic) -> PLY016 and the output degrades to Unknown. Deliberately
+    # unlisted: String, Boolean, the temporals, Decimal and Null are
+    # ACCEPTED by every member except entropy (polars casts them into
+    # Float64 non-strictly; String yields all-null Float64) and must stay
+    # silent; log1p/exp also accept Categorical/Enum. interpolate and
+    # ewm_mean (issue #62 report) accept String too — both stay on the
+    # silent/unhandled path.
+    _FLOAT_RETURN_INVALID_RECEIVERS: dict[str, tuple[type[DataType], ...]] = {
+        "log": (Binary, Categorical, Enum, ListT, Array, Struct),
+        "log10": (Binary, Categorical, Enum, ListT, Array, Struct),
+        "log1p": (Binary, ListT, Array, Struct),
+        "exp": (Binary, ListT, Array, Struct),
+        "sqrt": (Binary, Categorical, Enum, ListT, Array, Struct),
+        "cbrt": (Binary, Categorical, Enum, ListT, Array, Struct),
+        # entropy is the aggregating member: it rejects String/Boolean/
+        # Null too, yet accepts temporals/Decimal/Categorical/Enum.
+        "entropy": (Utf8, Binary, Boolean, ListT, Array, Struct, Null),
+    }
+
     # Shift-like methods: receiver dtype, but head positions become NULL.
     _SHIFT_LIKE_METHODS = frozenset({"shift", "diff", "pct_change"})
 
@@ -3231,12 +3252,28 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 return receiver_name, receiver_type.inner
             return receiver_name, receiver_type
 
-        # Float-returning numeric methods.
+        # Float-returning numeric methods. Strictly typed receivers
+        # (issue #62) — see the probed matrix on
+        # ``_FLOAT_RETURN_INVALID_RECEIVERS``; Unknown / unresolved
+        # receivers stay silent (Float64, the pre-existing default). A
+        # Float32 receiver keeps Float32 (probed); every other accepted
+        # receiver yields Float64.
         if method in self._FLOAT_RETURN_METHODS:
-            receiver_type.inner if isinstance(receiver_type, Nullable) else receiver_type
-            result: DataType = Float64()
+            inner = receiver_type.inner if isinstance(receiver_type, Nullable) else receiver_type
+            if inner is not None and isinstance(
+                inner, self._FLOAT_RETURN_INVALID_RECEIVERS[method]
+            ):
+                self.errors.append(
+                    tag(
+                        PLY016,
+                        f"{method}: operation not supported for dtype {inner} — "
+                        f"polars raises an error at runtime",
+                    )
+                )
+                return receiver_name, None
+            result: DataType = Float32() if isinstance(inner, Float32) else Float64()
             if isinstance(receiver_type, Nullable):
-                result = Nullable(Float64())
+                result = Nullable(result)
             return receiver_name, result
 
         # ``Expr.over(...)`` — windowed expression. Every partition / order
