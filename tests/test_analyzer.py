@@ -11,6 +11,7 @@ from polypolarism.analyzer import (
     analyze_source,
 )
 from polypolarism.types import (
+    Array,
     Boolean,
     Categorical,
     Date,
@@ -7172,8 +7173,10 @@ class TestNamespaceReceiverDtype:
 
     Verified against polars 1.41.2: ``.str`` rejects every non-String
     receiver at runtime (Categorical/Enum included: "expected String type,
-    got: cat"), ``.dt`` accepts Date/Datetime/Time/Duration, ``.list`` /
-    ``.arr`` require List/Array, ``.struct`` requires Struct.
+    got: cat"), ``.dt`` accepts Date/Datetime/Time/Duration, ``.list``
+    requires List, ``.arr`` requires Array (issue #53 — the containers are
+    not interchangeable), ``.struct`` requires Struct, and ``.cat``
+    requires Categorical or Enum (issue #54).
     """
 
     HEADER = textwrap.dedent(
@@ -7189,6 +7192,7 @@ class TestNamespaceReceiverDtype:
                 t: pl.Time
                 dur: pl.Duration
                 xs: Annotated[pl.List, pl.Int64()]
+                q: pl.Array(pl.Int64, 3) = pa.Field()
                 cat: pl.Categorical
                 en: pl.Enum
                 st: pl.Struct
@@ -7219,7 +7223,19 @@ class TestNamespaceReceiverDtype:
             'pl.col("i").list.sum()',
             'pl.col("s").list.len()',
             'pl.col("i").arr.sum()',
+            # Issue #53: Array and List are NOT interchangeable — probed:
+            # `.arr` on a List column raises "expected Array datatype" and
+            # `.list` on an Array column raises "expected List data type".
+            'pl.col("xs").arr.sum()',
+            'pl.col("q").list.sum()',
+            'pl.col("q").list.eval(pl.element() * 2)',
             'pl.col("i").struct.field("a")',
+            # Issue #54: `.cat` requires Categorical or Enum — probed:
+            # "SchemaError: expected an Enum or Categorical type".
+            'pl.col("i").cat.get_categories()',
+            'pl.col("s").cat.get_categories()',
+            'pl.col("xs").cat.get_categories()',
+            'pl.col("d").cat.len_chars()',
         ],
     )
     def test_wrong_receiver_dtype_flags_ply012(self, expr: str):
@@ -7235,12 +7251,17 @@ class TestNamespaceReceiverDtype:
             'pl.col("t").dt.hour()',
             'pl.col("dur").dt.total_seconds()',
             'pl.col("xs").list.sum()',
-            # polypolarism models polars Array as List, so `.arr` on a List
-            # dtype passes too — the two are statically indistinguishable.
-            'pl.col("xs").arr.sum()',
+            # Issue #53: `.arr` on a real Array column is valid.
+            'pl.col("q").arr.sum()',
+            'pl.col("q").arr.len()',
+            # Issue #54: `.cat` on Categorical / Enum is valid.
+            'pl.col("cat").cat.get_categories()',
+            'pl.col("en").cat.get_categories()',
             # Bare ``pl.Struct`` parses to Unknown — exempt from validation.
             'pl.col("st").struct.field("x")',
             'pl.col("st").str.contains("x")',
+            'pl.col("st").cat.get_categories()',
+            'pl.col("st").arr.sum()',
         ],
     )
     def test_valid_or_unknown_receiver_passes(self, expr: str):
@@ -7317,6 +7338,286 @@ class TestNamespaceReceiverDtype:
     def test_chained_receiver_valid_dtype_passes(self):
         results = self._analyze('pl.col("ts").max().dt.year()')
         assert results[0].errors == [], results[0].errors
+
+    def test_arr_on_list_message_names_array_requirement(self):
+        results = self._analyze('pl.col("xs").arr.sum()')
+        err = results[0].errors[0]
+        assert "PLY012" in err
+        assert "an Array column" in err
+        assert "List[Int64]" in err
+
+    def test_list_on_array_message_names_list_requirement(self):
+        results = self._analyze('pl.col("q").list.sum()')
+        err = results[0].errors[0]
+        assert "PLY012" in err
+        assert "a List column" in err
+        assert "Array[Int64]" in err
+
+    def test_cat_message_names_schema_error(self):
+        # Probed: `.cat` on a wrong dtype raises SchemaError, not
+        # InvalidOperationError — the message says so.
+        results = self._analyze('pl.col("i").cat.get_categories()')
+        err = results[0].errors[0]
+        assert "PLY012" in err
+        assert "a Categorical or Enum column" in err
+        assert "SchemaError" in err
+
+    def test_nullable_cat_receiver_passes(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                c: pl.Categorical = pa.Field(nullable=True)
+
+            def f(df: DataFrame[S]):
+                return df.select(pl.col("c").cat.len_chars().alias("out"))
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == [], results[0].errors
+
+    def test_nullable_array_receiver_passes_arr(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                q: pl.Array(pl.Int64, 3) = pa.Field(nullable=True)
+
+            def f(df: DataFrame[S]):
+                return df.select(pl.col("q").arr.sum().alias("out"))
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == [], results[0].errors
+
+    def test_nullable_list_receiver_flags_arr(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                xs: pl.List(pl.Int64) = pa.Field(nullable=True)
+
+            def f(df: DataFrame[S]):
+                return df.select(pl.col("xs").arr.sum().alias("out"))
+            """
+        )
+        results = analyze_source(source)
+        assert any("PLY012" in e for e in results[0].errors), results[0].errors
+
+
+class TestArrNamespaceReturns:
+    """Issue #53: arr-namespace result dtypes on Array receivers.
+
+    Probed on polars 1.41.2 (see compat.polars_api ARR_NAMESPACE_* /
+    container_agg_return): element returns, List-returning de-array
+    methods, Array-preserving methods, fixed UInt32/Boolean returns and
+    the float-aggregation cells.
+    """
+
+    HEADER = textwrap.dedent(
+        PANDERA_HEADER
+        + """
+            class In(pa.DataFrameModel):
+                q: pl.Array(pl.Int64, 3) = pa.Field()
+                f: pl.Array(pl.Float32, 2) = pa.Field()
+                w: pl.Array(pl.Int16, 2) = pa.Field()
+        """
+    )
+
+    def _dtype_of(self, expr: str):
+        source = self.HEADER + textwrap.dedent(
+            f"""
+            def f(df: DataFrame[In]):
+                return df.select(({expr}).alias("out"))
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == [], (expr, results[0].errors)
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        return ft.columns["out"].dtype
+
+    @pytest.mark.parametrize(
+        ("expr", "expected"),
+        [
+            # Element returns
+            ('pl.col("q").arr.sum()', Int64()),
+            ('pl.col("q").arr.min()', Int64()),
+            ('pl.col("q").arr.max()', Int64()),
+            ('pl.col("q").arr.first()', Int64()),
+            ('pl.col("q").arr.last()', Int64()),
+            ('pl.col("q").arr.get(0)', Int64()),
+            ('pl.col("q").arr.explode()', Int64()),
+            # Fixed returns
+            ('pl.col("q").arr.len()', UInt32()),
+            ('pl.col("q").arr.n_unique()', UInt32()),
+            ('pl.col("q").arr.arg_min()', UInt32()),
+            ('pl.col("q").arr.count_matches(1)', UInt32()),
+            ('pl.col("q").arr.contains(1)', Boolean()),
+            ('pl.col("q").arr.any()', Boolean()),
+            # De-array into List (probed: the fixed width is lost)
+            ('pl.col("q").arr.unique()', ListT(Int64())),
+            ('pl.col("q").arr.head(2)', ListT(Int64())),
+            ('pl.col("q").arr.to_list()', ListT(Int64())),
+            # Array-preserving
+            ('pl.col("q").arr.sort()', Array(Int64())),
+            ('pl.col("q").arr.reverse()', Array(Int64())),
+            ('pl.col("q").arr.shift()', Array(Int64())),
+            # Float aggregations: Int64 -> Float64, Float32 keeps Float32
+            ('pl.col("q").arr.mean()', Float64()),
+            ('pl.col("q").arr.median()', Float64()),
+            ('pl.col("q").arr.std()', Float64()),
+            ('pl.col("q").arr.var()', Float64()),
+            ('pl.col("f").arr.mean()', Float32()),
+            ('pl.col("f").arr.sum()', Float32()),
+            # sum widens narrow ints to Int64 (probed overflow guard)
+            ('pl.col("w").arr.sum()', Int64()),
+            # arr.eval keeps the Array container around the body dtype
+            ('pl.col("q").arr.eval(pl.element() * 2)', Array(Int64())),
+            ('pl.col("q").arr.eval(pl.element().cast(pl.Utf8))', Array(Utf8())),
+            # Unrecognised method falls through to Unknown (silent)
+            ('pl.col("q").arr.to_struct()', Unknown()),
+        ],
+    )
+    def test_arr_return_dtypes(self, expr: str, expected):
+        assert self._dtype_of(expr) == expected
+
+    def test_nullable_array_receiver_wraps_result(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                q: pl.Array(pl.Int64, 3) = pa.Field(nullable=True)
+
+            def f(df: DataFrame[S]):
+                return df.select(pl.col("q").arr.sum().alias("out"))
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == [], results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["out"].dtype == Nullable(Int64())
+
+    def test_arr_eval_bad_body_bubbles_error(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]):
+                return df.select(pl.col("q").arr.eval(pl.element() + pl.lit("x")).alias("out"))
+            """
+        )
+        results = analyze_source(source)
+        assert any("PLY009" in e for e in results[0].errors), results[0].errors
+
+    def test_arr_eval_as_list_degrades_to_unknown(self):
+        # ``as_list=True`` yields a List at runtime — not modeled, silent.
+        assert self._dtype_of('pl.col("q").arr.eval(pl.element() * 2, as_list=True)') == Unknown()
+
+
+class TestContainerAggReturns:
+    """Probed fix rolled into #53: list-namespace ``sum``/``mean``/``median``
+    (and newly ``std``/``var``) are not element-preserving.
+
+    Probed on polars 1.41.2: ``list.mean`` on List(Int64) -> Float64 (the
+    old element-return table claimed Int64); ``list.sum`` on Int8/Int16/
+    UInt8/UInt16 widens to Int64; Float32 cells keep Float32.
+    """
+
+    HEADER = textwrap.dedent(
+        PANDERA_HEADER
+        + """
+            class In(pa.DataFrameModel):
+                xs: pl.List(pl.Int64) = pa.Field()
+                f: pl.List(pl.Float32) = pa.Field()
+                w: pl.List(pl.Int16) = pa.Field()
+                s: pl.List(pl.Utf8) = pa.Field()
+        """
+    )
+
+    def _dtype_of(self, expr: str):
+        source = self.HEADER + textwrap.dedent(
+            f"""
+            def f(df: DataFrame[In]):
+                return df.select(({expr}).alias("out"))
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == [], (expr, results[0].errors)
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        return ft.columns["out"].dtype
+
+    @pytest.mark.parametrize(
+        ("expr", "expected"),
+        [
+            ('pl.col("xs").list.mean()', Float64()),
+            ('pl.col("xs").list.median()', Float64()),
+            ('pl.col("xs").list.std()', Float64()),
+            ('pl.col("xs").list.var()', Float64()),
+            ('pl.col("xs").list.sum()', Int64()),
+            ('pl.col("f").list.mean()', Float32()),
+            ('pl.col("f").list.sum()', Float32()),
+            ('pl.col("w").list.sum()', Int64()),
+            ('pl.col("w").list.min()', Int16()),
+            # sum over string elements raises at runtime; flagging it is
+            # out of scope — the dtype degrades to Unknown (silent).
+            ('pl.col("s").list.sum()', Unknown()),
+            ('pl.col("s").list.min()', Utf8()),
+            ('pl.col("xs").list.explode()', Int64()),
+        ],
+    )
+    def test_list_agg_return_dtypes(self, expr: str, expected):
+        assert self._dtype_of(expr) == expected
+
+
+class TestCatNamespaceReturns:
+    """Issue #54: cat-namespace result dtypes (probed on polars 1.41.2,
+    identical for Categorical and Enum receivers)."""
+
+    HEADER = textwrap.dedent(
+        PANDERA_HEADER
+        + """
+            class In(pa.DataFrameModel):
+                c: pl.Categorical
+                e: pl.Enum
+                n: pl.Categorical = pa.Field(nullable=True)
+        """
+    )
+
+    def _dtype_of(self, expr: str):
+        source = self.HEADER + textwrap.dedent(
+            f"""
+            def f(df: DataFrame[In]):
+                return df.select(({expr}).alias("out"))
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == [], (expr, results[0].errors)
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        return ft.columns["out"].dtype
+
+    @pytest.mark.parametrize(
+        ("expr", "expected"),
+        [
+            ('pl.col("c").cat.get_categories()', Utf8()),
+            ('pl.col("e").cat.get_categories()', Utf8()),
+            ('pl.col("c").cat.len_bytes()', UInt32()),
+            ('pl.col("c").cat.len_chars()', UInt32()),
+            ('pl.col("c").cat.starts_with("a")', Boolean()),
+            ('pl.col("c").cat.ends_with("a")', Boolean()),
+            ('pl.col("c").cat.slice(0, 2)', Utf8()),
+            # Unrecognised method falls through to Unknown (silent)
+            ('pl.col("c").cat.some_future_method()', Unknown()),
+            # get_categories is length-changing and never null — the
+            # receiver's nullability is NOT inherited (probed).
+            ('pl.col("n").cat.get_categories()', Utf8()),
+            # Per-row methods keep the receiver's nullability.
+            ('pl.col("n").cat.len_chars()', Nullable(UInt32())),
+        ],
+    )
+    def test_cat_return_dtypes(self, expr: str, expected):
+        assert self._dtype_of(expr) == expected
 
 
 class TestOverKeyValidation:
@@ -8975,6 +9276,55 @@ class TestResolvePlDtypeDatetime:
         )
         assert analyzer.errors == [], analyzer.errors
         assert analyzer.var_types["out"].columns["t"].dtype == Datetime(tz="UTC")
+
+
+class TestResolvePlDtypeArray:
+    """``_resolve_pl_dtype`` resolves ``pl.Array(X, n)`` call forms to the
+    Array dtype (issue #53) — cast targets and ``schema=`` dicts."""
+
+    @staticmethod
+    def _resolve(src: str):
+        import ast as _ast
+
+        from polypolarism.analyzer import _resolve_pl_dtype
+
+        return _resolve_pl_dtype(_ast.parse(src, mode="eval").body)
+
+    def test_call_form_with_width(self):
+        assert self._resolve("pl.Array(pl.Int64, 3)") == Array(Int64())
+
+    def test_call_form_nested_list_element(self):
+        assert self._resolve("pl.Array(pl.List(pl.Utf8), 2)") == Array(ListT(Utf8()))
+
+    def test_unresolvable_element_degrades_to_array_unknown(self):
+        assert self._resolve("pl.Array(some_var, 3)") == Array(Unknown())
+
+    def test_bare_attribute_is_unresolved(self):
+        # Consistent with bare ``pl.List``: a bare container reference in a
+        # cast / schema position stays unresolved (silent).
+        assert self._resolve("pl.Array") is None
+
+    def test_list_of_array(self):
+        assert self._resolve("pl.List(pl.Array(pl.Int64, 3))") == ListT(Array(Int64()))
+
+    def test_cast_target_array(self):
+        # End-to-end: casting a List column to ``pl.Array(...)`` (valid at
+        # runtime when the widths match — value-dependent, never flagged).
+        frame = FrameType({"v": ListT(Int64())})
+        analyzer = _run_body(
+            frame, 'out = df.with_columns(pl.col("v").cast(pl.Array(pl.Int64, 3)))'
+        )
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["v"].dtype == Array(Int64())
+
+    def test_frame_literal_schema_array(self):
+        frame = FrameType({"id": Int64()})
+        analyzer = _run_body(
+            frame,
+            'out = pl.DataFrame({"q": [[1, 2]]}, schema={"q": pl.Array(pl.Int64, 2)})',
+        )
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["q"].dtype == Array(Int64())
 
 
 class TestTzMismatchedDatetimeOps:

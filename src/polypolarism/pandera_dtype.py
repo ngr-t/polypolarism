@@ -8,15 +8,16 @@ Recognised annotation shapes:
   ``pandera.typing.polars.Series``) are accepted.
 - ``Optional[T]`` and ``T | None`` -> ``required=False``
 - ``Annotated[pl.List, pl.Int64()]`` -> ``List(Int64())``
-- ``Annotated[pl.Array, pl.Int64(), 3]`` -> ``List(Int64())`` (width ignored)
+- ``Annotated[pl.Array, pl.Int64(), 3]`` -> ``Array(Int64())`` (width ignored)
 - ``Annotated[pl.Struct, {"a": pl.Utf8(), "b": pl.Float64()}]`` -> ``Struct({...})``
 - Call-form containers: ``pl.List(pl.Int64)`` -> ``List(Int64())``,
-  ``pl.Array(pl.Int64, 4)`` -> ``List(Int64())`` (width ignored),
+  ``pl.Array(pl.Int64, 4)`` -> ``Array(Int64())`` (width ignored; issue #53),
   ``pl.Struct({"a": pl.Utf8})`` -> ``Struct({...})``. Unparseable element /
   field dtypes fall back to ``Unknown()``.
-- Bare containers: ``pl.List`` / ``pl.Array`` -> ``List(Unknown())``;
-  ``pl.Struct`` -> ``Unknown()`` (a struct without field info has no usable
-  shape — ``Struct({})`` would wrongly mean "empty struct").
+- Bare containers: ``pl.List`` -> ``List(Unknown())``; ``pl.Array`` ->
+  ``Array(Unknown())``; ``pl.Struct`` -> ``Unknown()`` (a struct without
+  field info has no usable shape — ``Struct({})`` would wrongly mean
+  "empty struct").
 
 Field RHS:
 - ``pa.Field(nullable=True)`` wraps the parsed dtype in ``Nullable(...)``.
@@ -30,6 +31,7 @@ import ast
 from polypolarism.compat.pandera_api import FIELD_CALLABLE_NAME
 from polypolarism.compat.polars_api import DTYPE_NAME_MAP, parse_datetime_call, parse_decimal_call
 from polypolarism.types import (
+    Array,
     Binary,
     Boolean,
     ColumnSpec,
@@ -147,8 +149,10 @@ def _parse_plain_dtype(node: ast.expr) -> DataType | None:
                 # dtype; bare ``pl.Struct`` has no usable shape at all, so
                 # it parses to ``Unknown`` (NOT ``Struct({})``, which would
                 # mean "empty struct" and unnest to zero columns).
-                if node.attr in ("List", "Array"):
+                if node.attr == "List":
                     return List(Unknown())
+                if node.attr == "Array":
+                    return Array(Unknown())
                 if node.attr == "Struct":
                     return Unknown()
                 return None
@@ -164,9 +168,12 @@ def _parse_plain_dtype(node: ast.expr) -> DataType | None:
         # Call-form containers: ``pl.List(pl.Int64)``, ``pl.Array(pl.Int64, 4)``
         # (width ignored, consistent with the Annotated handling), and
         # ``pl.Struct({"a": pl.Utf8, ...})``.
-        if _is_pl_attr(node.func, "List") or _is_pl_attr(node.func, "Array"):
+        if _is_pl_attr(node.func, "List"):
             inner = _parse_plain_dtype(node.args[0]) if node.args else None
             return List(inner if inner is not None else Unknown())
+        if _is_pl_attr(node.func, "Array"):
+            inner = _parse_plain_dtype(node.args[0]) if node.args else None
+            return Array(inner if inner is not None else Unknown())
         if _is_pl_attr(node.func, "Struct"):
             return _parse_struct_call(node)
         # ``pl.Decimal(precision, scale)`` preserves its arguments (shared
@@ -250,6 +257,8 @@ def _parse_annotated(node: ast.expr) -> tuple[DataType, bool] | None:
         inner_dtype = _parse_plain_dtype(meta[0])
         if inner_dtype is None:
             return None
+        if _is_pl_attr(head, "Array"):
+            return Array(inner_dtype), True
         return List(inner_dtype), True
 
     if _is_pl_attr(head, "Struct"):

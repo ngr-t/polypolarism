@@ -12,8 +12,9 @@ recognizes:
   ``EAGER_ONLY_METHODS`` — frame method classification.
 - ``STR_NAMESPACE_RETURN`` / ``DT_NAMESPACE_RETURN`` /
   ``DT_NAMESPACE_PRESERVING`` / ``LIST_NAMESPACE_PRESERVING`` /
-  ``LIST_NAMESPACE_ELEMENT_RETURN`` / ``BIN_NAMESPACE_RETURN`` —
-  sub-namespace return tables.
+  ``LIST_NAMESPACE_ELEMENT_RETURN`` / ``BIN_NAMESPACE_RETURN`` /
+  ``ARR_NAMESPACE_*`` / ``CAT_NAMESPACE_RETURN`` /
+  ``container_agg_return`` — sub-namespace return tables.
 - ``JOIN_HOW_VALUES`` / ``JOIN_HOW_INFERRED`` and the
   ``join_left_nullable`` / ``join_right_nullable`` predicates.
 - ``agg_function_for(name)`` / ``AGG_SHORTHAND_NAMES`` — polars-side
@@ -185,6 +186,11 @@ def parse_datetime_call(node: ast.Call) -> Datetime | None:
 #   analyzer doesn't differentiate between supported minors today, and
 #   recognizing newer names on older polars is harmless (the user's code
 #   wouldn't have run anyway).
+# - The container dtypes ``List`` / ``Array`` / ``Struct`` are deliberately
+#   absent: a bare ``pl.List`` / ``pl.Array`` carries no element dtype, so
+#   the analyzer treats it as unresolved in cast / ``schema=`` positions
+#   (the schema-annotation parser in ``pandera_dtype`` has its own bare-
+#   container fallbacks). Their call forms are matched in dispatch sites.
 DTYPE_NAME_MAP: dict[str, DataType] = {
     "Int8": Int8(),
     "Int16": Int16(),
@@ -420,19 +426,136 @@ LIST_NAMESPACE_PRESERVING: frozenset[str] = frozenset(
 )
 
 # ``pl.col("xs").list.<method>()`` methods that return the element dtype
-# (de-listing operations).
+# (de-listing operations). ``sum`` / ``mean`` / ``median`` / ``std`` /
+# ``var`` are NOT element-preserving — see ``container_agg_return`` below
+# (probed: ``list.mean`` on List(Int64) is Float64, not Int64).
 LIST_NAMESPACE_ELEMENT_RETURN: frozenset[str] = frozenset(
     {
         "get",
         "first",
         "last",
-        "sum",
-        "mean",
         "min",
         "max",
-        "median",
+        "explode",
     }
 )
+
+
+# Element-wise aggregations shared by the ``list`` and ``arr`` namespaces
+# whose result dtype is NOT simply the element dtype. Probed on polars
+# 1.41.2 — the two namespaces agree on every probed cell:
+#
+#   sum:  Int8/Int16/UInt8/UInt16 -> Int64 (overflow guard);
+#         Int32/Int64/UInt32/UInt64/Float32/Float64 -> element;
+#         Boolean -> UInt32; Decimal(p, s) -> Decimal(p, s).
+#         (Utf8 raises at runtime; other elements unprobed -> Unknown.)
+#   mean/median/std/var: Float32 -> Float32; every other probed numeric
+#         width and Boolean -> Float64. (Date -> Datetime for mean/median
+#         and Decimal -> Float64 for mean are probed but deliberately not
+#         claimed beyond mean(Decimal); unprobed cells -> Unknown.)
+CONTAINER_AGG_METHODS: frozenset[str] = frozenset({"sum", "mean", "median", "std", "var"})
+
+_CONTAINER_SUM_WIDENS_TO_INT64 = (Int8, Int16, UInt8, UInt16)
+_CONTAINER_SUM_KEEPS_ELEMENT = (Int32, Int64, UInt32, UInt64, Float32, Float64, Decimal)
+_CONTAINER_FLOAT_AGG_FLOAT64 = (
+    Int8,
+    Int16,
+    Int32,
+    Int64,
+    UInt8,
+    UInt16,
+    UInt32,
+    UInt64,
+    Float64,
+    Boolean,
+)
+
+
+def container_agg_return(method: str, element: DataType) -> DataType | None:
+    """Result dtype of ``list.<agg>()`` / ``arr.<agg>()`` for one element dtype.
+
+    ``None`` means the cell is unprobed (or a probed runtime error, e.g.
+    ``sum`` over string elements) — the caller degrades to Unknown.
+    """
+    if method == "sum":
+        if isinstance(element, _CONTAINER_SUM_WIDENS_TO_INT64):
+            return Int64()
+        if isinstance(element, Boolean):
+            return UInt32()
+        if isinstance(element, _CONTAINER_SUM_KEEPS_ELEMENT):
+            return element
+        return None
+    if method in ("mean", "median", "std", "var"):
+        if isinstance(element, Float32):
+            return Float32()
+        if isinstance(element, _CONTAINER_FLOAT_AGG_FLOAT64):
+            return Float64()
+        if isinstance(element, Decimal) and method == "mean":
+            return Float64()
+        return None
+    return None
+
+
+# ``pl.col("q").arr.<method>()`` tables (issue #53). Probed on polars
+# 1.41.2 with Array receivers; the polars arr namespace is close to —
+# but not identical with — the list namespace:
+# - ``sort`` / ``reverse`` / ``shift`` preserve the Array dtype;
+# - ``unique`` / ``head`` / ``tail`` / ``slice`` / ``to_list`` return a
+#   *List* of the element dtype (the fixed width is lost);
+# - ``get`` / ``first`` / ``last`` / ``min`` / ``max`` / ``explode``
+#   return the element dtype;
+# - fixed returns below; ``join`` (element-dependent error) and
+#   ``to_struct`` / ``agg`` (shape-dependent) fall through to Unknown.
+ARR_NAMESPACE_PRESERVING: frozenset[str] = frozenset({"sort", "reverse", "shift"})
+
+ARR_NAMESPACE_ELEMENT_RETURN: frozenset[str] = frozenset(
+    {
+        "get",
+        "first",
+        "last",
+        "min",
+        "max",
+        "explode",
+    }
+)
+
+ARR_NAMESPACE_TO_LIST: frozenset[str] = frozenset(
+    {
+        "unique",
+        "head",
+        "tail",
+        "slice",
+        "to_list",
+    }
+)
+
+ARR_NAMESPACE_RETURN: dict[str, DataType] = {
+    "len": UInt32(),
+    "n_unique": UInt32(),
+    "arg_min": UInt32(),
+    "arg_max": UInt32(),
+    "count_matches": UInt32(),
+    "contains": Boolean(),
+    "any": Boolean(),
+    "all": Boolean(),
+}
+
+
+# ``pl.col("c").cat.<method>(...)`` return types (issue #54). Probed on
+# polars 1.41.2 with Categorical AND Enum receivers (identical results):
+# ``get_categories`` -> String, ``len_bytes`` / ``len_chars`` -> UInt32,
+# ``starts_with`` / ``ends_with`` -> Boolean, ``slice`` -> String.
+# ``get_categories`` is length-changing (one row per category) and its
+# output has no nulls even for a nullable receiver (probed) — the
+# dispatcher skips the receiver-nullability wrap for it.
+CAT_NAMESPACE_RETURN: dict[str, DataType] = {
+    "get_categories": Utf8(),
+    "len_bytes": UInt32(),
+    "len_chars": UInt32(),
+    "starts_with": Boolean(),
+    "ends_with": Boolean(),
+    "slice": Utf8(),
+}
 
 # ``pl.col("b").bin.<method>(...)`` return types (issue #51). Probed on
 # polars 1.41.2: ``encode("hex"/"base64")`` -> String, ``decode`` ->

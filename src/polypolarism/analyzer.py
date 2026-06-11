@@ -10,7 +10,13 @@ from pathlib import Path
 
 from polypolarism.compat.polars_api import (
     AGG_SHORTHAND_NAMES,
+    ARR_NAMESPACE_ELEMENT_RETURN,
+    ARR_NAMESPACE_PRESERVING,
+    ARR_NAMESPACE_RETURN,
+    ARR_NAMESPACE_TO_LIST,
     BIN_NAMESPACE_RETURN,
+    CAT_NAMESPACE_RETURN,
+    CONTAINER_AGG_METHODS,
     DT_NAMESPACE_PRESERVING,
     DT_NAMESPACE_RETURN,
     DTYPE_NAME_MAP,
@@ -22,6 +28,7 @@ from polypolarism.compat.polars_api import (
     STR_NAMESPACE_RETURN,
     agg_function_for,
     canonicalize_method,
+    container_agg_return,
     parse_datetime_call,
     parse_decimal_call,
 )
@@ -95,6 +102,7 @@ from polypolarism.pandera_schema import (
 )
 from polypolarism.types import (
     NUMERIC_DTYPES,
+    Array,
     Binary,
     Boolean,
     Categorical,
@@ -180,6 +188,11 @@ def _resolve_pl_dtype(node: ast.expr) -> DataType | None:
             if node.func.attr == "List" and node.args:
                 element = _resolve_pl_dtype(node.args[0])
                 return ListT(element if element is not None else Unknown())
+            # ``pl.Array(pl.Int64, 3)`` — same recursion; the width argument
+            # is not modeled (issue #53, "width ignored").
+            if node.func.attr == "Array" and node.args:
+                element = _resolve_pl_dtype(node.args[0])
+                return Array(element if element is not None else Unknown())
             # ``pl.Decimal(p, s)`` preserves precision/scale (issue #38);
             # omitted args take polars' defaults. Non-literal args are
             # unknowable — return unresolved (None) rather than fabricating
@@ -919,30 +932,41 @@ def _nonboolean_predicate_error(
 # - ``.str`` rejects every non-String dtype at runtime, Categorical/Enum
 #   included ("InvalidOperationError: expected String type, got: cat"), so
 #   only Utf8 passes.
-# - ``.list`` and ``.arr`` both accept our ``List`` dtype because
-#   polypolarism models polars ``Array`` as ``List`` — the two are
-#   statically indistinguishable here, so ``.arr`` on a true List column
-#   (a runtime error) is deliberately not flagged: false positives are
-#   worse than false negatives.
+# - ``.list`` requires List and ``.arr`` requires Array (issue #53) —
+#   probed: every ``.arr.*`` method on a List column raises
+#   "InvalidOperationError: expected Array datatype for array operation"
+#   and ``.list.*`` on an Array column raises "expected List data type".
 # - ``.bin`` rejects every non-Binary dtype (issue #51) — probed: Int64
 #   and String receivers both raise "SchemaError: expected `Binary`".
+# - ``.cat`` requires Categorical or Enum (issue #54) — probed: Int64,
+#   String, Date, Boolean and List receivers all raise "SchemaError:
+#   expected an Enum or Categorical type".
 # Unknown / unresolved receivers are exempted by the caller.
 _NAMESPACE_VALID_DTYPES: dict[str, tuple[type[DataType], ...]] = {
     "str": (Utf8,),
     "dt": (Date, Datetime, Time, Duration),
     "list": (ListT,),
-    "arr": (ListT,),
+    "arr": (Array,),
     "struct": (Struct,),
     "bin": (Binary,),
+    "cat": (Categorical, Enum),
 }
 
 _NAMESPACE_EXPECTED_DESC: dict[str, str] = {
     "str": "a String column",
     "dt": "a temporal column (Date, Datetime, Time or Duration)",
-    "list": "a List or Array column",
-    "arr": "a List or Array column",
+    "list": "a List column",
+    "arr": "an Array column",
     "struct": "a Struct column",
     "bin": "a Binary column",
+    "cat": "a Categorical or Enum column",
+}
+
+# Exception polars raises for a wrong receiver dtype — named in the PLY012
+# message. Every namespace raises InvalidOperationError except ``.cat``
+# (probed: SchemaError "expected an Enum or Categorical type").
+_NAMESPACE_RUNTIME_ERROR: dict[str, str] = {
+    "cat": "SchemaError",
 }
 
 
@@ -1782,6 +1806,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
     _LIST_PRESERVING = LIST_NAMESPACE_PRESERVING
     _LIST_ELEMENT_RETURN = LIST_NAMESPACE_ELEMENT_RETURN
     _BIN_RETURN = BIN_NAMESPACE_RETURN
+    _CAT_RETURN = CAT_NAMESPACE_RETURN
 
     def analyze_select_expr(self, node: ast.expr) -> tuple[str | None, DataType | None]:
         """Analyze a select expression, return (output_name, type)."""
@@ -2121,6 +2146,28 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 return s, None
         return self.analyze_select_expr(node)
 
+    def _eval_body_dtype(
+        self, element_dtype: DataType, call_node: ast.Call | None
+    ) -> DataType | None:
+        """Type-check a ``list.eval`` / ``arr.eval`` body (issue #44 / #53).
+
+        Runs the body through a child analyzer with ``pl.element()`` bound
+        to the container's element dtype; the child's errors (e.g. PLY009
+        from Int+String arithmetic) bubble up. Returns the body dtype, or
+        ``None`` when it cannot be resolved.
+        """
+        if call_node is None or not call_node.args:
+            return None
+        child = ExpressionAnalyzer(
+            self.current_frame,
+            warnings=self.warnings,
+            registry=self.registry,
+            element_dtype=element_dtype,
+        )
+        _, body_dtype = child.analyze_select_expr(call_node.args[0])
+        self.errors.extend(child.errors)
+        return body_dtype
+
     def _dispatch_namespace_method(
         self,
         namespace: str,
@@ -2171,7 +2218,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 result = self._DT_RETURN[method]
             elif method in self._DT_PRESERVING and receiver_inner is not None:
                 result = receiver_inner
-        elif namespace in ("list", "arr"):
+        elif namespace == "list":
             if method == "len":
                 result = UInt32()
             elif method == "eval" and isinstance(receiver_inner, ListT):
@@ -2181,21 +2228,53 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 # its errors (e.g. PLY009 from Int+String arithmetic)
                 # bubble up — and the result is List(body dtype);
                 # an unresolvable body degrades to List(Unknown).
-                body_dtype: DataType | None = None
-                if call_node is not None and call_node.args:
-                    child = ExpressionAnalyzer(
-                        self.current_frame,
-                        warnings=self.warnings,
-                        registry=self.registry,
-                        element_dtype=receiver_inner.inner,
-                    )
-                    _, body_dtype = child.analyze_select_expr(call_node.args[0])
-                    self.errors.extend(child.errors)
+                body_dtype = self._eval_body_dtype(receiver_inner.inner, call_node)
                 result = ListT(body_dtype if body_dtype is not None else Unknown())
             elif method in self._LIST_PRESERVING and receiver_inner is not None:
                 result = receiver_inner
-            elif method in self._LIST_ELEMENT_RETURN and isinstance(receiver_inner, ListT):
-                result = receiver_inner.inner
+            elif isinstance(receiver_inner, ListT):
+                if method in self._LIST_ELEMENT_RETURN:
+                    result = receiver_inner.inner
+                elif method in CONTAINER_AGG_METHODS:
+                    element = receiver_inner.inner
+                    if isinstance(element, Nullable):
+                        element = element.inner
+                    result = container_agg_return(method, element)
+        elif namespace == "arr":
+            # Issue #53: the polars arr namespace mirrors most of the list
+            # namespace but is dispatched separately — several methods
+            # de-array into a List, and the receiver must be Array.
+            if method in ARR_NAMESPACE_RETURN:
+                result = ARR_NAMESPACE_RETURN[method]
+            elif method == "eval" and isinstance(receiver_inner, Array):
+                # ``arr.eval(body)`` is length-preserving and keeps the
+                # Array container (probed); ``as_list=True`` (which yields
+                # a List instead) is not modeled — degrade to Unknown.
+                if call_node is not None and any(kw.arg == "as_list" for kw in call_node.keywords):
+                    result = Unknown()
+                else:
+                    body_dtype = self._eval_body_dtype(receiver_inner.inner, call_node)
+                    result = Array(body_dtype if body_dtype is not None else Unknown())
+            elif method in ARR_NAMESPACE_PRESERVING and receiver_inner is not None:
+                result = receiver_inner
+            elif isinstance(receiver_inner, Array):
+                element = receiver_inner.inner
+                if method in ARR_NAMESPACE_ELEMENT_RETURN:
+                    result = element
+                elif method in ARR_NAMESPACE_TO_LIST:
+                    result = ListT(element)
+                elif method in CONTAINER_AGG_METHODS:
+                    if isinstance(element, Nullable):
+                        element = element.inner
+                    result = container_agg_return(method, element)
+        elif namespace == "cat":
+            # Issue #54. ``get_categories`` returns the category list (one
+            # row per category): length-changing, and its output carries no
+            # nulls even for a nullable receiver (probed) — skip the
+            # receiver-nullability wrap.
+            result = self._CAT_RETURN.get(method)
+            if method == "get_categories":
+                return result
         elif namespace == "struct":
             if method == "field" and call_node is not None and call_node.args:
                 field_name = _str_constant(call_node.args[0])
@@ -2569,12 +2648,13 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 base = col_type.inner if isinstance(col_type, Nullable) else col_type
                 if not isinstance(base, _NAMESPACE_VALID_DTYPES[ns]):
                     subject = f"column '{col_name}'" if col_name else "the receiver expression"
+                    runtime_error = _NAMESPACE_RUNTIME_ERROR.get(ns, "InvalidOperationError")
                     self.errors.append(
                         tag(
                             PLY012,
                             f"`.{ns}` accessor requires "
                             f"{_NAMESPACE_EXPECTED_DESC[ns]}, but {subject} is "
-                            f"{col_type} — polars raises InvalidOperationError "
+                            f"{col_type} — polars raises {runtime_error} "
                             f"at runtime",
                         )
                     )
