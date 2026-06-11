@@ -1,0 +1,2 @@
+bug_day_declared_i64: FAIL
+  error: Column 'day' has type Int32, but declared type is Int64

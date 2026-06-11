@@ -510,6 +510,10 @@ DT_NAMESPACE_RETURN: dict[str, DataType] = {
     # Formatting into strings — ``strftime`` is an alias of ``to_string``.
     "strftime": Utf8(),
     "to_string": Utf8(),
+    # ``epoch`` is argument-dependent (issue #73): ``epoch("d")`` returns
+    # Int32, the sub-second units Int64 — dispatched via
+    # ``analyzer._dt_epoch_dtype`` before this table is consulted; the
+    # entry documents the no-argument default (time_unit="us").
     "epoch": Int64(),
     "timestamp": Int64(),
     "total_days": Int64(),

@@ -2637,12 +2637,13 @@ class TestDiffTemporalAndUnsigned:
         assert analyzer.errors == []
         assert analyzer.var_types["out"].columns["d"].dtype == Nullable(Date())
 
-    def test_pct_change_on_unsigned_is_untouched(self):
-        # ``pct_change`` keeps the generic shift-like behaviour.
+    def test_pct_change_on_unsigned_is_float64(self):
+        # ``pct_change`` divides — no diff-style unsigned widening, the
+        # result is Float64 (issue #71; full matrix in TestPctChangeDtype).
         frame = FrameType({"v": UInt32()})
         analyzer = _run_body(frame, 'out = df.select(d=pl.col("v").pct_change())')
         assert analyzer.errors == []
-        assert analyzer.var_types["out"].columns["d"].dtype == Nullable(UInt32())
+        assert analyzer.var_types["out"].columns["d"].dtype == Nullable(Float64())
 
 
 class TestM5Over:
@@ -12130,3 +12131,308 @@ class TestSmallIntLandmarkReductionContexts:
         )
         assert analyzer.errors == [], analyzer.errors
         assert analyzer.var_types["out"].columns["a"].dtype == Float64()
+
+
+class TestPctChangeDtype:
+    """Issue #71: ``pct_change()`` divides — it is NOT dtype-preserving.
+
+    Probed (polars 1.41.2):
+    - every int width (Int8..Int128, UInt8..UInt128), Boolean, the
+      temporals (Date / Datetime any unit or tz / Time / Duration),
+      Decimal and Null -> Float64
+    - Float16 -> Float16, Float32 -> Float32 (float width preserved)
+    - Utf8 is accepted (non-strict cast; all-null Float64)
+    - Binary / Categorical / Enum / List / Array raise at runtime
+      (InvalidOperationError or ComputeError); Struct ABORTS the process
+      (rust crash) — all flagged PLY016
+    - the head slot is always null -> the result is always Nullable
+    """
+
+    def _run(self, dtype, expr: str = 'pl.col("v").pct_change()'):
+        return _run_body(FrameType({"v": dtype}), f"out = df.select(d={expr})")
+
+    @pytest.mark.parametrize(
+        "receiver",
+        [
+            Int8(),
+            Int16(),
+            Int32(),
+            Int64(),
+            Int128(),
+            UInt8(),
+            UInt16(),
+            UInt32(),
+            UInt64(),
+            UInt128(),
+        ],
+        ids=["i8", "i16", "i32", "i64", "i128", "u8", "u16", "u32", "u64", "u128"],
+    )
+    def test_int_receiver_is_nullable_float64(self, receiver):
+        analyzer = self._run(receiver)
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["d"].dtype == Nullable(Float64())
+
+    @pytest.mark.parametrize(
+        "receiver",
+        [Float16(), Float32(), Float64()],
+        ids=["f16", "f32", "f64"],
+    )
+    def test_float_receiver_keeps_width(self, receiver):
+        analyzer = self._run(receiver)
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["d"].dtype == Nullable(receiver)
+
+    @pytest.mark.parametrize(
+        "receiver",
+        [
+            Boolean(),
+            Utf8(),
+            Date(),
+            Datetime(),
+            Datetime(tz="UTC"),
+            Datetime(unit="ms"),
+            Time(),
+            Duration(unit="ms"),
+            Decimal(10, 2),
+            Null(),
+        ],
+        ids=["bool", "utf8", "date", "dt", "dt_tz", "dt_ms", "time", "dur_ms", "dec", "null"],
+    )
+    def test_castable_receiver_is_nullable_float64(self, receiver):
+        # polars casts these to Float64 non-strictly and divides (probed;
+        # Utf8 yields an all-null Float64 column).
+        analyzer = self._run(receiver)
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["d"].dtype == Nullable(Float64())
+
+    def test_nullable_int_receiver_is_nullable_float64(self):
+        analyzer = self._run(Nullable(Int64()))
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["d"].dtype == Nullable(Float64())
+
+    @pytest.mark.parametrize(
+        "receiver",
+        [
+            Binary(),
+            Categorical(),
+            Enum(("a", "b")),
+            ListT(Int64()),
+            Array(Int64(), 2),
+            Struct({"f": Int64()}),
+        ],
+        ids=["bin", "cat", "enum", "list", "array", "struct"],
+    )
+    def test_invalid_receiver_flags_ply016(self, receiver):
+        analyzer = self._run(receiver)
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY016" in analyzer.errors[0]
+        assert "pct_change" in analyzer.errors[0]
+        assert analyzer.var_types["out"].columns["d"].dtype == Unknown()
+
+    def test_unknown_receiver_stays_silent(self):
+        analyzer = self._run(Unknown())
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["d"].dtype == Nullable(Unknown())
+
+    def test_shift_regression_keeps_receiver_dtype(self):
+        # Regression guard: only pct_change leaves the shift-like family —
+        # ``shift`` stays dtype-preserving.
+        analyzer = self._run(Int32(), 'pl.col("v").shift(1)')
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["d"].dtype == Nullable(Int32())
+
+
+class TestNotBitwiseDtype:
+    """Issue #72: ``not_()`` / ``~`` is bitwise NOT on integers.
+
+    Probed (polars 1.41.2) — documented in the ``Expr.not_`` docstring
+    ("operates bitwise on integers"):
+    - Boolean -> Boolean (null-preserving: ~null is null)
+    - every int width (Int8..Int128, UInt8..UInt128) -> same dtype
+    - everything else (floats incl. Float16, Utf8, Binary, temporals,
+      Decimal, Categorical, Enum, List, Array, Struct, Null) raises
+      InvalidOperationError "dtype X not supported in 'not' operation"
+    """
+
+    _INT_RECEIVERS = [
+        Int8(),
+        Int16(),
+        Int32(),
+        Int64(),
+        Int128(),
+        UInt8(),
+        UInt16(),
+        UInt32(),
+        UInt64(),
+        UInt128(),
+    ]
+    _INT_IDS = ["i8", "i16", "i32", "i64", "i128", "u8", "u16", "u32", "u64", "u128"]
+
+    def _run(self, dtype, expr: str):
+        return _run_body(FrameType({"v": dtype}), f"out = df.select(r={expr})")
+
+    @pytest.mark.parametrize("receiver", _INT_RECEIVERS, ids=_INT_IDS)
+    def test_not_method_on_int_preserves_dtype(self, receiver):
+        analyzer = self._run(receiver, 'pl.col("v").not_()')
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["r"].dtype == receiver
+
+    @pytest.mark.parametrize("receiver", _INT_RECEIVERS, ids=_INT_IDS)
+    def test_invert_operator_on_int_preserves_dtype(self, receiver):
+        analyzer = self._run(receiver, '~pl.col("v")')
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["r"].dtype == receiver
+
+    def test_not_method_on_boolean_is_boolean(self):
+        analyzer = self._run(Boolean(), 'pl.col("v").not_()')
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["r"].dtype == Boolean()
+
+    def test_not_method_on_nullable_boolean_keeps_nullable(self):
+        # ~null is null (probed) — the Nullable wrapper carries through.
+        analyzer = self._run(Nullable(Boolean()), 'pl.col("v").not_()')
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["r"].dtype == Nullable(Boolean())
+
+    def test_invert_on_nullable_int_keeps_nullable(self):
+        analyzer = self._run(Nullable(Int64()), '~pl.col("v")')
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["r"].dtype == Nullable(Int64())
+
+    @pytest.mark.parametrize(
+        "receiver",
+        [
+            Float16(),
+            Float32(),
+            Float64(),
+            Utf8(),
+            Binary(),
+            Date(),
+            Datetime(),
+            Time(),
+            Duration(),
+            Decimal(10, 2),
+            Categorical(),
+            Enum(("a", "b")),
+            ListT(Int64()),
+            ListT(Boolean()),
+            Array(Int64(), 2),
+            Struct({"f": Int64()}),
+            Null(),
+        ],
+        ids=[
+            "f16",
+            "f32",
+            "f64",
+            "utf8",
+            "bin",
+            "date",
+            "dt",
+            "time",
+            "dur",
+            "dec",
+            "cat",
+            "enum",
+            "list_int",
+            "list_bool",
+            "array",
+            "struct",
+            "null",
+        ],
+    )
+    @pytest.mark.parametrize("expr", ['pl.col("v").not_()', '~pl.col("v")'], ids=["not_", "~"])
+    def test_invalid_receiver_flags_ply016(self, receiver, expr):
+        analyzer = self._run(receiver, expr)
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY016" in analyzer.errors[0]
+        assert analyzer.var_types["out"].columns["r"].dtype == Unknown()
+
+    def test_nullable_invalid_receiver_still_flags(self):
+        analyzer = self._run(Nullable(Float64()), 'pl.col("v").not_()')
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY016" in analyzer.errors[0]
+
+    @pytest.mark.parametrize("expr", ['pl.col("v").not_()', '~pl.col("v")'], ids=["not_", "~"])
+    def test_unknown_receiver_stays_silent(self, expr):
+        analyzer = self._run(Unknown(), expr)
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["r"].dtype == Unknown()
+
+    def test_invert_of_comparison_is_boolean(self):
+        # Regression guard: ~(a > 0) stays Boolean.
+        analyzer = self._run(Int64(), '~(pl.col("v") > 0)')
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["r"].dtype == Boolean()
+
+    def test_other_boolean_predicates_unaffected(self):
+        # Regression guard: is_null on a non-Boolean column is still Boolean.
+        analyzer = self._run(Int64(), 'pl.col("v").is_null()')
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["r"].dtype == Boolean()
+
+
+class TestDtEpochTimeUnit:
+    """Issue #73: ``dt.epoch``'s return dtype depends on its ``time_unit``.
+
+    Probed (polars 1.41.2): "ns"/"us"/"ms"/"s" -> Int64; "d" -> Int32; the
+    no-arg default is "us" -> Int64. An invalid literal raises ValueError at
+    expression-construction time and a non-literal argument is unknowable —
+    both degrade to Unknown.
+    """
+
+    def _run(self, expr: str, dtype=None):
+        return _run_body(
+            FrameType({"t": dtype if dtype is not None else Datetime()}),
+            f"out = df.select(e={expr})",
+        )
+
+    def test_epoch_default_is_int64(self):
+        analyzer = self._run('pl.col("t").dt.epoch()')
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["e"].dtype == Int64()
+
+    @pytest.mark.parametrize("unit", ["ns", "us", "ms", "s"])
+    def test_epoch_subsecond_units_are_int64(self, unit):
+        analyzer = self._run(f'pl.col("t").dt.epoch("{unit}")')
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["e"].dtype == Int64()
+
+    def test_epoch_day_is_int32(self):
+        analyzer = self._run('pl.col("t").dt.epoch("d")')
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["e"].dtype == Int32()
+
+    def test_epoch_day_keyword_is_int32(self):
+        analyzer = self._run('pl.col("t").dt.epoch(time_unit="d")')
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["e"].dtype == Int32()
+
+    def test_epoch_day_on_date_receiver_is_int32(self):
+        analyzer = self._run('pl.col("t").dt.epoch("d")', dtype=Date())
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["e"].dtype == Int32()
+
+    def test_epoch_nullable_receiver_wraps_nullable(self):
+        analyzer = self._run('pl.col("t").dt.epoch("d")', dtype=Nullable(Datetime()))
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["e"].dtype == Nullable(Int32())
+
+    def test_epoch_non_literal_unit_degrades_to_unknown(self):
+        analyzer = _run_body(
+            FrameType({"t": Datetime()}),
+            'unit = some_unit\nout = df.select(e=pl.col("t").dt.epoch(unit))',
+        )
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["e"].dtype == Unknown()
+
+    def test_epoch_invalid_literal_degrades_to_unknown(self):
+        # epoch("x") raises ValueError before any frame exists — never
+        # claim a dtype for it.
+        analyzer = self._run('pl.col("t").dt.epoch("x")')
+        assert analyzer.var_types["out"].columns["e"].dtype == Unknown()
+
+    def test_epoch_timestamp_regression_is_int64(self):
+        # Regression guard: ``dt.timestamp`` keeps its fixed Int64 entry.
+        analyzer = self._run('pl.col("t").dt.timestamp()')
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["e"].dtype == Int64()

@@ -1444,6 +1444,38 @@ def _str_to_decimal_dtype(call_node: ast.Call | None) -> DataType:
     return Unknown()
 
 
+# ``dt.epoch`` time_unit literals and their probed return dtypes (issue
+# #73). Probed (polars 1.41.2): "ns"/"us"/"ms"/"s" -> Int64 but "d" ->
+# Int32 (days since epoch) — on every accepting receiver (Date and
+# Datetime at any unit/tz behave identically). Any other literal raises
+# ValueError at expression-construction time.
+_EPOCH_UNIT_DTYPES: dict[str, DataType] = {
+    "ns": Int64(),
+    "us": Int64(),
+    "ms": Int64(),
+    "s": Int64(),
+    "d": Int32(),
+}
+
+
+def _dt_epoch_dtype(call_node: ast.Call | None) -> DataType:
+    """Result dtype of ``dt.epoch(...)`` (issue #73).
+
+    The return dtype depends on the ``time_unit`` argument (positional or
+    keyword, probed): see ``_EPOCH_UNIT_DTYPES``; the no-arg default is
+    "us" -> Int64. A non-literal time_unit is unknowable and an invalid
+    literal never reaches a frame — both degrade to Unknown rather than
+    claiming Int64 (the issue #73 false positive was a fixed table entry).
+    """
+    unit_node = _call_arg(call_node, position=0, name="time_unit")
+    if unit_node is None:
+        return Int64()  # default time_unit="us"
+    unit = _str_constant(unit_node)
+    if unit is not None and unit in _EPOCH_UNIT_DTYPES:
+        return _EPOCH_UNIT_DTYPES[unit]
+    return Unknown()
+
+
 def _str_list_or_tuple(node: ast.expr) -> list[str] | None:
     if isinstance(node, (ast.List, ast.Tuple)):
         out: list[str] = []
@@ -2120,6 +2152,8 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         return None
 
     # Methods on a column expression that always produce Boolean.
+    # ``not_`` is deliberately absent (issue #72): it negates Booleans but
+    # operates BITWISE on integers — see ``_NOT_VALID_RECEIVERS`` below.
     _BOOLEAN_PREDICATE_METHODS = frozenset(
         {
             "is_null",
@@ -2135,8 +2169,34 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             "is_in",
             "is_between",
             "has_nulls",
-            "not_",
         }
+    )
+
+    # ---- bitwise/logical NOT (issue #72) -------------------------------------
+    # Probed (polars 1.41.2) receiver matrix for ``Expr.not_`` / ``~``. The
+    # integer behaviour is documented contract — the ``Expr.not_`` docstring
+    # says it "operates bitwise on integers":
+    # - Boolean -> Boolean (null-preserving: ~null is null);
+    # - every int width (Int8..Int128, UInt8..UInt128) -> same dtype
+    #   (bitwise NOT: ~1 == -2, ~UInt8(1) == 254) — i.e. every valid
+    #   receiver is dtype-preserving;
+    # - everything else (floats incl. Float16, Utf8, Binary, Date,
+    #   Datetime, Time, Duration, Decimal, Categorical, Enum, List, Array,
+    #   Struct, Null) raises InvalidOperationError
+    #   ("dtype `X` not supported in 'not' operation") -> PLY016 and the
+    #   output degrades to Unknown.
+    _NOT_VALID_RECEIVERS = (
+        Boolean,
+        Int8,
+        Int16,
+        Int32,
+        Int64,
+        Int128,
+        UInt8,
+        UInt16,
+        UInt32,
+        UInt64,
+        UInt128,
     )
 
     # Methods that return Float64 from any numeric receiver.
@@ -2343,7 +2403,24 @@ class ExpressionAnalyzer(ast.NodeVisitor):
     }
 
     # Shift-like methods: receiver dtype, but head positions become NULL.
-    _SHIFT_LIKE_METHODS = frozenset({"shift", "diff", "pct_change"})
+    # ``pct_change`` is deliberately absent (issue #71): it divides, so it
+    # is NOT dtype-preserving — see ``_PCT_CHANGE_INVALID_RECEIVERS``.
+    _SHIFT_LIKE_METHODS = frozenset({"shift", "diff"})
+
+    # ---- pct_change (issue #71) ----------------------------------------------
+    # Probed (polars 1.41.2) receiver matrix. ``pct_change`` divides by the
+    # most-recent non-null element (same family as ``/``-division, issue
+    # #14): float receivers keep their width (Float16 -> Float16,
+    # Float32 -> Float32); every other accepted receiver — ints at all
+    # widths (Int128/UInt128 included), Boolean, Date / Datetime (any
+    # unit/tz) / Time / Duration, Decimal and Null — is cast to Float64
+    # first, and Utf8 is accepted via polars' non-strict cast (all-null
+    # Float64). Receivers listed here raise at runtime
+    # (InvalidOperationError / ComputeError: "casting from X to Float64
+    # not supported") — except Struct, which ABORTS the process in rust
+    # (probed SIGSEGV, not a catchable error) — so the cell is flagged all
+    # the same -> PLY016 and the output degrades to Unknown.
+    _PCT_CHANGE_INVALID_RECEIVERS = (Binary, Categorical, Enum, ListT, Array, Struct)
 
     # ---- over(mapping_strategy="join") cardinality classification ----------
     # Probed (polars 1.41.2; issue #45): "join" only gathers the windowed
@@ -2488,9 +2565,19 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             resolved = [t for t in (left_type, right_type) if t is not None]
             return alias, _wrap_nullable_if_any(Boolean(), resolved)
 
-        # Logical NOT: ~expr or `not expr` -> Boolean (when receiver is
-        # boolean-like). ``~null`` is null, so nullability carries through.
-        if isinstance(inner_node, ast.UnaryOp) and isinstance(inner_node.op, (ast.Invert, ast.Not)):
+        # ``~expr`` negates Booleans but operates BITWISE on integers,
+        # preserving the dtype (issue #72) — same matrix as ``Expr.not_``;
+        # see ``_NOT_VALID_RECEIVERS``. ``~null`` is null, so nullability
+        # carries through.
+        if isinstance(inner_node, ast.UnaryOp) and isinstance(inner_node.op, ast.Invert):
+            _, operand_type = self.analyze_select_expr(inner_node.operand)
+            return alias, self._not_dtype(operand_type, op_desc="~")
+
+        # Python ``not expr`` -> Boolean. On a polars Expr it raises
+        # TypeError at expression-construction time (``Expr.__bool__`` is
+        # ambiguous), so this only ever reaches a frame for plain Python
+        # truthiness — which IS a bool.
+        if isinstance(inner_node, ast.UnaryOp) and isinstance(inner_node.op, ast.Not):
             _, operand_type = self.analyze_select_expr(inner_node.operand)
             resolved = [operand_type] if operand_type is not None else []
             return alias, _wrap_nullable_if_any(Boolean(), resolved)
@@ -2883,6 +2970,11 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 # that tz mismatches are flagged (issue #50 collateral).
                 # The receiver's time unit is preserved (issue #66).
                 result = _time_zone_arg_dtype(method, call_node, receiver_inner)
+            elif method == "epoch":
+                # Argument-dependent (issue #73): "d" -> Int32, the
+                # sub-second units -> Int64 — dispatched before the fixed
+                # table below.
+                result = _dt_epoch_dtype(call_node)
             elif method in self._DT_RETURN:
                 result = self._DT_RETURN[method]
             elif method in self._DT_PRESERVING and receiver_inner is not None:
@@ -3001,6 +3093,32 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         if receiver_is_nullable and not isinstance(result, (Nullable, Unknown)):
             return Nullable(result)
         return result
+
+    def _not_dtype(self, receiver_type: DataType | None, *, op_desc: str) -> DataType | None:
+        """Result dtype of ``~expr`` / ``Expr.not_()`` (issue #72).
+
+        Every valid receiver (Boolean + all integer widths, see
+        ``_NOT_VALID_RECEIVERS``) is dtype-preserving — the receiver
+        instance is returned so Nullable wrappers (and any future
+        parameters) flow through. Invalid receivers are a guaranteed
+        runtime InvalidOperationError -> PLY016 and the output degrades
+        to Unknown; Unknown / unresolved receivers stay silent.
+        """
+        if receiver_type is None:
+            return None
+        inner = receiver_type.inner if isinstance(receiver_type, Nullable) else receiver_type
+        if isinstance(inner, Unknown):
+            return receiver_type
+        if isinstance(inner, self._NOT_VALID_RECEIVERS):
+            return receiver_type
+        self.errors.append(
+            tag(
+                PLY016,
+                f"{op_desc}: operation not supported for dtype {inner} — "
+                f"polars raises InvalidOperationError at runtime",
+            )
+        )
+        return None
 
     def _validate_subexpr(self, node: ast.expr) -> None:
         """Run a sub-expression through analyze_select_expr to surface column errors.
@@ -3483,6 +3601,12 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         if method in self._BOOLEAN_PREDICATE_METHODS:
             return receiver_name, Boolean()
 
+        # ``not_`` left the Boolean-predicate family (issue #72): Boolean
+        # receivers negate, integer receivers get a dtype-preserving
+        # bitwise NOT, everything else raises — see _NOT_VALID_RECEIVERS.
+        if method == "not_":
+            return receiver_name, self._not_dtype(receiver_type, op_desc="not_")
+
         # fill_null / fill_nan strip the Nullable wrapper.
         if method in ("fill_null", "fill_nan"):
             inner_dtype = receiver_type
@@ -3652,11 +3776,34 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         if method == "cum_count":
             return receiver_name, UInt32()
 
+        # ``pct_change`` divides — NOT dtype-preserving (issue #71; it left
+        # the shift-like family below). Probed matrix on
+        # ``_PCT_CHANGE_INVALID_RECEIVERS``: float receivers keep their
+        # width, every other accepted receiver yields Float64, invalid
+        # receivers flag PLY016. The head slot is always null and there is
+        # no fill_value parameter, so the result is always Nullable.
+        if method == "pct_change" and receiver_type is not None:
+            inner = receiver_type.inner if isinstance(receiver_type, Nullable) else receiver_type
+            if isinstance(inner, Unknown):
+                return receiver_name, Nullable(inner)
+            if isinstance(inner, self._PCT_CHANGE_INVALID_RECEIVERS):
+                self.errors.append(
+                    tag(
+                        PLY016,
+                        f"pct_change: operation not supported for dtype {inner} — "
+                        f"polars raises an error at runtime",
+                    )
+                )
+                return receiver_name, None
+            if isinstance(inner, (Float16, Float32)):
+                return receiver_name, Nullable(inner)
+            return receiver_name, Nullable(Float64())
+
         # Shift-like: head positions become NULL → wrap in Nullable. Only
         # ``shift`` takes a fill (``shift(n, *, fill_value=...)`` — keyword
         # only, probed): a non-null fill plugs the shifted-in slots, so the
         # receiver's own nullability is preserved instead (issue #43);
-        # ``diff`` / ``pct_change`` have no fill_value parameter.
+        # ``diff`` has no fill_value parameter.
         if method in self._SHIFT_LIKE_METHODS and receiver_type is not None:
             if method == "shift":
                 fill_node = next((kw.value for kw in node.keywords if kw.arg == "fill_value"), None)

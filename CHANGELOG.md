@@ -62,6 +62,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `pct_change()` is no longer typed as dtype-preserving (issue #71): it
+  divides, so an int receiver (any width — Boolean, the temporals,
+  Decimal and Null too) infers `Float64?` and float receivers keep their
+  width (`Float32 -> Float32?`); both the false positive on a correct
+  `Float64?` declaration and the false negative on a wrong `Int64?` one
+  are gone. Probed-invalid receivers (Binary / Categorical / Enum /
+  List / Array / Struct — the Struct cell is a process-aborting rust
+  crash) flag `PLY016`.
+- `not_()` / `~` is no longer Boolean-returning unconditionally (issue
+  #72): per the documented `Expr.not_` contract it negates Booleans but
+  operates **bitwise** on integers, preserving the dtype (`~Int64 ->
+  Int64`). Every other receiver (floats included) is a probed runtime
+  `InvalidOperationError` -> `PLY016`. `~` on a non-Boolean column used
+  in a `filter(...)` predicate now correctly flags `PLY008` as a bonus.
+- `dt.epoch(...)` return dtype follows its `time_unit` argument (issue
+  #73): `"d"` infers `Int32` (probed; days since epoch), the sub-second
+  units and the no-arg default stay `Int64`, and a non-literal or
+  invalid argument degrades to `Unknown` instead of claiming `Int64`.
 - `Annotated[pl.Decimal, 12, 4]` schema annotations register the declared
   precision/scale instead of the bare `Decimal(38, 0)` default, so
   exactly-matching code is no longer rejected with `PLY033` and real

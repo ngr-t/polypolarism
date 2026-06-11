@@ -1,0 +1,2 @@
+int_pct_change_is_float64: OK
+float32_pct_change_keeps_width: OK
