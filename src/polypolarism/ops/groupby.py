@@ -103,6 +103,15 @@ def _wrap_nullable(dtype: DataType, is_nullable: bool) -> DataType:
 # where preserves_nullability means the result should be Nullable if input is Nullable
 
 
+def _float_reduction_width(inner: DataType) -> DataType:
+    """Result width of a float-returning reduction (mean/std/var/median/quantile).
+
+    Probed (polars 1.41.2; backlog N-2): a Float32 receiver returns
+    Float32; every other numeric receiver returns Float64.
+    """
+    return Float32() if isinstance(inner, Float32) else Float64()
+
+
 def _infer_sum(dtype: DataType) -> DataType:
     """sum(T) -> T for numeric types."""
     inner, is_nullable = _unwrap_nullable(dtype)
@@ -115,14 +124,16 @@ def _infer_sum(dtype: DataType) -> DataType:
 
 
 def _infer_mean(dtype: DataType) -> DataType:
-    """mean(T) -> Float64 for numeric types."""
+    """mean(T) -> Float64 for numeric types; mean(Float32) -> Float32."""
     inner, is_nullable = _unwrap_nullable(dtype)
 
     if not isinstance(inner, NUMERIC_TYPES):
         raise GroupByTypeError(f"Cannot apply mean to type {dtype}: mean requires numeric type")
 
-    # mean always returns Float64
-    return _wrap_nullable(Float64(), is_nullable)
+    # Probed (polars 1.41.2; backlog N-2): a Float32 receiver keeps its
+    # width in both group_by().agg() and select contexts; every other
+    # numeric receiver yields Float64.
+    return _wrap_nullable(_float_reduction_width(inner), is_nullable)
 
 
 def _infer_count(dtype: DataType) -> DataType:
@@ -170,6 +181,8 @@ def _infer_max(dtype: DataType) -> DataType:
 def _infer_float_reduction(name: str, *, always_nullable: bool = False):
     """Build an inference fn for numeric -> Float64 reductions (std/var/median/quantile).
 
+    A Float32 receiver keeps Float32 (probed, polars 1.41.2; backlog N-2).
+
     ``always_nullable`` is set for std/var (issue #60): with the default
     ``ddof=1`` they are null whenever only one sample is available (probed,
     polars 1.41.2: any singleton group), so the result is Nullable even on
@@ -183,7 +196,7 @@ def _infer_float_reduction(name: str, *, always_nullable: bool = False):
             raise GroupByTypeError(
                 f"Cannot apply {name} to type {dtype}: {name} requires numeric type"
             )
-        return _wrap_nullable(Float64(), is_nullable or always_nullable)
+        return _wrap_nullable(_float_reduction_width(inner), is_nullable or always_nullable)
 
     return _infer
 

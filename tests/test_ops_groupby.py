@@ -10,6 +10,7 @@ from polypolarism.ops.groupby import (
     infer_groupby_result,
 )
 from polypolarism.types import (
+    Float32,
     Float64,
     FrameType,
     Int64,
@@ -180,6 +181,42 @@ class TestStdVarNullability:
     def test_std_on_utf8_still_raises(self):
         with pytest.raises(GroupByTypeError):
             infer_agg_result_type(AggFunction.STD, Utf8())
+
+
+class TestFloat32WidthPreservation:
+    """mean/std/var/median/quantile keep the Float32 width (backlog N-2).
+
+    Probed (polars 1.41.2): ``group_by().agg()`` AND select-context
+    ``mean``/``std``/``var``/``median``/``quantile`` on a Float32 column
+    return **Float32**, not Float64. Every other accepted receiver
+    (ints, Float64) still yields Float64.
+    """
+
+    def test_mean_float32_returns_float32(self):
+        result = infer_agg_result_type(AggFunction.MEAN, Float32())
+        assert result == Float32()
+
+    def test_mean_nullable_float32_returns_nullable_float32(self):
+        result = infer_agg_result_type(AggFunction.MEAN, Nullable(Float32()))
+        assert result == Nullable(Float32())
+
+    def test_std_float32_returns_nullable_float32(self):
+        # std stays Nullable (ddof=1 singleton-group rule, issue #60) but
+        # must keep the Float32 width.
+        result = infer_agg_result_type(AggFunction.STD, Float32())
+        assert result == Nullable(Float32())
+
+    def test_var_nullable_float32_stays_single_nullable_float32(self):
+        result = infer_agg_result_type(AggFunction.VAR, Nullable(Float32()))
+        assert result == Nullable(Float32())
+
+    def test_median_float32_returns_float32(self):
+        result = infer_agg_result_type(AggFunction.MEDIAN, Float32())
+        assert result == Float32()
+
+    def test_quantile_float32_returns_float32(self):
+        result = infer_agg_result_type(AggFunction.QUANTILE, Float32())
+        assert result == Float32()
 
 
 class TestUnknownAggregation:
