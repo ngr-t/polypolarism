@@ -1,2 +1,6 @@
 enrich: WARN
   warning: [PLW008] annotation `DataFrame[Enriched]` narrows the inferred schema without runtime backing: column 'segment': declared Int64 but inferred Int64?. Assert it with `Schema.validate(...)` (which retypes the value), or widen the annotation.
+narrow_open: WARN
+  warning: [PLW008] annotation `DataFrame[WithB]` narrows the inferred schema without runtime backing: column 'b' (Utf8) is declared but not guaranteed by the (non-strict) inferred frame. Assert it with `Schema.validate(...)` (which retypes the value), or widen the annotation.
+coerce_unbacked: WARN
+  warning: [PLW008] annotation `DataFrame[StrOut]` narrows the inferred schema without runtime backing: column 'a': declared Utf8 but inferred Int64 relies on coerce=True, which annotations do not run. Assert it with `Schema.validate(...)` (which retypes the value), or widen the annotation.

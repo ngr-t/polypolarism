@@ -4095,10 +4095,20 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             inferred_spec = inferred.columns.get(col_name)
             if inferred_spec is None:
                 if declared_spec.required and inferred.rest is None:
-                    contradictions.append(
-                        f"column '{col_name}' ({declared_spec.dtype}) is provably "
-                        f"absent from the inferred frame"
-                    )
+                    if inferred.strict:
+                        # Only a STRICT inferred frame proves absence; a
+                        # non-strict schema tolerates extra runtime columns,
+                        # so declaring one is a narrowing assertion
+                        # (issue #63).
+                        contradictions.append(
+                            f"column '{col_name}' ({declared_spec.dtype}) is provably "
+                            f"absent from the inferred frame"
+                        )
+                    else:
+                        narrowings.append(
+                            f"column '{col_name}' ({declared_spec.dtype}) is declared "
+                            f"but not guaranteed by the (non-strict) inferred frame"
+                        )
                 continue
             if declared_spec.required and not inferred_spec.required:
                 # Asserting an optional column always-present is the
@@ -4113,6 +4123,15 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             if declared.coerce and _is_coercible_difference(
                 inferred_spec.dtype, declared_spec.dtype
             ):
+                # Sound at return positions (check_types really coerces at
+                # runtime), but annotations are runtime-inert — relying on
+                # coerce here is an unbacked re-type (issue #64). The
+                # validate remedy in the warning text WOULD coerce.
+                narrowings.append(
+                    f"column '{col_name}': declared {declared_spec.dtype} but "
+                    f"inferred {inferred_spec.dtype} relies on coerce=True, "
+                    f"which annotations do not run"
+                )
                 continue
             detail = (
                 f"column '{col_name}': declared {declared_spec.dtype} but "

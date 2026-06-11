@@ -29,3 +29,42 @@ class Enriched(pa.DataFrameModel):
 def enrich(orders: DataFrame[Orders], customers: DataFrame[Customers]) -> DataFrame[Enriched]:
     joined: DataFrame[Enriched] = orders.join(customers, on="id", how="left")
     return joined
+
+
+class SrcOpen(pa.DataFrameModel):
+    a: int
+
+    class Config:
+        strict = False
+        coerce = True
+
+
+class WithB(pa.DataFrameModel):
+    a: int
+    b: str
+
+    class Config:
+        strict = False
+        coerce = True
+
+
+def narrow_open(df: DataFrame[SrcOpen]) -> DataFrame[SrcOpen]:
+    # Issue #63: 'b' is not PROVABLY absent (the non-strict input schema
+    # tolerates extra runtime columns) — narrowing, not PLY033.
+    x: DataFrame[WithB] = df.filter(pl.col("a") > 0)  # noqa: F841
+    return df
+
+
+class StrOut(pa.DataFrameModel):
+    a: str
+
+    class Config:
+        strict = True
+        coerce = True
+
+
+def coerce_unbacked(df: DataFrame[SrcOpen]) -> DataFrame[SrcOpen]:
+    # Issue #64: the annotation relies on coerce=True, but annotations
+    # never coerce at runtime — unbacked re-type, PLW008.
+    y: DataFrame[StrOut] = df.select(a=pl.col("a"))  # noqa: F841
+    return df

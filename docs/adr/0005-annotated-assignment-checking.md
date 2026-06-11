@@ -92,3 +92,20 @@ remaining on the narrowing class.
 - `typing.cast(...)` stays a passthrough (`_unwrap_cast`) and is NOT an
   escape hatch for frame re-typing; the annotation (with its PLW008
   trace) or `Schema.validate` (with its runtime check) are.
+
+## Amendment (2026-06-11, issues #63 / #64)
+
+Two classification refinements shipped the same day, both narrowing the
+`PLY033` class to what is actually provable:
+
+1. **Provable absence requires a STRICT inferred frame** (#63). A
+   non-strict schema tolerates extra runtime columns, so a declared
+   column missing from a non-strict closed frame is "declared but not
+   guaranteed" — the narrowing class (`PLW008`), not an error. `PLY033`
+   keeps firing when the inferred frame's schema is `strict = True`.
+2. **The coerce-differences leniency does not apply at annotation
+   sites** (#64). It is sound at return positions, where
+   `pa.check_types` really coerces at runtime; annotations are
+   runtime-inert, so a coercible declared/inferred difference there is
+   an unbacked re-type — surfaced as `PLW008` naming `coerce`, with
+   `Schema.validate(...)` (which *does* coerce) as the remedy.

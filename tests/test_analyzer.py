@@ -11491,16 +11491,19 @@ class TestAnnotatedAssignmentChecking:
         non_ply033 = [e for e in result.errors if "PLY033" not in e]
         assert non_ply033 == [], result.errors
 
-    def test_provably_absent_column_is_error(self):
-        # Halved declares 'half' but the RHS provably lacks it (closed
-        # frame) — a column cannot be asserted into existence.
+    def test_missing_column_over_nonstrict_select_is_narrowing(self):
+        # Halved declares 'half' and the select result lacks it, but the
+        # result frame is non-strict — absence is not PROVABLE (issue #63),
+        # so this is the narrowing class. The strict-frame error case is
+        # pinned in TestAnnotationCheckIssues63And64.
         result = self._result(
             """
             x: DataFrame[Halved] = df.select("v")
             return df
             """
         )
-        assert any("PLY033" in e for e in result.errors), result.errors
+        assert not any("PLY033" in e for e in result.errors), result.errors
+        assert any("PLW008" in w for w in result.warnings), result.warnings
 
     def test_laziness_mismatch_is_error(self):
         result = self._result(
@@ -11886,3 +11889,109 @@ class TestUnmodeledFrameMethodWarning:
         result = analyze_source(source)[0]
         assert result.errors == [], result.errors
         assert len(self._plw007(result)) == 1, result.warnings
+
+
+class TestAnnotationCheckIssues63And64:
+    """Issues #63 / #64: classification refinements at annotation sites.
+
+    #63 — a column missing from a NON-STRICT inferred frame is not
+    provably absent (the runtime frame may carry extras the schema
+    tolerates): narrowing class, PLW008, never PLY033. Provable absence
+    requires a strict inferred frame.
+
+    #64 — coerce leniency is sound at return positions (check_types
+    really coerces) but annotations are runtime-inert: a coercible
+    declared/inferred difference at an annotation site is an unbacked
+    re-type — PLW008 naming coerce, not silence.
+    """
+
+    HEADER = textwrap.dedent(
+        PANDERA_HEADER
+        + """
+            class SrcOpen(pa.DataFrameModel):
+                a: int
+
+                class Config:
+                    strict = False
+                    coerce = True
+
+            class WithB(pa.DataFrameModel):
+                a: int
+                b: str
+
+                class Config:
+                    strict = False
+                    coerce = True
+
+            class SrcStrict(pa.DataFrameModel):
+                a: int
+
+                class Config:
+                    strict = True
+
+            class StrOut(pa.DataFrameModel):
+                a: str
+
+                class Config:
+                    strict = True
+                    coerce = True
+        """
+    )
+
+    def _result(self, body: str, *, param: str = "SrcOpen"):
+        source = self.HEADER + textwrap.dedent(
+            f"""
+            def f(df: DataFrame[{param}]) -> DataFrame[{param}]:
+{textwrap.indent(textwrap.dedent(body), "                ")}
+            """
+        )
+        results = analyze_source(source)
+        return results[0]
+
+    # -- issue #63 --------------------------------------------------------
+
+    def test_missing_column_over_nonstrict_frame_is_narrowing(self):
+        result = self._result(
+            """
+            x: DataFrame[WithB] = df.filter(pl.col("a") > 0)
+            return df
+            """
+        )
+        assert not any("PLY033" in e for e in result.errors), result.errors
+        plw = [w for w in result.warnings if "PLW008" in w]
+        assert plw, result.warnings
+        assert "'b'" in plw[0]
+
+    def test_missing_column_over_strict_frame_is_error(self):
+        result = self._result(
+            """
+            x: DataFrame[WithB] = df
+            return df
+            """,
+            param="SrcStrict",
+        )
+        assert any("PLY033" in e for e in result.errors), result.errors
+
+    # -- issue #64 --------------------------------------------------------
+
+    def test_coercible_difference_at_annotation_site_warns(self):
+        result = self._result(
+            """
+            y: DataFrame[StrOut] = df.select(a=pl.col("a"))
+            return df
+            """
+        )
+        assert not any("PLY033" in e for e in result.errors), result.errors
+        plw = [w for w in result.warnings if "PLW008" in w]
+        assert plw, result.warnings
+        assert "coerce" in plw[0]
+
+    def test_validate_rhs_still_silent(self):
+        # Schema.validate(...) retypes WITH runtime backing — no warning.
+        result = self._result(
+            """
+            y = StrOut.validate(df.select(a=pl.col("a")))
+            return df
+            """
+        )
+        assert not any("PLW008" in w for w in result.warnings), result.warnings
