@@ -5121,9 +5121,19 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 continue
             if not arg_spec.required:
                 continue  # presence is value-dependent
-            if _is_column_subtype(arg_spec.dtype, declared_spec.dtype):
+            # Nullability is NOT part of the proof (issue #92): pandera's
+            # nullable check is VALUE-based — a Nullable-typed column with
+            # no actual nulls passes a non-nullable schema, and validating
+            # a post-join nullable into a non-null schema is exactly the
+            # narrowing assertion PLW008 prescribes. Compare base dtypes;
+            # a base conflict (e.g. Int64 into a Utf8 schema, coerce off)
+            # stays a proof.
+            arg_base = (
+                arg_spec.dtype.inner if isinstance(arg_spec.dtype, Nullable) else arg_spec.dtype
+            )
+            if _is_column_subtype(arg_base, declared_spec.dtype):
                 continue
-            if declared.coerce and _is_coercible_difference(arg_spec.dtype, declared_spec.dtype):
+            if declared.coerce and _is_coercible_difference(arg_base, declared_spec.dtype):
                 continue
             self.errors.append(
                 f"validate: argument column '{col_name}' has type {arg_spec.dtype} "

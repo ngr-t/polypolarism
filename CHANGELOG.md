@@ -146,6 +146,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Validate input proofs no longer overreach on nullability (issue #92,
+  boundary of #89): pandera's nullable check is VALUE-based — a
+  `Nullable`-typed column with no actual nulls passes a non-nullable
+  schema — and validating a post-join nullable into a non-null schema is
+  exactly the narrowing assertion the PLW008 remedy prescribes. The
+  input check now compares base dtypes only; base conflicts (with coerce
+  off) remain proofs.
+
 - Grouped std/var/sum on Date/Datetime/Time are accepted (issue #91,
   boundary of #85): these cells raise InvalidOperationError as
   whole-frame reductions — the select-context PLY011 stays a proof — but

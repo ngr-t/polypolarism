@@ -14444,3 +14444,77 @@ class TestGroupedAllNullTemporalAggs:
         )
         results = analyze_source(source)
         assert any("PLY011" in str(e) for e in results[0].errors), results[0].errors
+
+
+class TestValidateNullabilityNotProof(  # issue #92
+):
+    """Issue #92: pandera's nullable check is VALUE-based — a
+    Nullable-typed column with no actual nulls passes a non-nullable
+    schema. Validating a post-join nullable into a non-null schema is
+    exactly the PLW008-prescribed narrowing assertion, so the #89 input
+    proof must not claim 'SchemaError on every call' for it. Base-dtype
+    conflicts stay proofs."""
+
+    def test_nullable_into_nonnull_validate_passes(self):
+        source = textwrap.dedent(
+            """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+
+            class Left(pa.DataFrameModel):
+                k: int
+
+                class Config:
+                    strict = True
+
+            class Right(pa.DataFrameModel):
+                k: int
+                v: int
+
+                class Config:
+                    strict = True
+
+            class Joined(pa.DataFrameModel):
+                k: int
+                v: int  # non-nullable: the validate IS the assertion
+
+                class Config:
+                    strict = True
+
+            def f(a: DataFrame[Left], b: DataFrame[Right]) -> DataFrame[Joined]:
+                out = a.join(b, on="k", how="left")  # v becomes Int64?
+                return Joined.validate(out)
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == [], results[0].errors
+
+    def test_base_dtype_conflict_still_a_proof(self):
+        source = textwrap.dedent(
+            """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+
+            class Src(pa.DataFrameModel):
+                a: int
+
+                class Config:
+                    strict = True
+
+            class WantsStr(pa.DataFrameModel):
+                a: str
+
+                class Config:
+                    strict = True
+
+            def f(df: DataFrame[Src]) -> pl.DataFrame:
+                # Nullable wrapping must not LAUNDER a base conflict.
+                shifted = df.select(pl.col("a").shift(1))
+                return WantsStr.validate(shifted)
+            """
+        )
+        results = analyze_source(source)
+        errors = [str(e) for e in results[0].errors]
+        assert any("validate" in e and "Utf8" in e for e in errors), errors
