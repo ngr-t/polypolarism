@@ -114,12 +114,20 @@ Rules with both sides present (valid twin -> invalid twin):
 | hstack | `m4_unpivot_and_hstack` | `m4_hstack_wrong_dtype` |
 | unmodeled-method degradation (PLW007) | `unmodeled_method_pinned` (cast retracts the warning) | `warning/unmodeled_method` (a warning, not an error — Unknown passes by design) |
 | unmodeled FRAME method untracks (PLW007) | `unmodeled_frame_method_validated` (validate retracts the warning; terminal `to_dicts` stays silent) | `warning/unmodeled_frame_method` (a warning, not an error — the untracked frame passes by design) |
+| upsample nullability (issue #74) | `upsample_nullable_gaps` | `upsample_nonnullable_declared` |
+| null_count UInt32 mapping (issue #74) | `null_count_schema` | `null_count_wrong_dtype` |
+| to_dummies data-dependent schema (issue #74) | (annotation path shared with pivot) | `warning/to_dummies_unannotated` (PLW005, a warning, not an error) |
 
 Intentionally unpaired:
 
 - `valid/unknown_dtype_tracking` — pins the leniency design itself (Unknown
   columns stay registered). Its golden carries the `via:` notes that make
   the leniency visible; an invalid twin is impossible by construction.
+- `warning/join_where_experimental` — polars marks `join_where`
+  experimental, so polypolarism deliberately degrades it to an open frame
+  with PLW007 instead of encoding a schema (issue #74). There is no
+  inference rule to falsify; the golden's `via:` notes pin the
+  leniency-mediated pass.
 
 ### Known gaps (backlog — add the invalid twin when touching the rule)
 

@@ -1,0 +1,2 @@
+half_hourly: FAIL
+  error: Column 'v' has type Int64?, but declared type is Int64
