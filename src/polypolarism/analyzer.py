@@ -26,6 +26,7 @@ from polypolarism.compat.polars_api import (
     LIST_NAMESPACE_ELEMENT_RETURN,
     LIST_NAMESPACE_PRESERVING,
     STR_NAMESPACE_RETURN,
+    ContainerAggInvalid,
     agg_function_for,
     canonicalize_method,
     container_agg_return,
@@ -2222,6 +2223,32 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         self.errors.extend(child.errors)
         return body_dtype
 
+    def _container_agg_result(
+        self, namespace: str, method: str, receiver_inner: ListT | Array
+    ) -> DataType | None:
+        """Verdict for a ``list.<agg>()`` / ``arr.<agg>()`` reduction (issue #55).
+
+        Probed-invalid cells flag PLY016 — the runtime error class varies
+        per cell (InvalidOperationError / ComputeError / rust panic) — and
+        degrade the output to Unknown. Unclaimed cells return ``None``
+        (silent Unknown downstream). The element's own Nullable wrapper
+        does not change the verdict.
+        """
+        element = receiver_inner.inner
+        if isinstance(element, Nullable):
+            element = element.inner
+        verdict = container_agg_return(namespace, method, element)
+        if isinstance(verdict, ContainerAggInvalid):
+            self.errors.append(
+                tag(
+                    PLY016,
+                    f"{namespace}.{method}: operation not supported for dtype "
+                    f"{receiver_inner} — polars raises an error at runtime",
+                )
+            )
+            return Unknown()
+        return verdict
+
     def _dispatch_namespace_method(
         self,
         namespace: str,
@@ -2290,10 +2317,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 if method in self._LIST_ELEMENT_RETURN:
                     result = receiver_inner.inner
                 elif method in CONTAINER_AGG_METHODS:
-                    element = receiver_inner.inner
-                    if isinstance(element, Nullable):
-                        element = element.inner
-                    result = container_agg_return(method, element)
+                    result = self._container_agg_result("list", method, receiver_inner)
         elif namespace == "arr":
             # Issue #53: the polars arr namespace mirrors most of the list
             # namespace but is dispatched separately — several methods
@@ -2318,9 +2342,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 elif method in ARR_NAMESPACE_TO_LIST:
                     result = ListT(element)
                 elif method in CONTAINER_AGG_METHODS:
-                    if isinstance(element, Nullable):
-                        element = element.inner
-                    result = container_agg_return(method, element)
+                    result = self._container_agg_result("arr", method, receiver_inner)
         elif namespace == "cat":
             # Issue #54. ``get_categories`` returns the category list (one
             # row per category): length-changing, and its output carries no

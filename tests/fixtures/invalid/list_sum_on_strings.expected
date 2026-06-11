@@ -1,0 +1,4 @@
+bug_sum_tags_as_int: FAIL
+  error: [PLY016] list.sum: operation not supported for dtype List[Utf8] — polars raises an error at runtime
+bug_sum_tags_as_str: FAIL
+  error: [PLY016] list.sum: operation not supported for dtype List[Utf8] — polars raises an error at runtime

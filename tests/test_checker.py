@@ -2851,3 +2851,78 @@ class TestIssue52DecimalArithmeticEndToEnd:
         assert len(results) == 1
         assert results[0].passed is False
         assert any("PLY009" in str(e) for e in results[0].errors), results[0].errors
+
+
+class TestIssue55ListSumOnStringsEndToEnd:
+    """Issue #55 regression (30fc482): ``list.sum()`` on List(String) must
+    fail again — probed-invalid container reductions flag PLY016, so BOTH
+    of the repro's wrong declarations (int and str, coerce=False) fail.
+    """
+
+    HEADER = textwrap.dedent("""
+        import polars as pl
+        import pandera.polars as pa
+        from pandera.typing.polars import DataFrame
+
+        class Tags(pa.DataFrameModel):
+            id: int
+            tags: pl.List(pl.Utf8) = pa.Field()
+    """)
+
+    def test_declared_int_fails_with_ply016(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            class WrongInt(pa.DataFrameModel):
+                id: int
+                total: int
+
+            @pa.check_types
+            def sum_tags(df: DataFrame[Tags]) -> DataFrame[WrongInt]:
+                return df.select("id", total=pl.col("tags").list.sum())
+            """
+        )
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is False
+        assert any("PLY016" in str(e) for e in results[0].errors), results[0].errors
+
+    def test_declared_str_fails_with_ply016(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            class WrongStr(pa.DataFrameModel):
+                id: int
+                total: str
+
+            @pa.check_types
+            def sum_tags(df: DataFrame[Tags]) -> DataFrame[WrongStr]:
+                return df.select("id", total=pl.col("tags").list.sum())
+            """
+        )
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is False
+        assert any("PLY016" in str(e) for e in results[0].errors), results[0].errors
+
+    def test_list_sum_on_ints_still_int64(self):
+        # Regression guard: the numeric core is untouched by the PLY016 path.
+        source = self.HEADER + textwrap.dedent(
+            """
+            class Nums(pa.DataFrameModel):
+                id: int
+                xs: pl.List(pl.Int64) = pa.Field()
+
+            class Out(pa.DataFrameModel):
+                id: int
+                total: int
+
+            @pa.check_types
+            def sum_nums(df: DataFrame[Nums]) -> DataFrame[Out]:
+                return df.select("id", total=pl.col("xs").list.sum())
+            """
+        )
+        results = check_source(source)
+
+        assert len(results) == 1
+        assert results[0].passed is True, results[0].errors

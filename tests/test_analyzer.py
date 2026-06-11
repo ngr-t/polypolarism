@@ -7559,15 +7559,165 @@ class TestContainerAggReturns:
             ('pl.col("f").list.sum()', Float32()),
             ('pl.col("w").list.sum()', Int64()),
             ('pl.col("w").list.min()', Int16()),
-            # sum over string elements raises at runtime; flagging it is
-            # out of scope — the dtype degrades to Unknown (silent).
-            ('pl.col("s").list.sum()', Unknown()),
+            # min/max over string elements is valid (lexicographic; probed).
             ('pl.col("s").list.min()', Utf8()),
             ('pl.col("xs").list.explode()', Int64()),
         ],
     )
     def test_list_agg_return_dtypes(self, expr: str, expected):
         assert self._dtype_of(expr) == expected
+
+
+class TestContainerAggMatrix:
+    """Issue #55: probed reducer matrix for ``.list`` / ``.arr``.
+
+    Probed on polars 1.41.2 (see ``compat.polars_api.container_agg_return``):
+    valid cells keep the probed result dtype; probed-invalid cells (runtime
+    InvalidOperationError / ComputeError / rust panic) flag PLY016 and the
+    output degrades to Unknown; unclaimed cells (degenerate all-null
+    results, unprobed dtypes) stay silent with an Unknown output.
+    """
+
+    HEADER = textwrap.dedent(
+        PANDERA_HEADER
+        + """
+            class In(pa.DataFrameModel):
+                l_i64: pl.List(pl.Int64) = pa.Field()
+                l_str: pl.List(pl.Utf8) = pa.Field()
+                l_bool: pl.List(pl.Boolean) = pa.Field()
+                l_date: pl.List(pl.Date) = pa.Field()
+                l_dt: pl.List(pl.Datetime) = pa.Field()
+                l_dur: pl.List(pl.Duration) = pa.Field()
+                l_time: pl.List(pl.Time) = pa.Field()
+                l_dec: pl.List(pl.Decimal(10, 2)) = pa.Field()
+                l_nest: pl.List(pl.List(pl.Int64)) = pa.Field()
+                l_struct: pl.List(pl.Struct({"f": pl.Int64})) = pa.Field()
+                a_i64: pl.Array(pl.Int64, 3) = pa.Field()
+                a_str: pl.Array(pl.Utf8, 3) = pa.Field()
+                a_bool: pl.Array(pl.Boolean, 3) = pa.Field()
+                a_date: pl.Array(pl.Date, 3) = pa.Field()
+                a_dur: pl.Array(pl.Duration, 3) = pa.Field()
+                a_dec: pl.Array(pl.Decimal(10, 2), 3) = pa.Field()
+                a_struct: pl.Array(pl.Struct({"f": pl.Int64}), 3) = pa.Field()
+        """
+    )
+
+    def _analyze(self, expr: str):
+        source = self.HEADER + textwrap.dedent(
+            f"""
+            def f(df: DataFrame[In]):
+                return df.select(({expr}).alias("out"))
+            """
+        )
+        results = analyze_source(source)
+        ft = results[0].inferred_return_type
+        dtype = ft.columns["out"].dtype if ft is not None and "out" in ft.columns else None
+        return results[0].errors, dtype
+
+    @pytest.mark.parametrize(
+        ("expr", "expected"),
+        [
+            # -- list: probed-valid cells beyond the numeric core ----------
+            ('pl.col("l_dur").list.sum()', Duration()),
+            ('pl.col("l_dec").list.sum()', Decimal(10, 2)),
+            ('pl.col("l_date").list.mean()', Datetime()),
+            ('pl.col("l_dt").list.median()', Datetime()),
+            ('pl.col("l_time").list.mean()', Time()),
+            ('pl.col("l_dur").list.mean()', Duration()),
+            ('pl.col("l_dur").list.std()', Duration()),
+            ('pl.col("l_dec").list.median()', Float64()),
+            ('pl.col("l_dec").list.std()', Float64()),
+            ('pl.col("l_dec").list.var()', Float64()),
+            ('pl.col("l_bool").list.var()', Float64()),
+            ('pl.col("l_bool").list.min()', Boolean()),
+            ('pl.col("l_str").list.max()', Utf8()),
+            ('pl.col("l_date").list.max()', Date()),
+            ('pl.col("l_dur").list.min()', Duration()),
+            ('pl.col("l_dec").list.min()', Decimal(10, 2)),
+            # -- arr: probed-valid cells ------------------------------------
+            ('pl.col("a_i64").arr.min()', Int64()),
+            ('pl.col("a_i64").arr.max()', Int64()),
+            ('pl.col("a_dur").arr.mean()', Duration()),
+            ('pl.col("a_dur").arr.std()', Duration()),
+            ('pl.col("a_dec").arr.median()', Float64()),
+            ('pl.col("a_bool").arr.sum()', UInt32()),
+        ],
+    )
+    def test_probed_valid_cells(self, expr: str, expected):
+        errors, dtype = self._analyze(expr)
+        assert errors == [], (expr, errors)
+        assert dtype == expected
+
+    @pytest.mark.parametrize(
+        "expr",
+        [
+            # -- list: probed runtime InvalidOperationError -----------------
+            'pl.col("l_str").list.sum()',
+            'pl.col("l_date").list.sum()',
+            'pl.col("l_dt").list.sum()',
+            'pl.col("l_time").list.sum()',
+            'pl.col("l_nest").list.sum()',
+            'pl.col("l_struct").list.sum()',
+            'pl.col("l_date").list.var()',
+            'pl.col("l_dt").list.var()',
+            'pl.col("l_dur").list.var()',
+            'pl.col("l_time").list.var()',
+            'pl.col("l_nest").list.min()',
+            'pl.col("l_struct").list.max()',
+            # -- arr: probed ComputeError (sum) / rust panic (min/max) ------
+            'pl.col("a_str").arr.sum()',
+            'pl.col("a_date").arr.sum()',
+            'pl.col("a_dur").arr.sum()',
+            'pl.col("a_dec").arr.sum()',
+            'pl.col("a_struct").arr.sum()',
+            'pl.col("a_dur").arr.var()',
+            'pl.col("a_bool").arr.min()',
+            'pl.col("a_str").arr.max()',
+            'pl.col("a_date").arr.min()',
+            'pl.col("a_dec").arr.max()',
+            'pl.col("a_struct").arr.min()',
+        ],
+    )
+    def test_probed_invalid_cells_flag_ply016(self, expr: str):
+        errors, dtype = self._analyze(expr)
+        assert any("PLY016" in e for e in errors), (expr, errors)
+        # The output column still exists at runtime semantics-wise; it is
+        # registered as Unknown so downstream lookups resolve.
+        assert dtype == Unknown(), (expr, dtype)
+
+    @pytest.mark.parametrize(
+        "expr",
+        [
+            # Degenerate all-null Float64 results (probed valid at runtime,
+            # deliberately unclaimed) and unprobed cells: silent Unknown.
+            'pl.col("l_str").list.mean()',
+            'pl.col("l_str").list.var()',
+            'pl.col("l_nest").list.mean()',
+            'pl.col("a_str").arr.mean()',
+            'pl.col("a_date").arr.median()',
+            'pl.col("a_date").arr.var()',
+        ],
+    )
+    def test_unclaimed_cells_stay_silent(self, expr: str):
+        errors, dtype = self._analyze(expr)
+        assert errors == [], (expr, errors)
+        assert dtype == Unknown(), (expr, dtype)
+
+    def test_nullable_receiver_does_not_mask_invalid_cell(self):
+        # A nullable List(Utf8) column is unwrapped before the verdict:
+        # sum over string elements is still the probed runtime error.
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                xs: pl.List(pl.Utf8) = pa.Field(nullable=True)
+
+            def f(df: DataFrame[S]):
+                return df.select(pl.col("xs").list.sum().alias("out"))
+            """
+        )
+        results = analyze_source(source)
+        assert any("PLY016" in e for e in results[0].errors), results[0].errors
 
 
 class TestCatNamespaceReturns:
