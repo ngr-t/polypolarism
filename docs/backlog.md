@@ -92,8 +92,17 @@ Status legend: `[ ]` open / `[x]` done / `[-]` deliberately deferred.
   v0.1.0 preview) — QuickFix / hover / rename not implemented; bundled
   install path broken (works only with `importStrategy:
   "fromEnvironment"`).
-- [ ] **D-12: PyPI publication** — `publish.yml` exists but is not wired
-  up. Publishing also fixes the extension's bundled-install story (D-11).
+- [ ] **D-12: PyPI publication** — `publish.yml` is complete (build +
+  Trusted Publishing via OIDC, `pypi` environment, v-tag or manual
+  dispatch). The remaining steps are owner actions, not code:
+  1. On pypi.org → account → Publishing → add a *pending publisher*:
+     project `polypolarism`, owner `ngr-t`, repo `polypolarism`,
+     workflow `publish.yml`, environment `pypi`.
+  2. Create the `pypi` environment in the GitHub repo settings
+     (optionally with a required reviewer as a publish gate).
+  3. Cut the release: bump `version` in pyproject.toml if needed, tag
+     `v0.1.0`, push the tag (or run the workflow manually).
+  Publishing also fixes the extension's bundled-install story (D-11).
 
 ## Non-issues (verified healthy)
 

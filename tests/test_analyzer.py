@@ -11519,3 +11519,177 @@ class TestAnnotatedAssignmentChecking:
             0
         ].errors
         assert any("PLW008" in w and "'m'" in w for w in results[0].warnings), results[0].warnings
+
+
+class TestFloat32ReductionWidth:
+    """Select- and agg-context float reductions keep Float32 (backlog N-2).
+
+    Probed (polars 1.41.2): ``mean``/``std``/``var``/``median``/``quantile``
+    on a Float32 column return **Float32** in both ``select`` and
+    ``group_by().agg()`` contexts. Nullability rules (issue #60) are
+    unchanged — only the width follows the receiver.
+    """
+
+    def _select(self, schema_field: str, expr: str):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + f"""
+            class In(pa.DataFrameModel):
+                g: str
+                {schema_field}
+
+            def f(data: DataFrame[In]):
+                return data.select({expr})
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        return ft
+
+    def test_select_mean_float32(self):
+        ft = self._select("v: pl.Float32", 'pl.col("v").mean().alias("m")')
+        assert ft.columns["m"].dtype == Float32()
+
+    def test_select_mean_nullable_float32(self):
+        ft = self._select(
+            "v: pl.Float32 = pa.Field(nullable=True)",
+            'pl.col("v").mean().alias("m")',
+        )
+        assert ft.columns["m"].dtype == Nullable(Float32())
+
+    def test_select_std_float32_nullable_float32(self):
+        ft = self._select("v: pl.Float32", 'pl.col("v").std().alias("s")')
+        assert ft.columns["s"].dtype == Nullable(Float32())
+
+    def test_select_std_float32_ddof_zero_non_nullable_float32(self):
+        # The ddof=0 refinement (issue #60) must unwrap Float32 results too.
+        ft = self._select("v: pl.Float32", 'pl.col("v").std(ddof=0).alias("s")')
+        assert ft.columns["s"].dtype == Float32()
+
+    def test_select_var_float32_ddof_zero_positional_non_nullable_float32(self):
+        ft = self._select("v: pl.Float32", 'pl.col("v").var(0).alias("s")')
+        assert ft.columns["s"].dtype == Float32()
+
+    def test_select_median_float32(self):
+        ft = self._select("v: pl.Float32", 'pl.col("v").median().alias("m")')
+        assert ft.columns["m"].dtype == Float32()
+
+    def test_select_quantile_float32(self):
+        ft = self._select("v: pl.Float32", 'pl.col("v").quantile(0.5).alias("q")')
+        assert ft.columns["q"].dtype == Float32()
+
+    def test_groupby_agg_mean_float32(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                g: str
+                v: pl.Float32
+
+            def f(data: DataFrame[In]):
+                return data.group_by("g").agg(pl.col("v").mean().alias("m"))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["m"].dtype == Float32()
+
+    def test_groupby_agg_std_ddof_zero_float32(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                g: str
+                v: pl.Float32
+
+            def f(data: DataFrame[In]):
+                return data.group_by("g").agg(pl.col("v").std(ddof=0).alias("s"))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["s"].dtype == Float32()
+
+
+class TestRollingFloat32Width:
+    """The rolling float family keeps the Float32 width (backlog N-2).
+
+    Probed (polars 1.41.2): ``rolling_mean``/``rolling_std``/``rolling_var``/
+    ``rolling_median``/``rolling_quantile`` on a Float32 receiver return
+    **Float32**. Every other accepted receiver yields Float64 — including
+    Float16, which the rolling family widens to Float64 (unlike the
+    select-context reductions, which keep Float16).
+    """
+
+    def _select(self, schema_field: str, expr: str):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + f"""
+            class S(pa.DataFrameModel):
+                {schema_field}
+
+            def f(data: DataFrame[S]):
+                return data.select({expr})
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        return ft
+
+    @pytest.mark.parametrize(
+        "call",
+        [
+            "rolling_mean(window_size=3)",
+            "rolling_std(window_size=3)",
+            "rolling_var(window_size=3)",
+            "rolling_median(window_size=3)",
+            "rolling_quantile(quantile=0.5, window_size=3)",
+        ],
+    )
+    def test_rolling_float32_receiver_keeps_float32(self, call: str):
+        ft = self._select("v: pl.Float32", f'pl.col("v").{call}.alias("r")')
+        assert ft.columns["r"].dtype == Nullable(Float32())
+
+    def test_rolling_mean_float32_total_window_non_nullable_float32(self):
+        ft = self._select(
+            "v: pl.Float32",
+            'pl.col("v").rolling_mean(window_size=3, min_samples=1).alias("m")',
+        )
+        assert ft.columns["m"].dtype == Float32()
+
+    def test_rolling_std_float32_ddof_zero_total_non_nullable_float32(self):
+        ft = self._select(
+            "v: pl.Float32",
+            'pl.col("v").rolling_std(window_size=3, min_samples=1, ddof=0).alias("s")',
+        )
+        assert ft.columns["s"].dtype == Float32()
+
+    def test_rolling_mean_nullable_float32_receiver_stays_nullable_float32(self):
+        ft = self._select(
+            "v: pl.Float32 = pa.Field(nullable=True)",
+            'pl.col("v").rolling_mean(window_size=3, min_samples=1).alias("m")',
+        )
+        assert ft.columns["m"].dtype == Nullable(Float32())
+
+    def test_rolling_mean_float16_receiver_widens_to_float64(self):
+        # Probed: Float16 is NOT width-preserved by the rolling family.
+        ft = self._select(
+            "v: pl.Float16",
+            'pl.col("v").rolling_mean(window_size=3).alias("m")',
+        )
+        assert ft.columns["m"].dtype == Nullable(Float64())
+
+    def test_rolling_mean_float64_receiver_still_float64(self):
+        ft = self._select(
+            "v: pl.Float64",
+            'pl.col("v").rolling_mean(window_size=3).alias("m")',
+        )
+        assert ft.columns["m"].dtype == Nullable(Float64())
