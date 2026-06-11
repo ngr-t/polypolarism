@@ -3,4 +3,4 @@ select_closed_the_frame: FAIL
 pinned_dtype_misused: FAIL
   error: [PLY009] arithmetic 'Utf8 - Int64' is not supported — polars raises InvalidOperationError at runtime; cast an operand first
 pinned_dtype_contradicts_declared: FAIL
-  error: Column 'total' has type Utf8, but declared type is Int64
+  error: [PLY040] Column 'total' has type Utf8, but declared type is Int64
