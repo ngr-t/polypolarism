@@ -54,6 +54,9 @@ PLY033 = (
 # check; the message distinguishes the kind.
 PLY040 = "PLY040"  # declared return type does not match the inferred return type
 
+# Schema definition
+PLY041 = "PLY041"  # schema field annotation provably crashes pandera at runtime (Annotated arity, issue #69)
+
 
 # Warnings (PLW###): inference is imprecise here, but the user can usually
 # fix it by adding a type annotation or an explicit dtype argument.

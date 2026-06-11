@@ -79,6 +79,7 @@ from polypolarism.diagnostics import (
     PLY031,
     PLY032,
     PLY033,
+    PLY041,
     tag,
 )
 from polypolarism.expr_infer import (
@@ -1957,6 +1958,27 @@ def _annotation_declares_frame(
 ) -> bool:
     """Return True if the annotation is ``DataFrame[Schema]`` / ``LazyFrame[Schema]``."""
     return extract_dataframe_annotation(annotation, schema_registry) is not None
+
+
+def _schema_definition_error(schema_name: str, schema_registry: SchemaRegistry) -> str | None:
+    """PLY041 message for a schema whose definition provably crashes pandera.
+
+    Issue #69: a wrong-arity ``Annotated[pl.<Dtype>, ...]`` field makes
+    pandera raise a deferred TypeError the first time the schema is used
+    (``to_schema`` / ``validate`` / ``@pa.check_types``), so every function
+    referencing the schema is dead on arrival regardless of what its body
+    does. Returns ``None`` for unknown or healthy schemas.
+    """
+    schema = schema_registry.get(schema_name)
+    if schema is None or not schema.definition_errors:
+        return None
+    details = "; ".join(
+        f"field '{field_name}': {detail}" for field_name, detail in schema.definition_errors.items()
+    )
+    return tag(
+        PLY041,
+        f"schema '{schema_name}' cannot be used at runtime: {details}",
+    )
 
 
 class ExpressionAnalyzer(ast.NodeVisitor):
@@ -4094,9 +4116,17 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         class_registry: ClassRegistry | None = None,
         current_class_name: str | None = None,
         module_consts: dict[str, str | list[str] | int] | None = None,
+        reported_broken_schemas: set[str] | None = None,
     ):
         self.input_types = input_types
         self.errors = errors
+        # Schema names already flagged PLY041 for this function (issue #69).
+        # Shared with ``analyze_function`` (signature sites) so a broken
+        # schema is reported once per function however many annotation /
+        # validate sites reference it.
+        self._reported_broken_schemas: set[str] = (
+            reported_broken_schemas if reported_broken_schemas is not None else set()
+        )
         # Non-fatal advisories. Owned externally so nested analyses can append.
         self.warnings: list[str] = warnings if warnings is not None else []
         self.registry = registry or FunctionRegistry()
@@ -4135,6 +4165,20 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         # its laziness and inside ``_infer_agg_call``), and the warning must
         # fire once per source call, not once per analysis.
         self._warned_frame_calls: set[tuple[int, int, str]] = set()
+
+    def _note_schema_use(self, schema_name: str) -> None:
+        """Flag PLY041 when a body site references a runtime-broken schema.
+
+        Issue #69: ``x: DataFrame[Broken] = ...`` and ``Broken.validate(df)``
+        crash at runtime even when the function signature is healthy. Once
+        per schema per function (shared dedup set with the signature sites).
+        """
+        if schema_name in self._reported_broken_schemas:
+            return
+        error = _schema_definition_error(schema_name, self.schema_registry)
+        if error is not None:
+            self._reported_broken_schemas.add(schema_name)
+            self.errors.append(error)
 
     def _visit_with_narrowing_disabled(self, node: ast.AST) -> None:
         prev = self._narrowing_enabled
@@ -4198,6 +4242,8 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         if not isinstance(schema_node, ast.Name):
             return
         schema_ft = self.schema_registry.to_frame_type(schema_node.id)
+        if schema_ft is not None:
+            self._note_schema_use(schema_node.id)
         if schema_ft is None or not call.args:
             return
         arg = call.args[0]
@@ -4349,6 +4395,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             # Try to get type from a Pandera DataFrame[Schema] annotation
             frame_type, _ = _resolve_declared_type(node.annotation, self.schema_registry)
             if frame_type is not None:
+                annotated_schema = frame_annotation_schema_name(node.annotation)
+                if annotated_schema is not None:
+                    self._note_schema_use(annotated_schema)
                 self.var_types[var_name] = frame_type
                 # Walk the RHS so expression-level warnings (e.g. PLW005
                 # from pivot) and column-resolution errors surface, and
@@ -4804,6 +4853,8 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         if not isinstance(schema_node, ast.Name):
             return None
         ft = self.schema_registry.to_frame_type(schema_node.id)
+        if ft is not None:
+            self._note_schema_use(schema_node.id)
         if ft is None or not node.args:
             return ft
         # The validation retypes the result to the schema — exactly the
@@ -4846,6 +4897,8 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         if isinstance(callable_arg, ast.Attribute) and callable_arg.attr == "validate":
             if isinstance(callable_arg.value, ast.Name):
                 ft = self.schema_registry.to_frame_type(callable_arg.value.id)
+                if ft is not None:
+                    self._note_schema_use(callable_arg.value.id)
                 if ft is not None and receiver_type is not None:
                     ft.is_lazy = receiver_type.is_lazy
                 return ft
@@ -6469,11 +6522,27 @@ def analyze_function(
     has_df_annotation = False
     unresolved_schemas: list[str] = []
 
+    # Schema names already flagged PLY041 (issue #69): a schema whose
+    # ``Annotated`` field arity provably crashes pandera is reported once
+    # per function, however many annotation sites reference it. Shared with
+    # the body analyzer below.
+    broken_schemas_reported: set[str] = set()
+
+    def _note_schema_reference(annotation: ast.expr) -> None:
+        schema_name = frame_annotation_schema_name(annotation)
+        if schema_name is None or schema_name in broken_schemas_reported:
+            return
+        error = _schema_definition_error(schema_name, schema_registry)
+        if error is not None:
+            broken_schemas_reported.add(schema_name)
+            errors.append(error)
+
     # Extract input parameter types
     for arg in func_node.args.args:
         if arg.annotation:
             if _annotation_declares_frame(arg.annotation, schema_registry):
                 has_df_annotation = True
+                _note_schema_reference(arg.annotation)
                 frame_type, parse_error = _resolve_declared_type(arg.annotation, schema_registry)
                 if frame_type is not None:
                     input_types[arg.arg] = frame_type
@@ -6501,6 +6570,7 @@ def analyze_function(
     if func_node.returns:
         if _annotation_declares_frame(func_node.returns, schema_registry):
             has_df_annotation = True
+            _note_schema_reference(func_node.returns)
             declared_return, parse_error = _resolve_declared_type(
                 func_node.returns, schema_registry
             )
@@ -6555,6 +6625,7 @@ def analyze_function(
         class_registry=class_registry,
         current_class_name=current_class_name,
         module_consts=module_consts,
+        reported_broken_schemas=broken_schemas_reported,
     )
     for stmt in func_node.body:
         body_analyzer.visit(stmt)

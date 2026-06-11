@@ -38,7 +38,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   degrades to an *open* frame with a dedicated `PLW007` warning —
   correct code passes via the visible open-frame leniency, and
   `Schema.validate(...)` retracts the warning (issue #74).
-
+- New error `PLY041` (issue #69): a schema field whose
+  `Annotated[pl.<Dtype>, ...]` metadata arity provably crashes pandera —
+  pandera maps the metadata 1:1 onto the dtype class's `__init__`
+  parameters and requires exactly all of them, raising a deferred
+  `TypeError` the first time the schema is used (`to_schema` /
+  `validate` / `@pa.check_types`). Previously such forms (including the
+  README's own `Annotated[pl.Array, pl.Int64(), 3]` example) were
+  accepted silently because the parse degraded to `Unknown`. Every
+  function referencing a broken schema (parameter / return / variable
+  annotation, `Schema.validate(...)` calls) now fails with one PLY041
+  per schema; the single-argument `Annotated[X]` form (a typing-level
+  `TypeError` at import) is flagged too. A child schema re-declaring
+  the field with a full-arity annotation repairs it (probed on
+  pandera 0.31.1 / polars 1.41.2).
 - Annotated assignments are now checked against the inferred RHS
   (ADR-0005 two-direction rule): `x: DataFrame[A] = expr` where the
   expression provably infers an *unrelated* schema is a new error
@@ -106,6 +119,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- README documented the runtime-broken `Annotated[pl.Array, pl.Int64(), 3]`
+  form; the example now shows the form pandera actually accepts,
+  `Annotated[pl.Array, pl.Int64(), 3, None]` (issue #69 — pandera demands
+  all of `inner, shape, width`).
 - A bare `pl.Decimal` field annotation registers pandera's engine default
   `Decimal(28, 0)` instead of polars' materialized `Decimal(38, 0)`
   (issue #75; probed: `to_schema()` reports 28 and `validate` rejects a

@@ -94,7 +94,7 @@ form:
 | `List` call form | `pl.List(pl.Int64)` | `List[Int64]` |
 | `Array` call form | `pl.Array(pl.Int64, 3)`, `pl.Array(pl.Int64, shape=3)`, `pl.Array(pl.Int64, (3,))` | `Array[Int64, 3]` — the width is tracked; a multi-dimensional or non-literal `shape` leaves the width a wildcard |
 | `Struct` call form | `pl.Struct({"a": pl.Utf8, "b": pl.Float64()})` | `Struct{a: Utf8, b: Float64}` |
-| `Annotated` containers | `Annotated[pl.List, pl.Int64()]`, `Annotated[pl.Array, pl.Int64(), 3]`, `Annotated[pl.Struct, {...}]` | same as the call forms |
+| `Annotated` containers | `Annotated[pl.List, pl.Int64()]`, `Annotated[pl.Array, pl.Int64(), 3, None]`, `Annotated[pl.Struct, {...}]` | same as the call forms. pandera requires **exactly all** of the dtype's parameters as metadata (`Array` needs `inner, shape, width` — a `None` literal keeps the polars default); a wrong arity crashes pandera at runtime and is flagged `PLY040` |
 | bare containers | `pl.List`, `pl.Array`, `pl.Struct` | `List[Unknown]`, `Array[Unknown]`, `Unknown` (no element/field info) |
 | `Series` wrapper | `Series[T]` (bare or qualified: `pa.typing.Series[T]`, ...) | unwraps to `T` |
 | optional column | `Optional[T]`, `T \| None` | the **column may be absent** (`required=False`) |
@@ -477,6 +477,7 @@ Errors are tagged with a stable `[PLY###]` prefix for IDE/CI consumers:
 | `PLY032` | function-call argument or return type mixes up `DataFrame[S]` and `LazyFrame[S]` — suggests the appropriate `.collect()` / `.lazy()` |
 | `PLY033` | a variable annotation re-interprets the inferred frame as an unrelated type (neither subtype direction holds, ADR-0005) |
 | `PLY040` | declared return type does not match the inferred return type — one shared code for the whole family: missing column, extra column, dtype difference, or the return type could not be inferred |
+| `PLY041` | a schema field's `Annotated[pl.<Dtype>, ...]` metadata arity provably crashes pandera — the TypeError fires the first time the schema is used (`validate` / `@pa.check_types`), so every function referencing the schema is dead on arrival |
 
 ### Apply-style helpers and warning codes
 

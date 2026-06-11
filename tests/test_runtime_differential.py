@@ -132,6 +132,19 @@ SKIP: dict[str, str] = {
     "valid/unknown_dtype_tracking.py::when_then_otherwise_column": (
         "int literals modeled as Int64 by design; runtime Int32 fails pandera validation"
     ),
+    # -- issue #69 (PLY041): the module crashes at IMPORT time — Python's
+    #    typing rejects single-argument Annotated — so the harness cannot
+    #    load it at all; the import-time crash IS the diagnostic's subject.
+    "invalid/dtype_annotated_no_metadata.py": (
+        "module crashes at import: single-argument Annotated is a typing-level TypeError"
+    ),
+    # -- issue #69 (PLY041): the input schema is the broken one, so the
+    #    harness cannot synthesize an input frame (to_schema raises the very
+    #    TypeError the fixture exists to flag). The return-side siblings in
+    #    the same fixture self-verify via the return validation.
+    "invalid/dtype_annotated_arity.py::broken_schema_as_input": (
+        "input schema is the PLY041 subject: to_schema raises TypeError during input synthesis"
+    ),
 }
 
 
@@ -484,6 +497,14 @@ def _collect_cases() -> tuple[list[Case], dict[str, str]]:
     for category in CATEGORIES:
         for path in sorted((FIXTURES_DIR / category).glob("*.py")):
             fixture_key = f"{category}/{path.name}"
+            # Whole-fixture skips must be honored BEFORE import: some
+            # fixtures (e.g. invalid/dtype_annotated_no_metadata.py) cannot
+            # be imported at all — the import-time crash is the static
+            # diagnostic's subject. One skipped param per fixture.
+            fixture_reason = SKIP.get(fixture_key)
+            if fixture_reason is not None:
+                skipped[fixture_key] = fixture_reason
+                continue
             module = _load_fixture_module(path, category)
             _MODULES[fixture_key] = module
             verdicts = _parse_golden(path)
@@ -504,7 +525,7 @@ def _collect_cases() -> tuple[list[Case], dict[str, str]]:
                     func_name=func_name,
                     static_passed=verdicts.get(func_name) != "FAIL",
                 )
-                reason = SKIP.get(fixture_key) or SKIP.get(case.case_key)
+                reason = SKIP.get(case.case_key)
                 if reason is not None:
                     skipped[case.case_key] = reason
                 else:
@@ -586,9 +607,10 @@ def test_runtime_agrees_with_static_verdict(
 # ---------------------------------------------------------------------------
 # Meta-tests: skip-list hygiene and coverage floor
 # ---------------------------------------------------------------------------
-# Honest floor based on observed numbers (197 covered / 8 skipped = 96.1% as
-# of 2026-06); raise it if coverage improves, never lower it to silence a
-# failure without triage.
+# Honest floor based on observed numbers (294 covered / 11 skipped = 96.4% as
+# of 2026-06; whole-fixture skips now count once per fixture, not per
+# function, since they are honored before import); raise it if coverage
+# improves, never lower it to silence a failure without triage.
 COVERAGE_FLOOR = 0.95
 
 

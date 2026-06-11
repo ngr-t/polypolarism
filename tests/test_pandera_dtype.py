@@ -643,3 +643,146 @@ class TestContainerBareForms:
         Unknown keeps everything downstream lenient (not Struct({}), which
         would unnest to zero columns)."""
         assert _parse("pl.Struct") == ColumnSpec(Unknown(), required=True)
+
+
+def _arity_error(annotation_src: str) -> str | None:
+    """Helper: parse a single annotation and run the arity checker."""
+    from polypolarism.pandera_dtype import annotated_arity_error
+
+    tree = ast.parse(f"x: {annotation_src}")
+    stmt = tree.body[0]
+    assert isinstance(stmt, ast.AnnAssign)
+    return annotated_arity_error(stmt.annotation)
+
+
+class TestAnnotatedArityError:
+    """Issue #69: pandera maps ``Annotated[pl.<Dtype>, ...]`` metadata 1:1
+    onto the dtype class's ``__init__`` parameters and requires EXACTLY all
+    of them (``get_dtype_kwargs``); a mismatch is a TypeError raised the
+    first time the schema is used. ``annotated_arity_error`` is the static
+    mirror of that rule — probed on pandera 0.31.1 / polars 1.41.2."""
+
+    # --- Array: 3 params (inner, shape, width) ---
+
+    def test_array_readme_form_missing_width(self):
+        err = _arity_error("Annotated[pl.Array, pl.Int64(), 2]")
+        assert err is not None
+        assert "inner, shape, width" in err
+        assert "3" in err
+
+    def test_array_inner_only(self):
+        assert _arity_error("Annotated[pl.Array, pl.Int64()]") is not None
+
+    def test_array_full_form_is_legal(self):
+        assert _arity_error("Annotated[pl.Array, pl.Int64(), 2, None]") is None
+
+    def test_array_four_metadata_args(self):
+        assert _arity_error("Annotated[pl.Array, pl.Int64(), 2, None, None]") is not None
+
+    # --- List: 1 param (inner) ---
+
+    def test_list_exact_is_legal(self):
+        assert _arity_error("Annotated[pl.List, pl.Int64()]") is None
+
+    def test_list_extra_metadata(self):
+        assert _arity_error("Annotated[pl.List, pl.Int64(), 3]") is not None
+
+    # --- Struct: 1 param (fields) ---
+
+    def test_struct_exact_is_legal(self):
+        assert _arity_error('Annotated[pl.Struct, {"a": pl.Utf8()}]') is None
+
+    def test_struct_extra_metadata(self):
+        assert _arity_error('Annotated[pl.Struct, {"a": pl.Utf8()}, 1]') is not None
+
+    # --- Datetime: 2 params (time_unit, time_zone) ---
+
+    def test_datetime_missing_time_zone(self):
+        err = _arity_error('Annotated[pl.Datetime, "us"]')
+        assert err is not None
+        assert "time_unit, time_zone" in err
+
+    def test_datetime_exact_is_legal(self):
+        assert _arity_error('Annotated[pl.Datetime, "us", None]') is None
+
+    def test_datetime_three_metadata_args(self):
+        assert _arity_error('Annotated[pl.Datetime, "us", None, None]') is not None
+
+    # --- Duration: 1 param (time_unit) ---
+
+    def test_duration_exact_is_legal(self):
+        assert _arity_error('Annotated[pl.Duration, "ms"]') is None
+
+    def test_duration_extra_metadata(self):
+        assert _arity_error('Annotated[pl.Duration, "ms", None]') is not None
+
+    # --- Decimal: 2 params (precision, scale) ---
+
+    def test_decimal_missing_scale(self):
+        assert _arity_error("Annotated[pl.Decimal, 12]") is not None
+
+    def test_decimal_exact_is_legal(self):
+        assert _arity_error("Annotated[pl.Decimal, 12, 4]") is None
+
+    # --- Enum: 1 param (categories) ---
+
+    def test_enum_exact_is_legal(self):
+        assert _arity_error('Annotated[pl.Enum, ["a", "b"]]') is None
+
+    def test_enum_extra_metadata(self):
+        assert _arity_error('Annotated[pl.Enum, ["a", "b"], None]') is not None
+
+    # --- Categorical: 2 params (categories, ordering) ---
+
+    def test_categorical_one_arg(self):
+        assert _arity_error('Annotated[pl.Categorical, "physical"]') is not None
+
+    def test_categorical_exact_is_legal(self):
+        assert _arity_error("Annotated[pl.Categorical, None, None]") is None
+
+    # --- scalar dtypes: 0 params — ANY metadata crashes ---
+
+    def test_scalar_with_metadata(self):
+        err = _arity_error("Annotated[pl.Int64, 5]")
+        assert err is not None
+        assert "pl.Int64" in err
+
+    def test_utf8_with_metadata(self):
+        assert _arity_error('Annotated[pl.Utf8, "x"]') is not None
+
+    # --- wrappers: the crash survives Optional / Series (probed) ---
+
+    def test_optional_wrapped_broken_array(self):
+        assert _arity_error("Optional[Annotated[pl.Array, pl.Int64(), 2]]") is not None
+
+    def test_optional_wrapped_legal_array(self):
+        assert _arity_error("Optional[Annotated[pl.Array, pl.Int64(), 2, None]]") is None
+
+    def test_series_wrapped_broken_datetime(self):
+        assert _arity_error('Series[Annotated[pl.Datetime, "us"]]') is not None
+
+    # --- zero metadata: Python's typing module itself rejects it at import ---
+
+    def test_no_metadata_is_import_time_error(self):
+        err = _arity_error("Annotated[pl.Datetime]")
+        assert err is not None
+        assert "import" in err
+
+    # --- forms the checker must NOT flag ---
+
+    def test_python_type_head_with_metadata_is_legal(self):
+        # pandera ignores pure-metadata Annotated on python types (probed).
+        assert _arity_error('Annotated[int, "doc"]') is None
+
+    def test_non_annotated_is_silent(self):
+        assert _arity_error("pl.Int64") is None
+        assert _arity_error("pl.Array(pl.Int64, 2)") is None
+
+    def test_starred_metadata_is_unknowable(self):
+        # ``Annotated[pl.Array, *DIMS]`` — the arity cannot be determined
+        # statically; stay silent rather than guess.
+        assert _arity_error("Annotated[pl.Array, *DIMS]") is None
+
+    def test_unknown_pl_attribute_is_silent(self):
+        # ``pl.Object`` is real but unmodeled — conservative silence.
+        assert _arity_error("Annotated[pl.Object, 1]") is None

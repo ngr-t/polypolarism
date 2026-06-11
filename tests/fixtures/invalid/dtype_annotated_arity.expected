@@ -1,0 +1,16 @@
+readme_array_missing_width: FAIL
+  error: [PLY041] schema 'ArrReadme' cannot be used at runtime: field 'v': `Annotated[pl.Array, ...]` has 2 metadata argument(s) but pandera requires exactly 3 (inner, shape, width) — TypeError the first time the schema is used; pass every argument (a `None` literal keeps the polars default) or use the call form `pl.Array(...)`
+datetime_missing_time_zone: FAIL
+  error: [PLY041] schema 'DtUnitOnly' cannot be used at runtime: field 't': `Annotated[pl.Datetime, ...]` has 1 metadata argument(s) but pandera requires exactly 2 (time_unit, time_zone) — TypeError the first time the schema is used; pass every argument (a `None` literal keeps the polars default) or use the call form `pl.Datetime(...)`
+  via: column 't': passed via Unknown
+decimal_missing_scale: FAIL
+  error: [PLY041] schema 'DecPrecisionOnly' cannot be used at runtime: field 'd': `Annotated[pl.Decimal, ...]` has 1 metadata argument(s) but pandera requires exactly 2 (precision, scale) — TypeError the first time the schema is used; pass every argument (a `None` literal keeps the polars default) or use the call form `pl.Decimal(...)`
+  via: column 'd': passed via Unknown
+list_extra_metadata: FAIL
+  error: [PLY041] schema 'ListExtraMeta' cannot be used at runtime: field 'xs': `Annotated[pl.List, ...]` has 2 metadata argument(s) but pandera requires exactly 1 (inner) — TypeError the first time the schema is used; pass every argument (a `None` literal keeps the polars default) or use the call form `pl.List(...)`
+scalar_with_metadata: FAIL
+  error: [PLY041] schema 'ScalarWithMeta' cannot be used at runtime: field 'a': `Annotated[pl.Int64, ...]` has 1 metadata argument(s) but `pl.Int64` takes none — pandera raises TypeError the first time the schema is used; use bare `pl.Int64`
+broken_schema_as_input: FAIL
+  error: [PLY041] schema 'DtUnitOnly' cannot be used at runtime: field 't': `Annotated[pl.Datetime, ...]` has 1 metadata argument(s) but pandera requires exactly 2 (time_unit, time_zone) — TypeError the first time the schema is used; pass every argument (a `None` literal keeps the polars default) or use the call form `pl.Datetime(...)`
+broken_schema_via_validate: FAIL
+  error: [PLY041] schema 'DtUnitOnly' cannot be used at runtime: field 't': `Annotated[pl.Datetime, ...]` has 1 metadata argument(s) but pandera requires exactly 2 (time_unit, time_zone) — TypeError the first time the schema is used; pass every argument (a `None` literal keeps the polars default) or use the call form `pl.Datetime(...)`
