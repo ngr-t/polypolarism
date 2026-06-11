@@ -1014,6 +1014,7 @@ EAGER_ONLY_METHODS: frozenset[str] = frozenset(
         "transpose",
         "partition_by",
         "n_unique",
+        "upsample",
     }
 )
 

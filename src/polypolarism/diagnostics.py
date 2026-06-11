@@ -61,9 +61,9 @@ PLW001 = "PLW001"  # map_elements / map_batches without ``return_dtype=`` keywor
 PLW002 = "PLW002"  # ``df.pipe(callable)`` where the callable can't be resolved
 PLW003 = "PLW003"  # function call to a name that isn't in the analysed module
 PLW004 = "PLW004"  # lambda / inline callable used where its return dtype is unknowable
-PLW005 = "PLW005"  # pivot result schema is data-dependent; user should annotate
+PLW005 = "PLW005"  # pivot / to_dummies result schema is data-dependent; user should annotate
 PLW006 = "PLW006"  # DataFrame[X] / LazyFrame[X] annotation references an unknown schema
-PLW007 = "PLW007"  # method not modeled by the analyzer; result dtype degrades to Unknown
+PLW007 = "PLW007"  # method not modeled (or experimental polars API); result degrades to Unknown
 PLW008 = "PLW008"  # variable annotation narrows the inferred RHS without runtime backing (ADR-0005)
 
 # Environment / version

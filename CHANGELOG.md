@@ -23,6 +23,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Join keys, `rename`, `cast`, `drop_nulls` subsets, selectors, and
   `pl.concat` are open-frame aware (no manufactured proofs; provable
   conflicts still fire).
+- Schema inference for three frame methods that previously hard-failed
+  correct code with "Could not infer return type" (issue #74):
+  `null_count()` (same column names, every dtype `UInt32`, eager and
+  lazy), `upsample(...)` (identity columns, but non-key columns become
+  `Nullable` — gap rows are null-filled; `time_column` and `group_by`
+  keys keep their dtype, and the eager-only method now raises `PLY030`
+  on a LazyFrame receiver), and `to_dummies(...)` (value-dependent
+  output columns now get the pivot-style `PLW005`
+  annotate-the-result suggestion instead of silent inference death).
+  All rules probed on polars 1.41.2 and 1.37.0 (identical).
+- `join_where(...)` no longer hard-fails: polars documents the method
+  as experimental, so instead of encoding its schema the result
+  degrades to an *open* frame with a dedicated `PLW007` warning —
+  correct code passes via the visible open-frame leniency, and
+  `Schema.validate(...)` retracts the warning (issue #74).
 
 - Annotated assignments are now checked against the inferred RHS
   (ADR-0005 two-direction rule): `x: DataFrame[A] = expr` where the

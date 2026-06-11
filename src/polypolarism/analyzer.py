@@ -4733,6 +4733,14 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     return _lazy_like(self._infer_unnest_call(receiver_type, node), receiver_type)
                 elif method_name == "pivot":
                     return self._infer_pivot_call(receiver_type, node)
+                elif method_name == "to_dummies":
+                    return self._infer_to_dummies_call(receiver_type, node)
+                elif method_name == "null_count":
+                    return self._infer_null_count_call(receiver_type)
+                elif method_name == "upsample":
+                    return self._infer_upsample_call(receiver_type, node)
+                elif method_name == "join_where":
+                    return self._infer_join_where_call(receiver_type, node)
                 elif method_name in _IDENTITY_FRAME_METHODS:
                     return receiver_type
                 elif method_name in (
@@ -6071,6 +6079,157 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             )
         )
         return None
+
+    def _infer_to_dummies_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
+        """``df.to_dummies(columns)`` — value-dependent, like pivot (issue #74).
+
+        The output columns are one UInt8 indicator per *runtime value* of
+        each dummied column (``c`` -> ``c_a``, ``c_b``, ...; probed on
+        polars 1.41.2, identical on 1.37.0), which polypolarism cannot
+        see. Same treatment as ``pivot``: emit ``PLW005`` with an
+        annotation suggestion instead of silently failing inference.
+        """
+        # ``columns`` is the only positional parameter (probed signature:
+        # ``to_dummies(columns=None, *, separator, drop_first, drop_nulls)``).
+        cols_node: ast.expr | None = node.args[0] if node.args else None
+        for kw in node.keywords:
+            if kw.arg == "columns":
+                cols_node = kw.value
+        dummied: list[str] | None = None
+        if cols_node is None:
+            # No selection: every column is dummied (only enumerable on a
+            # closed frame).
+            if input_frame.rest is None:
+                dummied = list(input_frame.columns)
+        else:
+            single = _str_constant(cols_node)
+            multi = _str_list_or_tuple(cols_node)
+            if single is not None:
+                dummied = [single]
+            elif multi is not None:
+                dummied = multi
+
+        # Build a copy-pasteable hint when the call shape is readable and
+        # the receiver is closed: passthrough columns keep their dtype,
+        # dummied columns expand to one UInt8 indicator per value.
+        hint = ""
+        if dummied is not None and input_frame.rest is None:
+            passthrough_lines = [
+                f"{name}: pl.{spec.dtype}"
+                for name, spec in input_frame.columns.items()
+                if name not in dummied
+            ]
+            dummied_lines = [
+                f"# one pl.UInt8 column per value of '{c}' (named '{c}_<value>')" for c in dummied
+            ]
+            hint = (
+                " Suggested annotation:\n"
+                "      class DummiesOut(pa.DataFrameModel):\n"
+                + "".join(f"          {line}\n" for line in passthrough_lines)
+                + "".join(f"          {line}\n" for line in dummied_lines)
+                + "      result: DataFrame[DummiesOut] = df.to_dummies(...)"
+            )
+
+        self.warnings.append(
+            tag(
+                PLW005,
+                "to_dummies: output column names depend on the runtime "
+                "values of the dummied columns, so polypolarism cannot "
+                "infer the schema. Assign the result to a "
+                "`DataFrame[Schema]`-annotated variable to give the "
+                "analyser a schema to check against." + hint,
+            )
+        )
+        return None
+
+    def _infer_null_count_call(self, input_frame: FrameType) -> FrameType:
+        """``df.null_count()`` — same column names, every dtype UInt32 (issue #74).
+
+        Probed (polars 1.41.2, identical on 1.37.0): one row holding the
+        per-column null tally; every column — Nullable or not — maps to a
+        non-null UInt32 of the same name, on both DataFrame and LazyFrame.
+        Optional columns stay optional (absent input column, absent tally);
+        an open receiver stays open (unknown extras are tallied too).
+        """
+        columns = {
+            name: ColumnSpec(dtype=UInt32(), required=spec.required)
+            for name, spec in input_frame.columns.items()
+        }
+        return FrameType(columns, rest=input_frame.rest, is_lazy=input_frame.is_lazy)
+
+    def _infer_upsample_call(self, input_frame: FrameType, node: ast.Call) -> FrameType:
+        """``df.upsample(time_column, every=..., group_by=...)`` (issue #74).
+
+        Identity schema, but the inserted gap rows are null-filled in every
+        column except the keys — so non-key columns become Nullable.
+        Probed (polars 1.41.2, identical on 1.37.0): the time column keeps
+        its dtype (Datetime unit included) and stays non-null; ``group_by``
+        columns are filled per group and stay non-null; everything else
+        gains nulls. Eager-only — ``pl.LazyFrame`` has no ``upsample``
+        (PLY030 is raised by the eager/lazy gate before this runs).
+        """
+        # Keys: ``time_column`` (the only positional parameter; probed
+        # signature ``upsample(time_column, *, every, group_by=None,
+        # maintain_order=False)``) plus the ``group_by`` column(s).
+        keys: set[str] = set()
+        if node.args:
+            cand = _str_constant(node.args[0])
+            if cand is not None:
+                keys.add(cand)
+        for kw in node.keywords:
+            if kw.arg == "time_column":
+                cand = _str_constant(kw.value)
+                if cand is not None:
+                    keys.add(cand)
+            elif kw.arg == "group_by":
+                single = _str_constant(kw.value)
+                multi = _str_list_or_tuple(kw.value)
+                if single is not None:
+                    keys.add(single)
+                elif multi is not None:
+                    keys.update(multi)
+        columns: dict[str, ColumnSpec] = {}
+        for name, spec in input_frame.columns.items():
+            if name in keys or isinstance(spec.dtype, Nullable):
+                columns[name] = spec
+            else:
+                columns[name] = ColumnSpec(dtype=Nullable(spec.dtype), required=spec.required)
+        return FrameType(columns, rest=input_frame.rest, is_lazy=input_frame.is_lazy)
+
+    def _infer_join_where_call(self, input_frame: FrameType, node: ast.Call) -> FrameType:
+        """``df.join_where(other, *predicates)`` — degrade, don't guess (issue #74).
+
+        polars documents the method as experimental ("It may be changed at
+        any point without it being considered a breaking change"), so
+        encoding its schema would couple polypolarism to an API polars
+        reserves the right to change silently. Instead of the old hard
+        "Could not infer return type" we return an OPEN frame (correct
+        code passes via the open-frame leniency, visibly) and surface a
+        PLW007 so the degradation is reviewable. The observed schema —
+        left + right columns with ``_right`` suffix on collisions, probed
+        identical on polars 1.37.0–1.41.2 — is a candidate for precise
+        inference if/when polars stabilizes the API.
+        """
+        # Walk the ``other`` frame argument so diagnostics nested in it
+        # (e.g. ``a.join_where(b.select(...), ...)``) still surface.
+        if node.args:
+            self._infer_expr_type(node.args[0])
+        # Deduped per source call: ``.agg()`` chains analyze the grouped
+        # receiver twice (laziness probe + _infer_agg_call).
+        key = (node.lineno, node.col_offset, "join_where")
+        if key not in self._warned_frame_calls:
+            self._warned_frame_calls.add(key)
+            self.warnings.append(
+                tag(
+                    PLW007,
+                    "`.join_where()` is experimental in polars (its schema "
+                    "may change without notice), so polypolarism does not "
+                    "track its result schema — downstream checks weaken. "
+                    "Validate the result against a schema "
+                    "(`Schema.validate(...)`) to keep checking precise.",
+                )
+            )
+        return FrameType({}, rest=RowVar("join_where"), is_lazy=input_frame.is_lazy)
 
     def _infer_unnest_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
         """``df.unnest("s")`` / ``unnest(["a","b"])`` flattens Struct columns."""

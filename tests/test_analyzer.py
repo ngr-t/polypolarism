@@ -4828,6 +4828,338 @@ class TestM12Pivot:
         assert ft.columns["B"].dtype == Float64()
 
 
+class TestNullCountInference:
+    """``df.null_count()`` (issue #74): same column names, every dtype
+    UInt32 (the per-column null tally), one row.
+
+    Probed (polars 1.41.2, identical on 1.37.0): eager and lazy receivers
+    both map every column — Nullable or not, temporal or not — to a
+    non-null UInt32 column of the same name.
+    """
+
+    def test_null_count_maps_every_column_to_uint32(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                a: int
+                b: str = pa.Field(nullable=True)
+                t: pl.Datetime
+
+            def f(data: DataFrame[In]):
+                return data.null_count()
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == [], results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert set(ft.columns) == {"a", "b", "t"}
+        for name in ("a", "b", "t"):
+            assert ft.columns[name].dtype == UInt32(), name
+        assert ft.is_lazy is False
+
+    def test_null_count_on_lazyframe_stays_lazy(self):
+        source = textwrap.dedent(
+            """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame, LazyFrame
+
+            class In(pa.DataFrameModel):
+                a: int
+
+            def f(data: LazyFrame[In]):
+                return data.null_count()
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == [], results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["a"].dtype == UInt32()
+        assert ft.is_lazy is True
+
+    def test_null_count_preserves_open_frame(self):
+        # The non-literal name.prefix opens the frame; unknown extra
+        # columns also count nulls at runtime, so openness is preserved.
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            P = get_prefix()
+
+            class In(pa.DataFrameModel):
+                a: int
+
+            def f(data: DataFrame[In]):
+                return data.select(pl.col("a").name.prefix(P)).null_count()
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == [], results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.rest is not None
+
+
+class TestUpsampleInference:
+    """``df.upsample(time_column, every=...)`` (issue #74): identity
+    columns, but non-key columns become Nullable — the inserted gap rows
+    are null-filled in every column except the time column and the
+    ``group_by`` keys.
+
+    Probed (polars 1.41.2, identical on 1.37.0): gap rows null only the
+    non-key columns; ``group_by`` columns are forward-filled per group;
+    the time column keeps its dtype (unit included). Eager-only —
+    ``pl.LazyFrame`` has no ``upsample`` attribute.
+    """
+
+    HEADER = textwrap.dedent(
+        PANDERA_HEADER
+        + """
+            class In(pa.DataFrameModel):
+                t: pl.Datetime
+                g: str
+                v: int
+        """
+    )
+
+    def _frame(self, body: str):
+        source = self.HEADER + textwrap.dedent(
+            f"""
+            def f(data: DataFrame[In]):
+                return {body}
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == [], results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        return ft
+
+    def test_non_key_columns_become_nullable(self):
+        ft = self._frame('data.upsample(time_column="t", every="30m")')
+        assert ft.columns["t"].dtype == Datetime()
+        assert ft.columns["g"].dtype == Nullable(Utf8())
+        assert ft.columns["v"].dtype == Nullable(Int64())
+
+    def test_positional_time_column(self):
+        ft = self._frame('data.upsample("t", every="30m")')
+        assert ft.columns["t"].dtype == Datetime()
+        assert ft.columns["v"].dtype == Nullable(Int64())
+
+    def test_group_by_keys_stay_non_nullable(self):
+        ft = self._frame('data.upsample(time_column="t", every="30m", group_by="g")')
+        assert ft.columns["g"].dtype == Utf8()
+        assert ft.columns["v"].dtype == Nullable(Int64())
+
+    def test_group_by_list_keys_stay_non_nullable(self):
+        ft = self._frame('data.upsample(time_column="t", every="30m", group_by=["g"])')
+        assert ft.columns["g"].dtype == Utf8()
+        assert ft.columns["v"].dtype == Nullable(Int64())
+
+    def test_already_nullable_column_is_not_double_wrapped(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class In(pa.DataFrameModel):
+                t: pl.Datetime
+                v: int = pa.Field(nullable=True)
+
+            def f(data: DataFrame[In]):
+                return data.upsample("t", every="30m")
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == [], results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["v"].dtype == Nullable(Int64())
+
+    def test_upsample_on_lazyframe_is_ply030(self):
+        source = textwrap.dedent(
+            """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame, LazyFrame
+
+            class In(pa.DataFrameModel):
+                t: pl.Datetime
+                v: int
+
+            def f(data: LazyFrame[In]):
+                return data.upsample("t", every="30m")
+        """
+        )
+        results = analyze_source(source)
+        assert any("PLY030" in e for e in results[0].errors), results[0].errors
+
+
+class TestJoinWhereDegradation:
+    """``df.join_where(other, *predicates)`` (issue #74): polars documents
+    the method as experimental ("may be changed at any point"), so instead
+    of encoding its schema we degrade to an OPEN frame and surface PLW007 —
+    correct code passes (no more hard "Could not infer return type"), and
+    the degradation is visible.
+
+    Probed (polars 1.41.2, identical on 1.37.0): the observed schema is
+    left + right columns with ``_right`` suffix on collisions, on both
+    DataFrame and LazyFrame — a candidate for precise inference if/when
+    polars stabilizes the API.
+    """
+
+    HEADER = textwrap.dedent(
+        PANDERA_HEADER
+        + """
+            class LeftK(pa.DataFrameModel):
+                k: int
+                x: int
+
+            class RightK(pa.DataFrameModel):
+                k: int
+                y: int
+        """
+    )
+
+    def test_join_where_returns_open_frame_with_plw007(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(a: DataFrame[LeftK], b: DataFrame[RightK]):
+                return a.join_where(b, pl.col("x") < pl.col("y"))
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == [], results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns == {}
+        assert ft.rest is not None
+        plw007 = [w for w in results[0].warnings if "PLW007" in w]
+        assert len(plw007) == 1, results[0].warnings
+        assert "join_where" in plw007[0] and "experimental" in plw007[0]
+
+    def test_join_where_on_lazyframes_stays_lazy(self):
+        source = textwrap.dedent(
+            """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame, LazyFrame
+
+            class LeftK(pa.DataFrameModel):
+                k: int
+                x: int
+
+            class RightK(pa.DataFrameModel):
+                k: int
+                y: int
+
+            def f(a: LazyFrame[LeftK], b: LazyFrame[RightK]):
+                return a.join_where(b, pl.col("x") < pl.col("y"))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == [], results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.is_lazy is True
+
+    def test_validate_retracts_the_join_where_plw007(self):
+        # Schema.validate is exactly the repair the warning recommends.
+        source = self.HEADER + textwrap.dedent(
+            """
+            class Out(pa.DataFrameModel):
+                k: int
+                x: int
+                k_right: int
+                y: int
+
+            def f(a: DataFrame[LeftK], b: DataFrame[RightK]) -> DataFrame[Out]:
+                return Out.validate(a.join_where(b, pl.col("x") < pl.col("y")))
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == [], results[0].errors
+        assert not any("PLW007" in w for w in results[0].warnings), results[0].warnings
+
+    def test_join_where_warning_is_deduped_through_agg_chains(self):
+        # .agg() chains analyze the grouped receiver twice (laziness probe
+        # + _infer_agg_call) — the warning must fire once per call site.
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(a: DataFrame[LeftK], b: DataFrame[RightK]):
+                return a.join_where(b, pl.col("x") < pl.col("y")).group_by("k").agg(pl.len())
+            """
+        )
+        results = analyze_source(source)
+        plw007 = [w for w in results[0].warnings if "PLW007" in w]
+        assert len(plw007) == 1, results[0].warnings
+
+
+class TestToDummiesWarning:
+    """``df.to_dummies(...)`` (issue #74): output column names depend on
+    runtime values (``c`` -> ``c_a``, ``c_b``, ... UInt8), exactly like
+    pivot — so it gets the same PLW005 annotate-the-result nudge instead
+    of dying silently into "Could not infer return type"."""
+
+    HEADER = textwrap.dedent(
+        PANDERA_HEADER
+        + """
+            class In(pa.DataFrameModel):
+                c: str
+                n: int
+        """
+    )
+
+    def test_to_dummies_emits_plw005_with_actionable_message(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(data: DataFrame[In]):
+                return data.to_dummies("c")
+            """
+        )
+        results = analyze_source(source)
+        f = results[0]
+        assert f.errors == [], f.errors
+        assert any("PLW005" in w for w in f.warnings), f.warnings
+        assert any("to_dummies" in w and "DataFrame[" in w for w in f.warnings)
+        # The closed receiver yields a copy-pasteable hint: passthrough
+        # columns keep their dtype, dummied columns are UInt8-per-value.
+        assert any("n: pl.Int64" in w and "UInt8" in w for w in f.warnings), f.warnings
+
+    def test_to_dummies_without_columns_dummies_everything(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(data: DataFrame[In]):
+                return data.to_dummies()
+            """
+        )
+        results = analyze_source(source)
+        f = results[0]
+        assert any("PLW005" in w for w in f.warnings), f.warnings
+        # No passthrough column survives — the hint must not claim one.
+        assert not any("n: pl.Int64" in w for w in f.warnings), f.warnings
+
+    def test_to_dummies_assigned_to_typed_var_uses_annotation(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            class Out(pa.DataFrameModel):
+                c_a: pl.UInt8
+                c_b: pl.UInt8
+                n: int
+
+            def f(data: DataFrame[In]) -> DataFrame[Out]:
+                result: DataFrame[Out] = data.to_dummies("c")
+                return result
+            """
+        )
+        results = analyze_source(source)
+        assert any("PLW005" in w for w in results[0].warnings)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["c_a"].dtype == UInt8()
+
+
 class TestM13LazyFrame:
     """LazyFrame-specific methods: identity passthrough + sinks + collect_async."""
 
