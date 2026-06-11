@@ -690,7 +690,7 @@ class TestExprFilterChain:
 
         results = analyze_source(source)
 
-        assert any("PLY001" in e for e in results[0].errors)
+        assert any("PLY042" in e for e in results[0].errors)
         assert any("missing" in e for e in results[0].errors)
 
     def test_filter_kwarg_constraint_missing_column_is_validated(self):
@@ -711,7 +711,7 @@ class TestExprFilterChain:
 
         results = analyze_source(source)
 
-        assert any("PLY001" in e for e in results[0].errors)
+        assert any("PLY042" in e for e in results[0].errors)
 
 
 class TestExprDropNullsChain:
@@ -3679,7 +3679,7 @@ class TestExprListArgs:
         )
         results = analyze_source(source)
         assert results[0].has_errors is True
-        assert any("PLY001" in e and "missing" in e for e in results[0].errors)
+        assert any("PLY042" in e and "missing" in e for e in results[0].errors)
 
     def test_coalesce_list_default_output_name(self):
         source = textwrap.dedent(
@@ -3752,7 +3752,7 @@ class TestExprListArgs:
         )
         results = analyze_source(source)
         assert results[0].has_errors is True
-        assert any("PLY001" in e and "nope" in e for e in results[0].errors)
+        assert any("PLY042" in e and "nope" in e for e in results[0].errors)
 
 
 class TestMixedListArgsPLY017:
@@ -4085,7 +4085,7 @@ class TestConcatListAndHorizontal:
         )
         results = analyze_source(source)
         assert results[0].has_errors is True
-        assert any("PLY001" in e and "nope" in e for e in results[0].errors)
+        assert any("PLY042" in e and "nope" in e for e in results[0].errors)
 
 
 class TestM6Selectors:
@@ -4171,7 +4171,7 @@ class TestM6DiagnosticCodes:
         """
         )
         results = analyze_source(source)
-        assert any("[PLY001]" in e for e in results[0].errors)
+        assert any("[PLY042]" in e for e in results[0].errors)
 
     def test_drop_unknown_has_code(self):
         source = textwrap.dedent(
@@ -4425,7 +4425,7 @@ class TestM8AggChains:
         """
         )
         results = analyze_source(source)
-        assert any("PLY001" in e for e in results[0].errors)
+        assert any("PLY042" in e for e in results[0].errors)
         assert any("missing" in e for e in results[0].errors)
 
 
@@ -7829,11 +7829,11 @@ class TestSelectConstantResolution:
         """
         )
         results = analyze_source(source)
-        assert any("PLY001" in str(e) and "ghost" in str(e) for e in results[0].errors)
+        assert any("PLY042" in str(e) and "ghost" in str(e) for e in results[0].errors)
 
     def test_select_unknown_name_still_falls_through(self):
         """A bare Name that is NOT a constant (e.g. a frame variable) keeps
-        going to expression analysis — no false PLY001."""
+        going to expression analysis — no false PLY042."""
         frame = FrameType({"a": Int64()})
         analyzer = _run_body(frame, "out = df.select(mystery)")
         assert analyzer.errors == []
@@ -7870,7 +7870,7 @@ class TestSelectConstantResolution:
         """
         )
         results = analyze_source(source)
-        assert any("PLY001" in str(e) and "ghost" in str(e) for e in results[0].errors)
+        assert any("PLY042" in str(e) and "ghost" in str(e) for e in results[0].errors)
 
     def test_with_columns_kwarg_constant_is_column_reference(self):
         source = textwrap.dedent(
@@ -8347,7 +8347,7 @@ class TestExprFilterPredicateDtype:
 
     def test_missing_column_string_predicate_is_ply001_not_ply008(self):
         results = self._analyze('df.select(pl.col("v").filter("ghost").alias("x"))')
-        assert any("PLY001" in e and "ghost" in e for e in results[0].errors)
+        assert any("PLY042" in e and "ghost" in e for e in results[0].errors)
         assert not any("PLY008" in e for e in results[0].errors)
 
 
@@ -8413,7 +8413,7 @@ class TestSortKeyValidation:
 
     def test_pl_col_missing_key_flags_ply001(self):
         results = self._analyze('df.sort(pl.col("ghost"))')
-        assert any("PLY001" in e and "ghost" in e for e in results[0].errors)
+        assert any("PLY042" in e and "ghost" in e for e in results[0].errors)
 
     def test_pl_col_existing_key_passes(self):
         results = self._analyze('df.sort(pl.col("a"))')
@@ -9122,7 +9122,7 @@ class TestOverKeyValidation:
 
     def test_missing_literal_key_flags_ply001(self):
         results = self._analyze('df.select(pl.col("v").sum().over("ghost"))')
-        assert any("PLY001" in e and "ghost" in e for e in results[0].errors)
+        assert any("PLY042" in e and "ghost" in e for e in results[0].errors)
 
     def test_existing_literal_key_passes(self):
         results = self._analyze('df.select(pl.col("v").sum().over("s"))')
@@ -9130,7 +9130,7 @@ class TestOverKeyValidation:
 
     def test_varargs_keys_each_checked(self):
         results = self._analyze('df.select(pl.col("v").sum().over("s", "ghost"))')
-        assert any("PLY001" in e and "ghost" in e for e in results[0].errors)
+        assert any("PLY042" in e and "ghost" in e for e in results[0].errors)
 
     def test_multiple_existing_keys_pass(self):
         results = self._analyze('df.select(pl.col("v").sum().over("s", "t"))')
@@ -9138,11 +9138,11 @@ class TestOverKeyValidation:
 
     def test_list_keys_each_checked(self):
         results = self._analyze('df.select(pl.col("v").sum().over(["s", "ghost"]))')
-        assert any("PLY001" in e and "ghost" in e for e in results[0].errors)
+        assert any("PLY042" in e and "ghost" in e for e in results[0].errors)
 
     def test_expr_key_missing_flags_ply001(self):
         results = self._analyze('df.select(pl.col("v").sum().over(pl.col("ghost")))')
-        assert any("PLY001" in e and "ghost" in e for e in results[0].errors)
+        assert any("PLY042" in e and "ghost" in e for e in results[0].errors)
 
     def test_expr_key_existing_passes(self):
         results = self._analyze('df.select(pl.col("v").sum().over(pl.col("s")))')
@@ -9150,7 +9150,7 @@ class TestOverKeyValidation:
 
     def test_order_by_kwarg_missing_flags_ply001(self):
         results = self._analyze('df.select(pl.col("v").first().over("s", order_by="ghost"))')
-        assert any("PLY001" in e and "ghost" in e for e in results[0].errors)
+        assert any("PLY042" in e and "ghost" in e for e in results[0].errors)
 
     def test_order_by_kwarg_existing_passes(self):
         results = self._analyze('df.select(pl.col("v").first().over("s", order_by="t"))')
@@ -9158,11 +9158,11 @@ class TestOverKeyValidation:
 
     def test_order_by_list_each_checked(self):
         results = self._analyze('df.select(pl.col("v").first().over("s", order_by=["t", "ghost"]))')
-        assert any("PLY001" in e and "ghost" in e for e in results[0].errors)
+        assert any("PLY042" in e and "ghost" in e for e in results[0].errors)
 
     def test_partition_by_kwarg_missing_flags_ply001(self):
         results = self._analyze('df.select(pl.col("v").sum().over(partition_by="ghost"))')
-        assert any("PLY001" in e and "ghost" in e for e in results[0].errors)
+        assert any("PLY042" in e and "ghost" in e for e in results[0].errors)
 
     def test_mapping_strategy_kwarg_is_not_a_column(self):
         results = self._analyze('df.select(pl.col("v").sum().over("s", mapping_strategy="join"))')
@@ -9198,7 +9198,7 @@ class TestOverKeyValidation:
     def test_with_columns_over_missing_flags_ply001(self):
         """Issue #32 repro shape: with_columns(g=...over("ghost"))."""
         results = self._analyze('df.with_columns(g=pl.col("v").sum().over("ghost"))')
-        assert any("PLY001" in e and "ghost" in e for e in results[0].errors)
+        assert any("PLY042" in e and "ghost" in e for e in results[0].errors)
 
 
 class TestOverMappingStrategy:
@@ -9346,7 +9346,7 @@ class TestOverMappingStrategy:
             """
         )
         results = analyze_source(source)
-        assert any("PLY001" in e and "ghost" in e for e in results[0].errors)
+        assert any("PLY042" in e and "ghost" in e for e in results[0].errors)
 
 
 class TestComparisonIncompatibleDtypes:
@@ -10104,7 +10104,7 @@ class TestWhenConditionDtype:
 
     def test_missing_column_condition_is_ply001_not_ply008(self):
         results = self._analyze('df.select(x=pl.when("ghost").then(1).otherwise(0))')
-        assert any("PLY001" in e and "ghost" in e for e in results[0].errors)
+        assert any("PLY042" in e and "ghost" in e for e in results[0].errors)
         assert not any("PLY008" in e for e in results[0].errors)
 
     def test_boolean_condition_passes(self):
@@ -13505,3 +13505,111 @@ class TestStrictParamExtraColumns:
         assert any("extra column" in str(e) and "label" in str(e) for e in target[0].errors), (
             target[0].errors
         )
+
+
+class TestCheckedIslandNonStrictSchemas:
+    """Issue #83 (checked-island design): a strict=False declared schema
+    is the function's interface — referencing an undeclared column flags
+    PLY042 with honest wording (the schema admits caller extras at
+    runtime, so it is an undeclared dependency, NOT a provable runtime
+    failure like PLY001 on exact frames)."""
+
+    _SCHEMA = """
+        import polars as pl
+        import pandera.polars as pa
+        from pandera.typing.polars import DataFrame
+
+        class HasPrice(pa.DataFrameModel):
+            price: float
+
+            class Config:
+                strict = False
+                coerce = True
+    """
+
+    def test_undeclared_reference_flags_ply042(self):
+        source = textwrap.dedent(
+            self._SCHEMA
+            + """
+        def filter_by_region(df: DataFrame[HasPrice]) -> DataFrame[HasPrice]:
+            return df.filter(pl.col("region") != "test")
+        """
+        )
+        results = analyze_source(source)
+        errors = [str(e) for e in results[0].errors]
+        assert any("PLY042" in e and "region" in e and "HasPrice" in e for e in errors), errors
+        assert not any("PLY001" in e for e in errors), errors
+
+    def test_string_select_flags_ply042(self):
+        source = textwrap.dedent(
+            self._SCHEMA
+            + """
+        def pick(df: DataFrame[HasPrice]) -> pl.DataFrame:
+            return df.select("region")
+        """
+        )
+        results = analyze_source(source)
+        errors = [str(e) for e in results[0].errors]
+        assert any("PLY042" in e and "region" in e for e in errors), errors
+
+    def test_strict_schema_keeps_ply001_proof(self):
+        source = textwrap.dedent(
+            """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+
+            class StrictPrice(pa.DataFrameModel):
+                price: float
+
+                class Config:
+                    strict = True
+
+            def f(df: DataFrame[StrictPrice]) -> DataFrame[StrictPrice]:
+                return df.filter(pl.col("region") != "test")
+            """
+        )
+        results = analyze_source(source)
+        errors = [str(e) for e in results[0].errors]
+        assert any("PLY001" in e for e in errors), errors
+
+    def test_select_output_is_exact_again(self):
+        # Shape-determining calls re-anchor the island: the select output
+        # is exact, so a later miss is a genuine PLY001 proof.
+        source = textwrap.dedent(
+            self._SCHEMA
+            + """
+        def narrowed(df: DataFrame[HasPrice]) -> pl.DataFrame:
+            picked = df.select(pl.col("price"))
+            return picked.select(pl.col("region"))
+        """
+        )
+        results = analyze_source(source)
+        errors = [str(e) for e in results[0].errors]
+        assert any("PLY001" in e and "region" in e for e in errors), errors
+
+    def test_provenance_survives_with_columns(self):
+        source = textwrap.dedent(
+            self._SCHEMA
+            + """
+        def chained(df: DataFrame[HasPrice]) -> pl.DataFrame:
+            tagged = df.with_columns(tax=pl.col("price") * 0.1)
+            return tagged.select("region")
+        """
+        )
+        results = analyze_source(source)
+        errors = [str(e) for e in results[0].errors]
+        assert any("PLY042" in e and "region" in e for e in errors), errors
+
+    def test_validate_narrowing_carries_provenance(self):
+        source = textwrap.dedent(
+            self._SCHEMA
+            + """
+        def narrowed(df: pl.DataFrame) -> pl.DataFrame:
+            out = HasPrice.validate(df)
+            return out.select("region")
+        """
+        )
+        results = analyze_source(source)
+        errors = [str(e) for e in results[0].errors]
+        assert any("PLY042" in e and "region" in e for e in errors), errors

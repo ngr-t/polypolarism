@@ -118,7 +118,7 @@ class TestCheckDirectory:
 
         assert len(results) == 1
         assert results[0].passed is False
-        assert any("PLY001" in str(e) and "ghost" in str(e) for e in results[0].errors)
+        assert any("PLY042" in str(e) and "ghost" in str(e) for e in results[0].errors)
 
     def test_compare_incompatible_fixture_fails_with_ply009(self):
         """Issue #33 fixture: String == Int64 comparison and Int64.is_in(list-of-str)."""

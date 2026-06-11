@@ -81,6 +81,7 @@ from polypolarism.diagnostics import (
     PLY032,
     PLY033,
     PLY041,
+    PLY042,
     tag,
 )
 from polypolarism.expr_infer import (
@@ -1117,6 +1118,26 @@ def _set_lazy(result: FrameType | None, lazy: bool) -> FrameType | None:
         return None
     result.is_lazy = lazy
     return result
+
+
+def _missing_column_diag(frame: FrameType, name: str) -> tuple[str, str]:
+    """(code, message) for a missing-column reference on a CLOSED frame.
+
+    Checked-island semantics (issue #83): on a frame bound from a
+    non-strict declared schema the lookup is an interface violation
+    against the declaration (PLY042, honest wording — the schema admits
+    caller extras at runtime); on an exact frame it is a provable
+    runtime miss (PLY001).
+    """
+    if frame.nonstrict_schema is not None:
+        return PLY042, (
+            f"column '{name}' is not declared in schema "
+            f"'{frame.nonstrict_schema}' — the (non-strict) schema admits "
+            f"extra columns at runtime, but this function's declaration "
+            f"does not promise it. Declare the column on the schema, or "
+            f"take a bare pl.DataFrame parameter for row-polymorphic helpers"
+        )
+    return PLY001, f"Column '{name}' not found. Available columns: {list(frame.columns.keys())}"
 
 
 def _call_result_frame(declared: FrameType | None, source_name: str) -> FrameType | None:
@@ -2748,7 +2769,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 output_name = alias if alias else col_name
                 return output_name, col_type
             except ColumnNotFoundError as e:
-                self.errors.append(tag(PLY001, str(e)))
+                self.errors.append(tag(getattr(e, "code", PLY001), str(e)))
                 return None, None
 
         # Check for pl.lit(value)
@@ -2818,7 +2839,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 try:
                     fields[col] = infer_col(col, self.current_frame)
                 except ColumnNotFoundError as e:
-                    self.errors.append(tag(PLY001, str(e)))
+                    self.errors.append(tag(getattr(e, "code", PLY001), str(e)))
             # Keyword args name the fields: ``pl.struct(x=expr)`` → field
             # ``x`` (issue #47). The value can be any expression; an
             # un-inferable one keeps the field as Unknown rather than
@@ -2840,7 +2861,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 try:
                     col_type = infer_col(col, self.current_frame)
                 except ColumnNotFoundError as e:
-                    self.errors.append(tag(PLY001, str(e)))
+                    self.errors.append(tag(getattr(e, "code", PLY001), str(e)))
                     return col, None  # type: ignore[return-value]
                 try:
                     result_type = infer_agg_result_type(
@@ -2945,7 +2966,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             try:
                 return s, infer_col(s, self.current_frame)
             except ColumnNotFoundError as e:
-                self.errors.append(tag(PLY001, str(e)))
+                self.errors.append(tag(getattr(e, "code", PLY001), str(e)))
                 return s, None
         return self.analyze_select_expr(node)
 
@@ -3224,7 +3245,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             try:
                 infer_col(s, self.current_frame)
             except ColumnNotFoundError as e:
-                self.errors.append(tag(PLY001, str(e)))
+                self.errors.append(tag(getattr(e, "code", PLY001), str(e)))
             return
         if isinstance(node, (ast.List, ast.Tuple)):
             for elt in node.elts:
@@ -5508,12 +5529,8 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 return None
             result_columns[output_name or name] = Unknown()
             return output_name or name
-        self.errors.append(
-            tag(
-                PLY001,
-                f"Column '{name}' not found. Available columns: {list(input_frame.columns.keys())}",
-            )
-        )
+        code, msg = _missing_column_diag(input_frame, name)
+        self.errors.append(tag(code, msg))
         return None
 
     def _track_output_name(self, name: str, seen: set[str], call_name: str) -> None:
@@ -5576,13 +5593,8 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                             result_columns[c] = Unknown()
                             self._track_output_name(c, seen_outputs, "select")
                             continue
-                        self.errors.append(
-                            tag(
-                                PLY001,
-                                f"Column '{c}' not found. Available columns: "
-                                f"{list(input_frame.columns.keys())}",
-                            )
-                        )
+                        code, msg = _missing_column_diag(input_frame, c)
+                        self.errors.append(tag(code, msg))
                         continue
                     result_columns[c] = spec.dtype
                     self._track_output_name(c, seen_outputs, "select")
@@ -5697,13 +5709,8 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 # missing name may exist among the unknown extras — no error.
                 for c in plural:
                     if c not in input_frame.columns and input_frame.rest is None:
-                        self.errors.append(
-                            tag(
-                                PLY001,
-                                f"Column '{c}' not found. Available columns: "
-                                f"{list(input_frame.columns.keys())}",
-                            )
-                        )
+                        code, msg = _missing_column_diag(input_frame, c)
+                        self.errors.append(tag(code, msg))
                         continue
                     self._track_output_name(c, seen_outputs, "with_columns")
                 continue
@@ -5719,13 +5726,8 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 assert names is not None
                 for c in names:
                     if c not in input_frame.columns and input_frame.rest is None:
-                        self.errors.append(
-                            tag(
-                                PLY001,
-                                f"Column '{c}' not found. Available columns: "
-                                f"{list(input_frame.columns.keys())}",
-                            )
-                        )
+                        code, msg = _missing_column_diag(input_frame, c)
+                        self.errors.append(tag(code, msg))
                         continue
                     self._track_output_name(c, seen_outputs, "with_columns")
                 continue
@@ -5768,13 +5770,8 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 elif input_frame.rest is not None:
                     result_columns[kw.arg] = Unknown()
                 else:
-                    self.errors.append(
-                        tag(
-                            PLY001,
-                            f"Column '{col_ref}' not found. Available columns: "
-                            f"{list(input_frame.columns.keys())}",
-                        )
-                    )
+                    code, msg = _missing_column_diag(input_frame, col_ref)
+                    self.errors.append(tag(code, msg))
                     continue
                 self._track_output_name(kw.arg, seen_outputs, "with_columns")
                 continue
@@ -5794,6 +5791,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             # The constructor subtracts pinned names, so columns this call
             # (re)introduced clear their absence marks (issue #78).
             absent=input_frame.absent,
+            nonstrict_schema=input_frame.nonstrict_schema,
         )
 
     # -- frame methods --------------------------------------------------
@@ -5856,6 +5854,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             strict=input_frame.strict,
             rest=input_frame.rest,
             absent=absent,
+            nonstrict_schema=input_frame.nonstrict_schema,
         )
 
     def _infer_rename_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
@@ -5908,6 +5907,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             strict=input_frame.strict,
             rest=input_frame.rest,
             absent=absent,
+            nonstrict_schema=input_frame.nonstrict_schema,
         )
 
     def _infer_cast_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
@@ -5971,6 +5971,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             strict=input_frame.strict,
             rest=input_frame.rest,
             absent=input_frame.absent,
+            nonstrict_schema=input_frame.nonstrict_schema,
         )
 
     def _infer_drop_nulls_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
@@ -6011,6 +6012,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             strict=input_frame.strict,
             rest=input_frame.rest,
             absent=input_frame.absent,
+            nonstrict_schema=input_frame.nonstrict_schema,
         )
 
     def _collect_concat_frames(self, list_node: ast.expr) -> list[FrameType] | None:
@@ -6195,6 +6197,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             strict=input_frame.strict,
             rest=input_frame.rest,
             absent=input_frame.absent,
+            nonstrict_schema=input_frame.nonstrict_schema,
         )
 
     def _infer_unpivot_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
@@ -6633,6 +6636,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             strict=input_frame.strict,
             rest=input_frame.rest,
             absent=input_frame.absent,
+            nonstrict_schema=input_frame.nonstrict_schema,
         )
 
 

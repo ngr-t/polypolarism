@@ -42,9 +42,18 @@ from polypolarism.types import (
 
 
 class ColumnNotFoundError(Exception):
-    """Raised when a column is not found in the FrameType."""
+    """Raised when a column is not found in the FrameType.
 
-    pass
+    ``code`` is the diagnostic code the analyzer should tag the message
+    with: ``PLY001`` (a provable runtime miss on an exact frame) by
+    default, ``PLY042`` when the frame is the checked island of a
+    non-strict declared schema (issue #83) — there the lookup is an
+    interface violation, not a runtime certainty.
+    """
+
+    def __init__(self, message: str, code: str = "PLY001") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class TypePromotionError(Exception):
@@ -102,6 +111,19 @@ def infer_col(column_name: str, frame: FrameType) -> DataType:
                     f"in this chain (drop/rename)"
                 )
             return Unknown()
+        if frame.nonstrict_schema is not None:
+            # Checked-island semantics (issue #83): the non-strict schema
+            # admits caller extras at runtime, so this is an undeclared
+            # dependency against the declaration — not a runtime proof.
+            raise ColumnNotFoundError(
+                f"column '{column_name}' is not declared in schema "
+                f"'{frame.nonstrict_schema}' — the (non-strict) schema admits "
+                f"extra columns at runtime, but this function's declaration "
+                f"does not promise it. Declare the column on the schema, or "
+                f"take a bare pl.DataFrame parameter for row-polymorphic "
+                f"helpers",
+                code="PLY042",
+            )
         available = list(frame.columns.keys())
         raise ColumnNotFoundError(
             f"Column '{column_name}' not found. Available columns: {available}"

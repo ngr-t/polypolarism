@@ -57,6 +57,9 @@ PLY040 = "PLY040"  # declared return type does not match the inferred return typ
 # Schema definition
 PLY041 = "PLY041"  # schema field annotation provably crashes pandera at runtime (Annotated arity, issue #69)
 
+# Declared-schema interface ("checked island", issue #83)
+PLY042 = "PLY042"  # column not declared in the function's (non-strict) schema — an undeclared dependency, not a provable runtime failure
+
 
 # Warnings (PLW###): inference is imprecise here, but the user can usually
 # fix it by adding a type annotation or an explicit dtype argument.

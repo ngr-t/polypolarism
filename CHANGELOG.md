@@ -119,6 +119,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Undeclared-column references inside functions with non-strict declared
+  schemas are reported honestly (issue #83): new code `PLY042` replaces
+  `PLY001` there, naming the schema and stating the truth — a
+  `strict=False` schema admits caller extras at runtime, so the
+  reference is an undeclared dependency against the function's declared
+  interface ("checked island"), not a provable runtime failure. The
+  declaration remains enforced (the corpus's missing-column detection is
+  unchanged in strength); `PLY001`'s runtime-certainty wording is now
+  reserved for exact frames (strict schemas, `select` outputs, open-frame
+  negative knowledge), and shape-determining calls re-anchor exactness.
+  Row-polymorphic helpers keep their two honest spellings: declare the
+  columns you touch, or take a bare `pl.DataFrame` (ADR-0006). This
+  resolves the layer disagreement the issue identified, on the
+  checked-island side; the open-binding alternative was measured to
+  invalidate 159 tests/25 fixtures of declared-interface checking and
+  rejected by design choice.
+
 - Call results of functions with non-strict (`strict = False`) return
   schemas bind as OPEN frames (issue #81): pandera's `check_types`
   passes the caller's extra columns through such a return, so the

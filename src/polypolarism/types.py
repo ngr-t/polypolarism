@@ -586,6 +586,15 @@ class FrameType:
     closed frames (``rest is None`` — the pinned set is already exact)
     and always empty there. Excluded from ``__eq__`` like ``is_lazy`` —
     it is consulted explicitly at the column-lookup sites.
+
+    ``nonstrict_schema`` is diagnostic provenance (issue #83): the name
+    of the ``strict=False`` pandera schema this CLOSED frame was bound
+    from (parameter binding, ``Schema.validate`` narrowing). Such a
+    schema admits extra columns at runtime, so a missing-column lookup
+    is an interface violation against the declaration ("checked island"
+    — flagged PLY042 with honest wording) rather than a provable runtime
+    failure (PLY001). Cleared by shape-determining calls (``select``,
+    aggregations — their outputs are exact). Excluded from ``__eq__``.
     """
 
     columns: dict[str, ColumnSpec]
@@ -594,6 +603,7 @@ class FrameType:
     is_lazy: bool
     coerce: bool
     absent: frozenset[str]
+    nonstrict_schema: str | None
 
     def __init__(
         self,
@@ -603,6 +613,7 @@ class FrameType:
         is_lazy: bool = False,
         coerce: bool = False,
         absent: frozenset[str] | set[str] | None = None,
+        nonstrict_schema: str | None = None,
     ) -> None:
         normalized: dict[str, ColumnSpec] = {}
         if columns:
@@ -621,6 +632,7 @@ class FrameType:
         self.rest = rest
         self.is_lazy = is_lazy
         self.coerce = coerce
+        self.nonstrict_schema = nonstrict_schema
         # A pinned column trumps a stale absence mark; absence is only
         # meaningful while the frame is open.
         if absent and rest is not None:

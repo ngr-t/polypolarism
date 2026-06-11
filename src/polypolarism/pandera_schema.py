@@ -50,7 +50,18 @@ class Schema:
     definition_warnings: dict[str, str] = field(default_factory=dict)
 
     def to_frame_type(self) -> FrameType:
-        return FrameType(columns=dict(self.columns), strict=self.strict, coerce=self.coerce)
+        # Checked-island semantics (issue #83): a strict=False schema
+        # binds CLOSED — the declaration is the function's interface and
+        # undeclared references are flagged — but carries its name as
+        # ``nonstrict_schema`` provenance so the diagnostic says
+        # "interface violation" (PLY042) instead of claiming a provable
+        # runtime failure (PLY001): the schema admits extras at runtime.
+        return FrameType(
+            columns=dict(self.columns),
+            strict=self.strict,
+            coerce=self.coerce,
+            nonstrict_schema=None if self.strict else self.name,
+        )
 
 
 @dataclass

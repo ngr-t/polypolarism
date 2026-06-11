@@ -130,10 +130,6 @@ snapshots read from parquet/IPC footers).
 - **Backward narrowing**: `df.select("a")` succeeding implies `df`
   itself has `a` for *subsequent* statements. Currently unobservable
   (the pin would be `Unknown` and the frame stays open).
-- **Validate-narrowing of non-strict schemas** still binds closed
-  (`Schema.validate(df)` with `strict=False` also passes extras through
-  at runtime) — same false-positive class as issue #81, much larger
-  blast radius; revisit separately.
 - **`pl.DataFrame(non_literal)`** could produce an open frame instead
   of untracked; left out to keep this slice focused on declared intent
   (annotations) and file sources.
@@ -144,3 +140,22 @@ snapshots read from parquet/IPC footers).
 - **C-12b**: `polypolarism snapshot` writing committed path→schema
   snapshots from parquet/IPC metadata, turning source assumptions into
   verified facts without check-time IO.
+- **Checked-island semantics for non-strict declared schemas** (issue
+  #83, design decision). A `strict=False` schema on YOUR OWN parameter
+  (or a `Schema.validate` narrowing) binds CLOSED: the declaration is
+  the function's interface, and referencing an undeclared column is
+  flagged — but as `PLY042` with honest wording (the schema admits
+  caller extras at runtime; the declaration just doesn't promise the
+  column), not `PLY001`'s runtime certainty. The frame carries
+  `nonstrict_schema` provenance through shape-preserving operations;
+  shape-determining calls (`select`, aggregations) re-anchor exactness
+  and PLY001 proofs. The alternative — binding non-strict schemas open
+  (assumption semantics) — was prototyped and rejected: it silences the
+  declared-interface checking that is the tool's core value for the
+  default (non-strict) schema style, invalidating 159 tests/25 fixtures
+  of intent. The asymmetry with call RESULTS (issue #81: a CALLEE's
+  non-strict return binds open at the caller) is principled and mirrors
+  structural typing precedent (TypeScript): your own annotation is your
+  contract; someone else's return annotation is a lower bound on the
+  value you receive. Row-polymorphic helpers have two honest spellings:
+  declare the columns you touch, or take a bare `pl.DataFrame`.

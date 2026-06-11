@@ -88,13 +88,13 @@ form:
 | stdlib temporal, bare | `date`, `datetime`, `timedelta` (via `from datetime import ...`) | `Date`, `Datetime`, `Duration` |
 | stdlib temporal, qualified | `datetime.date`, `dt.datetime`, ... (any non-`pl` prefix) | same as bare |
 | polars dtype classes | `pl.Int8`–`pl.Int128`, `pl.UInt8`–`pl.UInt128`, `pl.Float16/32/64`, `pl.String`/`pl.Utf8`, `pl.Boolean`, `pl.Binary`, `pl.Date`, `pl.Datetime`, `pl.Time`, `pl.Duration`, `pl.Categorical`, `pl.Enum`, `pl.Decimal`, `pl.Null` — with or without `()` | the corresponding dtype |
-| parametrized `Datetime` | `pl.Datetime("us", "UTC")`, `pl.Datetime(time_zone="UTC")` | `Datetime[UTC]` (`time_unit` is not modeled; a non-literal `time_zone` degrades to `Unknown`) |
+| parametrized `Datetime` | `pl.Datetime("us", "UTC")`, `pl.Datetime(time_zone="UTC")`, `pl.Duration("ms")` | `Datetime[us, UTC]` / `Duration[ms]` — the time unit IS part of dtype identity (issue #66); a non-literal argument degrades to `Unknown` |
 | parametrized `Decimal` | `pl.Decimal(20, 4)`, `pl.Decimal(scale=2)` | `Decimal(p, s)`; omitted args take polars' defaults (38, 0) |
-| `Enum` with variants | `pl.Enum(["new", "paid"])` | `Enum` (the variant list is not yet inspected) |
+| `Enum` with variants | `pl.Enum(["new", "paid"])`, `Annotated[pl.Enum, ["new", "paid"]]` | `Enum['new', 'paid']` — the ordered category tuple is dtype identity (issue #67); a non-literal list is a categories-unknown wildcard |
 | `List` call form | `pl.List(pl.Int64)` | `List[Int64]` |
 | `Array` call form | `pl.Array(pl.Int64, 3)`, `pl.Array(pl.Int64, shape=3)`, `pl.Array(pl.Int64, (3,))` | `Array[Int64, 3]` — the width is tracked; a multi-dimensional or non-literal `shape` leaves the width a wildcard |
 | `Struct` call form | `pl.Struct({"a": pl.Utf8, "b": pl.Float64()})` | `Struct{a: Utf8, b: Float64}` |
-| `Annotated` containers | `Annotated[pl.List, pl.Int64()]`, `Annotated[pl.Array, pl.Int64(), 3, None]`, `Annotated[pl.Struct, {...}]` | same as the call forms. pandera requires **exactly all** of the dtype's parameters as metadata (`Array` needs `inner, shape, width` — a `None` literal keeps the polars default); a wrong arity crashes pandera at runtime and is flagged `PLY040` |
+| `Annotated` containers | `Annotated[pl.List, pl.Int64()]`, `Annotated[pl.Array, pl.Int64(), 3, None]`, `Annotated[pl.Struct, {...}]` | same as the call forms. pandera requires **exactly all** of the dtype's parameters as metadata (`Array` needs `inner, shape, width` — a `None` literal keeps the polars default); a wrong arity crashes pandera at runtime and is flagged `PLY041` |
 | bare containers | `pl.List`, `pl.Array`, `pl.Struct` | `List[Unknown]`, `Array[Unknown]`, `Unknown` (no element/field info) |
 | `Series` wrapper | `Series[T]` (bare or qualified: `pa.typing.Series[T]`, ...) | unwraps to `T` |
 | optional column | `Optional[T]`, `T \| None` | the **column may be absent** (`required=False`) |
@@ -478,6 +478,7 @@ Errors are tagged with a stable `[PLY###]` prefix for IDE/CI consumers:
 | `PLY033` | a variable annotation re-interprets the inferred frame as an unrelated type (neither subtype direction holds, ADR-0005) |
 | `PLY040` | declared return type does not match the inferred return type — one shared code for the whole family: missing column, extra column, dtype difference, or the return type could not be inferred |
 | `PLY041` | a schema field's `Annotated[pl.<Dtype>, ...]` metadata arity provably crashes pandera — the TypeError fires the first time the schema is used (`validate` / `@pa.check_types`), so every function referencing the schema is dead on arrival |
+| `PLY042` | a column referenced inside a function is not declared in its (non-strict) parameter/validated schema — an undeclared dependency on caller extras ("checked island"), not a provable runtime failure; declare the column, or take a bare `pl.DataFrame` for row-polymorphic helpers |
 
 ### Apply-style helpers and warning codes
 
