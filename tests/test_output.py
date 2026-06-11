@@ -238,3 +238,77 @@ class TestFormatJsonIntegration:
         assert len(data["diagnostics"]) >= 1
         # Should have error about missing column
         assert any("missing" in d["message"].lower() for d in data["diagnostics"])
+
+
+class TestJsonFunctionsArray:
+    """D-11 hover support: ``--format json`` exposes per-function schema
+    summaries (params, declared/inferred returns, openness) so editor
+    integrations can render hovers without re-analyzing."""
+
+    def _functions(self, source: str):
+        import json
+        import textwrap
+
+        from polypolarism.analyzer import analyze_source
+        from polypolarism.checker import check_function
+        from polypolarism.output import FileResults, format_json_files, function_summaries
+
+        analyses = analyze_source(textwrap.dedent(source))
+        results = [check_function(a) for a in analyses]
+        group = FileResults(
+            file_path="x.py",
+            results=results,
+            function_lines={a.name: a.lineno for a in analyses},
+            function_end_lines={a.name: a.end_lineno for a in analyses},
+            functions=function_summaries(analyses),
+        )
+        payload = json.loads(format_json_files([group]))
+        return payload["functions"]
+
+    def test_summary_carries_schemas_and_span(self):
+        functions = self._functions(
+            """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+
+            class Src(pa.DataFrameModel):
+                a: int
+
+                class Config:
+                    strict = True
+
+            class Out(pa.DataFrameModel):
+                doubled: int
+
+                class Config:
+                    strict = True
+
+            def f(df: DataFrame[Src]) -> DataFrame[Out]:
+                return df.select(doubled=pl.col("a") * 2)
+            """
+        )
+        assert len(functions) == 1
+        fn = functions[0]
+        assert fn["name"] == "f"
+        assert fn["file"] == "x.py"
+        assert fn["line"] >= 1 and fn["end_line"] >= fn["line"]
+        assert fn["params"]["df"]["columns"] == {"a": "Int64"}
+        assert fn["declared_return"]["columns"] == {"doubled": "Int64"}
+        assert fn["inferred_return"]["columns"] == {"doubled": "Int64"}
+        assert fn["inferred_return"]["open"] is False
+
+    def test_open_frame_and_missing_sides_render(self):
+        functions = self._functions(
+            """
+            import polars as pl
+
+            def g(df: pl.DataFrame) -> pl.DataFrame:
+                return df.with_columns(x=pl.lit(1))
+            """
+        )
+        fn = functions[0]
+        assert fn["declared_return"] is None
+        assert fn["inferred_return"]["open"] is True
+        assert fn["inferred_return"]["columns"]["x"] == "Int64"
+        assert fn["params"]["df"]["open"] is True

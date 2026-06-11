@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `--format json` now carries a `functions` array: per-function schema
+  summaries (source span, parameter frames, declared/inferred return
+  frames with rendered dtypes, openness/strict/lazy markers) so editor
+  integrations can show hovers without re-analyzing (D-11). The CLI also
+  stopped analyzing each file twice on the JSON path.
+
 - ADR-0006 future-work items closed: (1) **backward narrowing** — an
   assumption lookup on an open frame pins the column into the frame, so
   later statements can use the positive knowledge (a strict-parameter

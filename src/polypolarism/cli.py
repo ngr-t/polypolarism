@@ -13,9 +13,15 @@ from polypolarism.checker import (
     ExtraColumn,
     MissingColumn,
     TypeDifference,
+    check_function,
     check_source,
 )
-from polypolarism.output import FileResults, format_json, format_json_files
+from polypolarism.output import (
+    FileResults,
+    format_json,
+    format_json_files,
+    function_summaries,
+)
 from polypolarism.version_check import (
     check_versions,
     detect_versions,
@@ -224,38 +230,44 @@ def create_parser() -> argparse.ArgumentParser:
 
 def _check_file_with_locations(
     file_path: Path,
-) -> tuple[list[CheckResult], dict[str, int], dict[str, int]]:
+) -> tuple[list[CheckResult], dict[str, int], dict[str, int], list[dict]]:
     """
-    Check a file and return results plus per-function source line numbers.
+    Check a file and return results plus per-function source line numbers
+    and schema summaries (the ``functions`` JSON array, D-11 hover data).
 
     On read or parse failures, returns a single failing CheckResult and empty
-    line-number maps. Never raises for those cases.
+    maps. Never raises for those cases. The analyses are produced once and
+    fed through ``check_function`` directly (``check_source`` would
+    re-analyze the file a second time).
     """
     try:
         source = file_path.read_text()
     except (UnicodeDecodeError, OSError) as err:
-        return [_parse_error_result(file_path, err)], {}, {}
+        return [_parse_error_result(file_path, err)], {}, {}, []
     try:
         analyses = analyze_source(source, file_path=file_path)
-        results = check_source(source, file_path=file_path)
     except SyntaxError as err:
-        return [_parse_error_result(file_path, err)], {}, {}
+        return [_parse_error_result(file_path, err)], {}, {}, []
+    results = [check_function(a) for a in analyses]
     function_lines = {a.name: a.lineno for a in analyses}
     function_end_lines = {a.name: a.end_lineno for a in analyses}
-    return results, function_lines, function_end_lines
+    return results, function_lines, function_end_lines, function_summaries(analyses)
 
 
 def _expand_directory_groups(dir_path: Path) -> list[FileResults]:
     """Per-file FileResults for every .py under dir_path."""
     groups: list[FileResults] = []
     for py_file in sorted(dir_path.glob("**/*.py")):
-        results, function_lines, function_end_lines = _check_file_with_locations(py_file)
+        results, function_lines, function_end_lines, functions = _check_file_with_locations(
+            py_file
+        )
         groups.append(
             FileResults(
                 file_path=str(py_file),
                 results=results,
                 function_lines=function_lines,
                 function_end_lines=function_end_lines,
+                functions=functions,
             )
         )
     return groups
@@ -313,13 +325,16 @@ def main(args: list[str] | None = None) -> int:
             return 1
 
         if path.is_file():
-            results, function_lines, function_end_lines = _check_file_with_locations(path)
+            results, function_lines, function_end_lines, functions = (
+                _check_file_with_locations(path)
+            )
             file_groups.append(
                 FileResults(
                     file_path=str(path),
                     results=results,
                     function_lines=function_lines,
                     function_end_lines=function_end_lines,
+                    functions=functions,
                 )
             )
         elif path.is_dir():
@@ -339,6 +354,7 @@ def main(args: list[str] | None = None) -> int:
                 single.file_path,
                 single.function_lines,
                 single.function_end_lines,
+                functions=single.functions,
             )
         else:
             output = format_json_files(file_groups)

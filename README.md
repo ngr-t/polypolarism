@@ -523,6 +523,12 @@ consumers (pre-commit hooks, CI annotators, editors) never need to regex
 the message text. Untagged diagnostics (file read / parse failures) omit
 the field.
 
+The JSON payload also carries a `functions` array — one entry per
+analyzed function with its source span and schema summaries (parameter
+frames, declared/inferred return frames as rendered dtype maps, plus
+`open` / `strict` / `lazy` markers). Editor integrations use it to show
+hovers without re-running the analysis.
+
 ### Schema diff block
 
 When a single function has at least two column-level mismatches

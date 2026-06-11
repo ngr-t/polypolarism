@@ -68,6 +68,45 @@ class FileResults:
     results: list[CheckResult]
     function_lines: dict[str, int] = field(default_factory=dict)
     function_end_lines: dict[str, int] = field(default_factory=dict)
+    # Per-function schema summaries (``function_summaries``) — consumed by
+    # editor integrations (hover) via ``--format json``.
+    functions: list[dict] = field(default_factory=list)
+
+
+def _frame_summary(frame) -> dict | None:
+    """JSON-ready summary of a FrameType: rendered column dtypes plus the
+    openness marker (an open frame may hold extra unknown columns —
+    ADR-0006). ``None`` passes through for absent sides."""
+    if frame is None:
+        return None
+    return {
+        "columns": {name: str(spec) for name, spec in frame.columns.items()},
+        "open": frame.rest is not None,
+        "strict": frame.strict,
+        "lazy": frame.is_lazy,
+    }
+
+
+def function_summaries(analyses) -> list[dict]:
+    """Per-function schema summaries for editor hovers (D-11).
+
+    One entry per analyzed function: source span, parameter frames, and
+    the declared / inferred return frames, with dtypes rendered through
+    their canonical ``str`` forms.
+    """
+    return [
+        {
+            "name": analysis.name,
+            "line": analysis.lineno,
+            "end_line": analysis.end_lineno,
+            "params": {
+                name: _frame_summary(ft) for name, ft in analysis.input_types.items()
+            },
+            "declared_return": _frame_summary(analysis.declared_return_type),
+            "inferred_return": _frame_summary(analysis.inferred_return_type),
+        }
+        for analysis in analyses
+    ]
 
 
 def _build_diagnostics(group: FileResults) -> list[dict]:
@@ -109,6 +148,7 @@ def format_json(
     file_path: str,
     function_lines: dict[str, int] | None = None,
     function_end_lines: dict[str, int] | None = None,
+    functions: list[dict] | None = None,
 ) -> str:
     """
     Format check results as JSON for a single source file.
@@ -127,10 +167,12 @@ def format_json(
         results=results,
         function_lines=function_lines or {},
         function_end_lines=function_end_lines or {},
+        functions=functions or [],
     )
     output = {
         "file": file_path,
         "diagnostics": _build_diagnostics(group),
+        "functions": _attributed_functions(group),
     }
     return json.dumps(output, indent=2)
 
@@ -144,6 +186,13 @@ def format_json_files(groups: list[FileResults]) -> str:
     when it is invoked with more than one file (e.g. by pre-commit).
     """
     diagnostics: list[dict] = []
+    functions: list[dict] = []
     for group in groups:
         diagnostics.extend(_build_diagnostics(group))
-    return json.dumps({"diagnostics": diagnostics}, indent=2)
+        functions.extend(_attributed_functions(group))
+    return json.dumps({"diagnostics": diagnostics, "functions": functions}, indent=2)
+
+
+def _attributed_functions(group: FileResults) -> list[dict]:
+    """The group's function summaries with the owning file stamped in."""
+    return [{**fn, "file": group.file_path} for fn in group.functions]
