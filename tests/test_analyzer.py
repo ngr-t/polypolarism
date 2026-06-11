@@ -8209,6 +8209,14 @@ class TestArrNamespaceReturns:
             # arr.eval keeps the Array container around the body dtype
             ('pl.col("q").arr.eval(pl.element() * 2)', Array(Int64())),
             ('pl.col("q").arr.eval(pl.element().cast(pl.Utf8))', Array(Utf8())),
+            # as_list=True de-arrays into List around the body dtype —
+            # probed (polars 1.41.2; the arg landed in 1.41, issue #53):
+            # List(body dtype) for dtype-changing, aggregating AND
+            # length-changing bodies alike. Explicit as_list=False keeps
+            # the Array container (same as omitted).
+            ('pl.col("q").arr.eval(pl.element() * 2, as_list=True)', ListT(Int64())),
+            ('pl.col("q").arr.eval(pl.element().cast(pl.Utf8), as_list=True)', ListT(Utf8())),
+            ('pl.col("q").arr.eval(pl.element() * 2, as_list=False)', Array(Int64())),
             # Unrecognised method falls through to Unknown (silent)
             ('pl.col("q").arr.to_struct()', Unknown()),
         ],
@@ -8243,9 +8251,27 @@ class TestArrNamespaceReturns:
         results = analyze_source(source)
         assert any("PLY009" in e for e in results[0].errors), results[0].errors
 
-    def test_arr_eval_as_list_degrades_to_unknown(self):
-        # ``as_list=True`` yields a List at runtime — not modeled, silent.
-        assert self._dtype_of('pl.col("q").arr.eval(pl.element() * 2, as_list=True)') == Unknown()
+    def test_arr_eval_as_list_bad_body_bubbles_error(self):
+        # The body is type-checked for ``as_list=True`` too — the old
+        # Unknown fallback skipped body analysis entirely.
+        source = self.HEADER + textwrap.dedent(
+            """
+            def f(df: DataFrame[In]):
+                return df.select(
+                    pl.col("q").arr.eval(pl.element() + pl.lit("x"), as_list=True).alias("out")
+                )
+            """
+        )
+        results = analyze_source(source)
+        assert any("PLY009" in e for e in results[0].errors), results[0].errors
+
+    # upgrade trigger: non-literal as_list values gain constant propagation
+    @pytest.mark.imprecision
+    def test_arr_eval_non_literal_as_list_degrades_to_unknown(self):
+        # A non-literal ``as_list`` leaves the container kind (Array vs
+        # List) unknowable — never guess one of the two.
+        expr = 'pl.col("q").arr.eval(pl.element() * 2, as_list=flag)'
+        assert self._dtype_of(expr) == Unknown()
 
 
 class TestContainerAggReturns:
@@ -10584,23 +10610,74 @@ class TestTzAwareDtypeOutputs:
             ("pl.col('utc').dt.replace_time_zone(None)", Datetime()),
             ("pl.col('utc').dt.convert_time_zone('Asia/Tokyo')", Datetime(tz="Asia/Tokyo")),
             ("pl.col('n').dt.convert_time_zone('UTC')", Datetime(tz="UTC")),
-            # Unknowable arguments degrade to Unknown — never guess a tz.
-            ("pl.col('n').dt.replace_time_zone(tzvar)", Unknown()),
-            ("pl.col('utc').dt.convert_time_zone(tzvar)", Unknown()),
             # str.to_datetime tz forms
             ("pl.col('s').str.to_datetime()", Datetime()),
             ("pl.col('s').str.to_datetime('%Y-%m-%d %H:%M:%S')", Datetime()),
             ("pl.col('s').str.to_datetime(time_zone='UTC')", Datetime(tz="UTC")),
             ("pl.col('s').str.to_datetime('%Y-%m-%dT%H:%M:%S%z')", Datetime(tz="UTC")),
             ("pl.col('s').str.to_datetime(format='%Y-%m-%dT%H:%M:%S%z')", Datetime(tz="UTC")),
-            ("pl.col('s').str.to_datetime(fmtvar)", Unknown()),
-            ("pl.col('s').str.to_datetime(time_zone=tzvar)", Unknown()),
+            # Every chrono offset-directive variant resolves the dtype
+            # to Datetime[UTC] — probed (polars 1.41.2), including %#z
+            # and the colon forms.
+            ("pl.col('s').str.to_datetime('%Y-%m-%dT%H:%M:%S%:z')", Datetime(tz="UTC")),
+            ("pl.col('s').str.to_datetime('%Y-%m-%dT%H:%M:%S%::z')", Datetime(tz="UTC")),
+            ("pl.col('s').str.to_datetime('%Y-%m-%dT%H:%M:%S%:::z')", Datetime(tz="UTC")),
+            ("pl.col('s').str.to_datetime('%Y-%m-%dT%H:%M:%S%#z')", Datetime(tz="UTC")),
         ],
     )
     def test_tz_setting_method_output(self, expr: str, expected) -> None:
         analyzer = _run_body(self._frame(), f"out = df.select(r={expr})")
         assert analyzer.errors == [], analyzer.errors
         assert analyzer.var_types["out"].columns["r"].dtype == expected
+
+    # upgrade trigger: types.py Datetime gains a tz wildcard ("aware,
+    # tz statically unknown") — a non-literal format/time_zone always
+    # yields a Datetime, but with which tz cannot be known statically
+    # and Datetime equality/subtyping is exact on tz, so claiming any
+    # concrete tz (or naive) would be wrong.
+    @pytest.mark.imprecision
+    @pytest.mark.parametrize(
+        "expr",
+        [
+            "pl.col('s').str.to_datetime(fmtvar)",
+            "pl.col('s').str.to_datetime(time_zone=tzvar)",
+        ],
+    )
+    def test_to_datetime_non_literal_args_degrade_to_unknown(self, expr: str) -> None:
+        analyzer = _run_body(self._frame(), f"out = df.select(r={expr})")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["r"].dtype == Unknown()
+
+    # upgrade trigger: types.py Datetime gains a tz wildcard ("aware,
+    # tz statically unknown") — these always yield SOME Datetime
+    # (replace_time_zone(var) may even strip to naive if the variable
+    # is None), but Datetime equality/subtyping is exact on tz, so any
+    # concrete claim would be a guess.
+    @pytest.mark.imprecision
+    @pytest.mark.parametrize(
+        "expr",
+        [
+            "pl.col('n').dt.replace_time_zone(tzvar)",
+            "pl.col('utc').dt.convert_time_zone(tzvar)",
+        ],
+    )
+    def test_time_zone_non_literal_arg_degrades_to_unknown(self, expr: str) -> None:
+        analyzer = _run_body(self._frame(), f"out = df.select(r={expr})")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["r"].dtype == Unknown()
+
+    # upgrade trigger: convert_time_zone(None) gains a guaranteed-crash
+    # diagnostic — probed (polars 1.41.2): it raises TypeError at
+    # expression-construction time ("argument 'time_zone': 'None' is
+    # not an instance of 'str'"), so any dtype claim is moot and the
+    # silent Unknown is sound but undiagnosed.
+    @pytest.mark.imprecision
+    def test_convert_time_zone_none_degrades_to_unknown(self) -> None:
+        analyzer = _run_body(
+            self._frame(), "out = df.select(r=pl.col('utc').dt.convert_time_zone(None))"
+        )
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["r"].dtype == Unknown()
 
     def test_nullable_receiver_keeps_wrapper(self) -> None:
         analyzer = _run_body(

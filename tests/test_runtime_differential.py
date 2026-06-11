@@ -176,6 +176,17 @@ def _value_overrides() -> dict[str, dict[str, pl.Series]]:
         "invalid/str_to_decimal_wrong_scale.py": {
             "price": pl.Series(["10.50", "20.25", "30.75"]),
         },
+        # str.to_datetime("...%:z") parses column *contents*; generic "s0"
+        # strings are not offset-stamped datetimes.
+        "valid/tz_same_ops.py": {
+            "stamp": pl.Series(["2024-01-02T03:04:05+09:00", "2024-01-02T04:04:05+09:00"]),
+        },
+        # same parse in the false-negative twin: parseable strings keep the
+        # runtime failure on the intended dtype mismatch (Datetime[UTC] vs
+        # the declared naive Datetime), not on an unparseable "s0".
+        "invalid/tz_mixing.py": {
+            "stamp": pl.Series(["2024-01-02T03:04:05+09:00", "2024-01-02T04:04:05+09:00"]),
+        },
         # `items: pl.List(pl.Struct)` leaves the struct fields unknown, but the
         # body unnests and the declared output requires a `qty` field.
         "valid/container_dtypes.py": {

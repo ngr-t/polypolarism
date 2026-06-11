@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1181,9 +1182,16 @@ def _time_zone_arg_dtype(method: str, call_node: ast.Call | None) -> DataType:
     on a Datetime receiver (issue #50 collateral).
 
     Probed (polars 1.41.2): both methods yield ``Datetime[arg]`` for naive
-    AND aware receivers; ``replace_time_zone(None)`` strips the tz.
-    Anything not statically readable (a variable, ``convert_time_zone(None)``
-    — unprobed) degrades to Unknown: claiming a tz would be a guess.
+    AND aware receivers; ``replace_time_zone(None)`` strips the tz;
+    ``convert_time_zone(None)`` raises TypeError at expression-construction
+    time ("argument 'time_zone': 'None' is not an instance of 'str'"), so
+    its silent Unknown is sound — no frame ever materializes.
+
+    A non-literal time_zone stays Unknown deliberately (backlog B-6): the
+    result is always SOME Datetime (or naive, if a variable None reaches
+    ``replace_time_zone``), but ``types.Datetime`` equality/subtyping is
+    exact on tz and has no "aware, tz unknown" wildcard, so any concrete
+    claim would be a guess — a wrong precise type is worse than Unknown.
     """
     tz_node = _call_arg(call_node, position=0, name="time_zone")
     if isinstance(tz_node, ast.Constant):
@@ -1194,14 +1202,26 @@ def _time_zone_arg_dtype(method: str, call_node: ast.Call | None) -> DataType:
     return Unknown()
 
 
+# chrono offset directives: %z, %:z, %::z, %:::z, %#z. Probed (polars
+# 1.41.2): a format literal containing ANY of them resolves the dtype to
+# Datetime[UTC] — even when row-level parsing later fails (the error
+# message names `datetime[μs, UTC]` as the target). Polars' own dtype
+# resolution is substring-level: the escaped ``%%z`` also resolves to
+# UTC (probed), so a plain scan — not an escape-aware one — is faithful.
+_TZ_DIRECTIVE_RE = re.compile(r"%(?::{0,3}|#)z")
+
+
 def _str_to_datetime_dtype(call_node: ast.Call | None) -> DataType:
     """Result dtype of ``str.to_datetime(...)`` (issue #50 collateral).
 
     Probed (polars 1.41.2): no tz-affecting arguments -> naive Datetime;
     ``time_zone="X"`` (string literal) -> ``Datetime[X]``; a format literal
-    containing ``%z`` -> ``Datetime[UTC]``. A non-literal ``time_zone`` /
-    format (and the unprobed ``%:z`` / ``%#z`` directives) degrade to
-    Unknown rather than claiming naive.
+    containing an offset directive (``%z`` and its ``%:z`` / ``%::z`` /
+    ``%:::z`` / ``%#z`` variants) -> ``Datetime[UTC]``. A non-literal
+    ``time_zone`` / format degrades to Unknown: the result is always SOME
+    Datetime, but ``types.Datetime`` equality/subtyping is exact on tz and
+    has no "aware, tz unknown" wildcard, so claiming naive (or any
+    concrete tz) would be a guess.
     """
     if call_node is not None:
         for kw in call_node.keywords:
@@ -1218,10 +1238,8 @@ def _str_to_datetime_dtype(call_node: ast.Call | None) -> DataType:
     fmt = _str_constant(fmt_node)
     if fmt is None:
         return Unknown()
-    if "%z" in fmt:
+    if _TZ_DIRECTIVE_RE.search(fmt):
         return Datetime(tz="UTC")
-    if "%:z" in fmt or "%#z" in fmt:
-        return Unknown()
     return Datetime()
 
 
@@ -2681,14 +2699,32 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             if method in ARR_NAMESPACE_RETURN:
                 result = ARR_NAMESPACE_RETURN[method]
             elif method == "eval" and isinstance(receiver_inner, Array):
-                # ``arr.eval(body)`` is length-preserving and keeps the
-                # Array container (probed); ``as_list=True`` (which yields
-                # a List instead) is not modeled — degrade to Unknown.
-                if call_node is not None and any(kw.arg == "as_list" for kw in call_node.keywords):
-                    result = Unknown()
+                # ``arr.eval(body)`` runs ``body`` element-wise like
+                # ``list.eval`` — the body is type-checked with
+                # ``pl.element()`` bound to the element dtype and its
+                # errors bubble up. Probed (polars 1.41.2): the default
+                # keeps the Array container; ``as_list=True`` (keyword-
+                # only, added in polars 1.41 — issue #53) yields
+                # ``List(body dtype)`` instead, for dtype-changing,
+                # aggregating AND length-changing bodies alike (probe:
+                # ``arr.eval(pl.element().filter(...), as_list=True)``
+                # -> List(Int64)). A non-literal ``as_list`` leaves the
+                # container kind unknowable -> Unknown.
+                body_dtype = self._eval_body_dtype(receiver_inner.inner, call_node)
+                element = body_dtype if body_dtype is not None else Unknown()
+                as_list_node = (
+                    next((kw.value for kw in call_node.keywords if kw.arg == "as_list"), None)
+                    if call_node is not None
+                    else None
+                )
+                if as_list_node is None:
+                    result = Array(element)
+                elif isinstance(as_list_node, ast.Constant) and isinstance(
+                    as_list_node.value, bool
+                ):
+                    result = ListT(element) if as_list_node.value else Array(element)
                 else:
-                    body_dtype = self._eval_body_dtype(receiver_inner.inner, call_node)
-                    result = Array(body_dtype if body_dtype is not None else Unknown())
+                    result = Unknown()
             elif method in ARR_NAMESPACE_PRESERVING and receiver_inner is not None:
                 result = receiver_inner
             elif isinstance(receiver_inner, Array):
