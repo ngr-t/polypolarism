@@ -14,8 +14,8 @@ class In(pa.DataFrameModel):
 class Out(pa.DataFrameModel):
     region: str
     # std(ddof=1) is null for singleton groups at runtime, so the column is
-    # honestly nullable. polypolarism infers std() as plain Float64 (a
-    # documented leniency), which still satisfies Nullable[Float64].
+    # honestly nullable — and polypolarism infers std() as Nullable[Float64]
+    # too (issue #60), making this declaration an exact match.
     sales_std: pl.Float64 = pa.Field(nullable=True)
     sales_med: pl.Float64
     units_prod: int

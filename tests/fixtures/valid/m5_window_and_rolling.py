@@ -4,7 +4,9 @@ The return annotation pins the precise output dtypes (probed, polars 1.41):
 ``cum_sum(Float64)`` -> Float64, ``mean().over()`` -> Float64, and
 ``rolling_mean`` -> Float64. ``sales_rolling_mean`` is declared nullable
 because rolling windows yield leading nulls at runtime (rows before
-``window_size`` is reached), which is the runtime-correct declaration.
+``window_size`` is reached) — polypolarism infers ``Float64?`` for rolling
+outputs (issue #57) and rejects a non-nullable declaration (see the twin
+``invalid/rolling_nullability_nonnull``).
 """
 
 import pandera.polars as pa
