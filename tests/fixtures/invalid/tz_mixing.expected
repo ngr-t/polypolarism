@@ -3,5 +3,6 @@ stack: FAIL
   error: Could not infer return type
 elapsed: FAIL
   error: [PLY009] arithmetic 'Datetime[UTC] - Datetime' is not supported — polars raises InvalidOperationError at runtime; cast an operand first
+  via: column 'span': passed via Unknown
 compare_zones: FAIL
   error: [PLY009] comparison 'Datetime[UTC] == Datetime[Asia/Tokyo]' is not supported — polars rejects comparing these dtypes at runtime; cast an operand first

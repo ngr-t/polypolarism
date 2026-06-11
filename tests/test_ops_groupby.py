@@ -178,6 +178,8 @@ class TestUnknownAggregation:
 class TestOpenFrameGroupBy:
     """Missing keys / agg columns on an open frame become Unknown, not errors."""
 
+    # upgrade trigger: open frames gain row-var bounds (provably-absent columns)
+    @pytest.mark.imprecision
     def test_missing_key_on_open_frame_becomes_unknown(self):
         input_frame = FrameType({"v": Int64()}, rest=RowVar("r"))
         agg_exprs = [AggExpr(column="v", function=AggFunction.SUM, alias="total")]
@@ -185,6 +187,8 @@ class TestOpenFrameGroupBy:
         assert result.columns["ym"].dtype == Unknown()
         assert result.columns["total"].dtype == Int64()
 
+    # upgrade trigger: open frames gain row-var bounds (provably-absent columns)
+    @pytest.mark.imprecision
     def test_missing_agg_column_on_open_frame_becomes_unknown(self):
         input_frame = FrameType({"k": Utf8()}, rest=RowVar("r"))
         agg_exprs = [AggExpr(column="v", function=AggFunction.SUM, alias="total")]

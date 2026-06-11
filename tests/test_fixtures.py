@@ -57,7 +57,26 @@ def render_report(results: list[CheckResult]) -> str:
         lines.append(f"{result.function_name}: {status}")
         lines.extend(f"  error: {error}" for error in result.errors)
         lines.extend(f"  warning: {warning}" for warning in result.warnings)
+        # Leniency notes make leniency-mediated passes reviewable: a fixture
+        # that passes only via Unknown / open-frame / coerce shows it here,
+        # so new dependence on leniency appears as a golden diff (ADR-0003).
+        lines.extend(f"  via: {note}" for note in result.leniency)
     return "\n".join(lines) + "\n"
+
+
+def test_render_report_includes_leniency_notes() -> None:
+    """Leniency-mediated passes must be visible in the golden text, so any
+    new dependence on leniency shows up as a reviewable golden diff."""
+    results = [
+        CheckResult(
+            function_name="lenient_fn",
+            passed=True,
+            leniency=["column 'a': passed via Unknown"],
+        ),
+        CheckResult(function_name="precise_fn", passed=True),
+    ]
+    report = render_report(results)
+    assert report == ("lenient_fn: OK\n  via: column 'a': passed via Unknown\nprecise_fn: OK\n")
 
 
 def _discover() -> list:

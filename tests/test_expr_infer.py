@@ -85,6 +85,8 @@ class TestInferCol:
         error_msg = str(exc_info.value)
         assert "a" in error_msg or "b" in error_msg
 
+    # upgrade trigger: open frames gain row-var bounds (provably-absent columns)
+    @pytest.mark.imprecision
     def test_col_missing_on_open_frame_returns_unknown(self) -> None:
         """An open frame may hold extra unknown columns — don't raise."""
         frame = FrameType(columns={"a": Int64()}, rest=RowVar("r"))
@@ -623,6 +625,8 @@ class TestInferShiftFill:
         assert infer_shift_fill(Date(), Int64(), fill_is_literal=False) == Int64()
         assert infer_shift_fill(Boolean(), Int64(), fill_is_literal=False) == Int64()
 
+    # upgrade trigger: no-supertype expression fills get probed (likely a PLY009 cell)
+    @pytest.mark.imprecision
     def test_expression_fill_without_supertype_keeps_receiver(self) -> None:
         assert infer_shift_fill(Int64(), List(Int64()), fill_is_literal=False) == Int64()
 
@@ -653,6 +657,8 @@ class TestInferShiftFill:
         assert infer_shift_fill(Nullable(Unknown()), Utf8(), fill_is_literal=False) == Unknown()
 
 
+# upgrade trigger: shift gains a tz-mismatch diagnostic (the runtime failure is probed)
+@pytest.mark.imprecision
 class TestShiftFillTzMismatch:
     """Issue #50: a tz-mismatched expression fill has no supertype; the
     probed runtime failure is out of scope for shift, so the receiver

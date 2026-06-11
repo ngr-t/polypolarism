@@ -473,6 +473,140 @@ class TestOpenFrameChecking:
         assert any(isinstance(e, TypeDifference) for e in result.errors)
 
 
+class TestLeniencyTracing:
+    """Leniency-mediated passes are recorded in ``CheckResult.leniency``.
+
+    A pass that relies on a leniency rule (Unknown compatibility, open-frame
+    missing-column skip, coerce-tolerated dtype difference) must be visible
+    so it can show up in the golden files instead of silently masking a bug
+    (the issue #47 failure mode). Leniency notes never affect ``passed``.
+    """
+
+    def _analysis(self, declared: FrameType, inferred: FrameType) -> FunctionAnalysis:
+        return FunctionAnalysis(
+            name="f",
+            lineno=1,
+            end_lineno=1,
+            input_types={},
+            declared_return_type=declared,
+            inferred_return_type=inferred,
+            errors=[],
+        )
+
+    def test_precise_pass_has_empty_leniency(self):
+        result = check_function(
+            self._analysis(
+                declared=FrameType({"a": Int64()}),
+                inferred=FrameType({"a": Int64()}),
+            )
+        )
+        assert result.passed is True
+        assert result.leniency == []
+
+    def test_nullable_widening_is_not_leniency(self):
+        """T <: Nullable[T] is a sound subtyping rule, not leniency."""
+        result = check_function(
+            self._analysis(
+                declared=FrameType({"a": Nullable(Int64())}),
+                inferred=FrameType({"a": Int64()}),
+            )
+        )
+        assert result.passed is True
+        assert result.leniency == []
+
+    def test_optional_declared_column_absent_is_not_leniency(self):
+        """An Optional[T] column may be absent by declaration — not leniency."""
+        from polypolarism.types import ColumnSpec
+
+        result = check_function(
+            self._analysis(
+                declared=FrameType({"a": ColumnSpec(dtype=Int64(), required=False)}),
+                inferred=FrameType({}),
+            )
+        )
+        assert result.passed is True
+        assert result.leniency == []
+
+    def test_inferred_unknown_records_leniency(self):
+        result = check_function(
+            self._analysis(
+                declared=FrameType({"a": Int64()}),
+                inferred=FrameType({"a": Unknown()}),
+            )
+        )
+        assert result.passed is True
+        assert result.leniency == ["column 'a': passed via Unknown"]
+
+    def test_declared_unknown_records_leniency(self):
+        result = check_function(
+            self._analysis(
+                declared=FrameType({"a": Unknown()}),
+                inferred=FrameType({"a": Utf8()}),
+            )
+        )
+        assert result.passed is True
+        assert result.leniency == ["column 'a': passed via Unknown"]
+
+    def test_container_unknown_recursion_records_leniency(self):
+        """List[Unknown] satisfying List[Int64] is an Unknown-mediated pass."""
+        result = check_function(
+            self._analysis(
+                declared=FrameType({"a": ListType(Int64())}),
+                inferred=FrameType({"a": ListType(Unknown())}),
+            )
+        )
+        assert result.passed is True
+        assert result.leniency == ["column 'a': passed via Unknown"]
+
+    def test_open_frame_missing_column_records_leniency(self):
+        result = check_function(
+            self._analysis(
+                declared=FrameType({"id": Int64(), "qty": Int64()}),
+                inferred=FrameType({"id": Int64()}, rest=RowVar("unnest")),
+            )
+        )
+        assert result.passed is True
+        assert result.leniency == ["column 'qty': not provably absent (open frame)"]
+
+    def test_coerce_tolerated_difference_records_leniency(self):
+        result = check_function(
+            self._analysis(
+                declared=FrameType({"n": Int64()}, coerce=True),
+                inferred=FrameType({"n": UInt32()}),
+            )
+        )
+        assert result.passed is True
+        assert result.leniency == ["column 'n': UInt32 -> Int64 via coerce"]
+
+    def test_multiple_leniency_notes_accumulate(self):
+        result = check_function(
+            self._analysis(
+                declared=FrameType({"a": Int64(), "b": Utf8(), "c": Float64()}, coerce=True),
+                inferred=FrameType(
+                    {"a": Unknown(), "c": Int64()},
+                    rest=RowVar("r"),
+                ),
+            )
+        )
+        assert result.passed is True
+        assert result.leniency == [
+            "column 'a': passed via Unknown",
+            "column 'b': not provably absent (open frame)",
+            "column 'c': Int64 -> Float64 via coerce",
+        ]
+
+    def test_leniency_does_not_affect_passed_on_failure(self):
+        """Leniency notes coexist with real errors; passed reflects errors only."""
+        result = check_function(
+            self._analysis(
+                declared=FrameType({"a": Int64(), "b": Utf8()}),
+                inferred=FrameType({"a": Unknown(), "b": Int64()}),
+            )
+        )
+        assert result.passed is False
+        assert result.leniency == ["column 'a': passed via Unknown"]
+
+
 class TestIsCoercibleDifference:
     """Unit tests for the coercion-compatibility helper."""
 

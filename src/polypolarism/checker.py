@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import NamedTuple
 
 from polypolarism.analyzer import FunctionAnalysis, analyze_source
 from polypolarism.types import NUMERIC_DTYPES, Array, DataType, Datetime, List, Nullable, Unknown
@@ -77,6 +78,13 @@ class CheckResult:
     # the user toward source changes that would let polypolarism check the
     # code precisely (e.g. adding ``return_dtype=`` to ``map_elements``).
     warnings: list[str] = field(default_factory=list)
+    # Leniency notes: per-column records of checks that passed only via a
+    # leniency rule (Unknown compatibility, open-frame missing-column skip,
+    # coerce-tolerated dtype difference). ``passed`` ignores them — they
+    # exist to make leniency-mediated passes *visible* (golden files render
+    # them), so a fixture that passes only because inference degraded to
+    # Unknown can't silently mask a false negative (issue #47).
+    leniency: list[str] = field(default_factory=list)
 
     def __repr__(self) -> str:
         status = "PASSED" if self.passed else "FAILED"
@@ -93,7 +101,22 @@ def _get_base_type(dtype: DataType) -> DataType:
     return dtype
 
 
-def _is_subtype(inferred: DataType, declared: DataType) -> bool:
+class Verdict(NamedTuple):
+    """Outcome of a compatibility check, carrying *why* a pass happened.
+
+    ``reason`` is ``None`` for sound passes (exact match, Nullable
+    widening) and a short human-readable note when the pass relied on a
+    leniency rule. Failures always carry ``reason=None``.
+    """
+
+    ok: bool
+    reason: str | None = None
+
+
+_VIA_UNKNOWN = "passed via Unknown"
+
+
+def _subtype_verdict(inferred: DataType, declared: DataType) -> Verdict:
     """Check if inferred type is a subtype of declared type.
 
     Rules:
@@ -106,20 +129,23 @@ def _is_subtype(inferred: DataType, declared: DataType) -> bool:
       ``List[Unknown]`` (e.g. an un-inferable ``list.eval`` body) satisfies
       a declared ``List[T]`` — but the column's own nullability is still
       enforced.
+
+    A pass that relied on the Unknown rule (at any nesting depth) carries
+    ``reason=_VIA_UNKNOWN`` so callers can surface the leniency.
     """
     # Unknown on either side (after Nullable unwrap) always passes.
     if isinstance(_get_base_type(inferred), Unknown) or isinstance(
         _get_base_type(declared), Unknown
     ):
-        return True
+        return Verdict(True, _VIA_UNKNOWN)
 
     # Exact match
     if inferred == declared:
-        return True
+        return Verdict(True)
 
     # Nullable inferred cannot fill a non-nullable declared slot.
     if isinstance(inferred, Nullable) and not isinstance(declared, Nullable):
-        return False
+        return Verdict(False)
 
     inferred_base = _get_base_type(inferred)
     declared_base = _get_base_type(declared)
@@ -129,15 +155,25 @@ def _is_subtype(inferred: DataType, declared: DataType) -> bool:
     # through to False — probed (issue #53): pandera rejects a List column
     # where ``pl.Array(...)`` is declared and vice versa.
     if isinstance(inferred_base, List) and isinstance(declared_base, List):
-        return _is_subtype(inferred_base.inner, declared_base.inner)
+        return _subtype_verdict(inferred_base.inner, declared_base.inner)
     if isinstance(inferred_base, Array) and isinstance(declared_base, Array):
-        return _is_subtype(inferred_base.inner, declared_base.inner)
+        return _subtype_verdict(inferred_base.inner, declared_base.inner)
 
     # Non-nullable is subtype of nullable with same base type
     if isinstance(declared, Nullable) and not isinstance(inferred, Nullable):
-        return inferred_base == declared_base
+        return Verdict(inferred_base == declared_base)
 
-    return False
+    return Verdict(False)
+
+
+def _is_subtype(inferred: DataType, declared: DataType) -> bool:
+    """Boolean wrapper around :func:`_subtype_verdict` (see its docstring).
+
+    Kept for call sites that only need the yes/no answer (property tests,
+    ops modules); :func:`check_function` uses the verdict directly to
+    record leniency notes.
+    """
+    return _subtype_verdict(inferred, declared).ok
 
 
 def _is_coercible_difference(inferred: DataType, declared: DataType) -> bool:
@@ -221,25 +257,34 @@ def check_function(analysis: FunctionAnalysis) -> CheckResult:
 
     # Required/optional + dtype check for declared columns. An open inferred
     # frame (``rest`` is not None) may hold extra unknown columns, so a
-    # declared column missing from it is not provably absent — no error.
+    # declared column missing from it is not provably absent — no error,
+    # but the skip is recorded as a leniency note.
+    leniency: list[str] = []
     for col_name, declared_spec in declared.columns.items():
         inferred_spec = inferred.columns.get(col_name)
         if inferred_spec is None:
-            if declared_spec.required and inferred.rest is None:
-                errors.append(MissingColumn(col_name, declared_spec.dtype))
+            if declared_spec.required:
+                if inferred.rest is None:
+                    errors.append(MissingColumn(col_name, declared_spec.dtype))
+                else:
+                    leniency.append(f"column '{col_name}': not provably absent (open frame)")
             continue
         # Inferred frame may have the column as optional (may be absent);
         # if declared expects it always-present, that's a mismatch.
         if declared_spec.required and not inferred_spec.required:
             errors.append(MissingColumn(col_name, declared_spec.dtype))
             continue
-        if not _is_subtype(inferred_spec.dtype, declared_spec.dtype):
+        verdict = _subtype_verdict(inferred_spec.dtype, declared_spec.dtype)
+        if verdict.ok:
+            if verdict.reason is not None:
+                leniency.append(f"column '{col_name}': {verdict.reason}")
+        elif declared.coerce and _is_coercible_difference(inferred_spec.dtype, declared_spec.dtype):
             # Pandera ``Config.coerce`` casts coercible dtypes at
             # validation time — those differences are not errors.
-            if declared.coerce and _is_coercible_difference(
-                inferred_spec.dtype, declared_spec.dtype
-            ):
-                continue
+            leniency.append(
+                f"column '{col_name}': {inferred_spec.dtype} -> {declared_spec.dtype} via coerce"
+            )
+        else:
             errors.append(TypeDifference(col_name, declared_spec.dtype, inferred_spec.dtype))
 
     # Extra columns (only flagged for strict declared schemas)
@@ -253,6 +298,7 @@ def check_function(analysis: FunctionAnalysis) -> CheckResult:
         passed=len(errors) == 0,
         errors=errors,
         warnings=list(analysis.warnings),
+        leniency=leniency,
     )
 
 

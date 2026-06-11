@@ -1,3 +1,4 @@
 agg_sum: OK
 agg_len: OK
+  via: column 'n': UInt32 -> Int64 via coerce
 agg_filter_sum: OK

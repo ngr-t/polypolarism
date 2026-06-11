@@ -1,2 +1,3 @@
 encode: FAIL
   error: [PLY012] `.bin` accessor requires a Binary column, but column 'a' is Int64 — polars raises InvalidOperationError at runtime
+  via: column 'hex': passed via Unknown

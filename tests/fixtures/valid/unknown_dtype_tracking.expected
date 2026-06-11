@@ -1,3 +1,4 @@
 when_then_otherwise_column: OK
 interpolate_with_cast: OK
 monthly_counts: OK
+  via: column 'n': UInt32 -> Int64 via coerce

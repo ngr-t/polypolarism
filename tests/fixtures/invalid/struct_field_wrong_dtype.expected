@@ -1,0 +1,4 @@
+kwarg_struct_unnest_wrong_dtype: FAIL
+  error: Column 'x' has type Int64, but declared type is Utf8
+struct_field_access_wrong_dtype: FAIL
+  error: Column 'x' has type Int64, but declared type is Utf8
