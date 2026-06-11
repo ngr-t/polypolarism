@@ -1,6 +1,8 @@
 # ADR-0001: Polars and Pandera Version Support Strategy
 
-- **Status**: Proposed
+- **Status**: Accepted; the "latest two minors" window (Decision 1 and
+  the polars floor rule in Decision 3) is superseded by ADR-0004, which
+  fixes the polars floor at 1.37 on corpus evidence.
 - **Date**: 2026-05-01
 - **Deciders**: @negotetsu
 

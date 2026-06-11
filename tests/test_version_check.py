@@ -619,7 +619,7 @@ dependencies = ["polars>=0.19.0"]
         assert "PLW010" not in captured.err
 
     def test_polars_1_0_now_warns(self, tmp_path: Path, capsys):
-        """Polars 1.0 is below the supported window (latest two minors) and
+        """Polars 1.0 is below the supported floor (1.37, ADR-0004) and
         should emit PLW010, even though it's a 1.x release."""
         from polypolarism.cli import main
 
@@ -641,8 +641,10 @@ dependencies = ["polars>=0.19.0"]
 #   - 1.25: Enum stabilized, below window.
 #   - 1.27: hist bin-closure shift, below window.
 #   - 1.32: selector-as-DSL change, below window.
-#   - 1.39: one minor below floor, below window.
-#   - 1.40: floor (==POLARS_LATEST_KNOWN.minor - 1), silent.
+#   - 1.36: one minor below the empirical floor (upsample / agg-over /
+#     Bool-String behavior changes — ADR-0004), warns.
+#   - 1.37: the fixed empirical floor (ADR-0004), silent.
+#   - 1.40: inside the window, silent.
 #   - 1.41: latest known, silent.
 #   - 1.42: hypothetical future minor, silent (we don't reject the
 #     unknown-future direction; only "too old" is unsupported).
@@ -655,7 +657,8 @@ dependencies = ["polars>=0.19.0"]
         ("1.25.0", True),
         ("1.27.0", True),
         ("1.32.0", True),
-        ("1.39.0", True),
+        ("1.36.0", True),
+        ("1.37.0", False),
         ("1.40.0", False),
         ("1.41.0", False),
         ("1.42.0", False),

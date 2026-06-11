@@ -72,23 +72,27 @@ def _leading_digits(s: str) -> int | None:
     return int(buf)
 
 
-# Supported ranges. Updated alongside ADR-0001.
+# Supported ranges. Updated alongside ADR-0001 and ADR-0004.
 #
-# Polars: the supported window is the latest two 1.x minor releases. When
-# polars ships a new minor, bump ``POLARS_LATEST_KNOWN`` and
-# ``POLARS_FLOOR`` follows automatically (latest minor minus one). Anything
-# below ``POLARS_FLOOR`` triggers a PLW010 warning.
+# Polars: the floor is a FIXED minor, set empirically (ADR-0004): a
+# 35-example corpus runs unchanged on 1.37–1.41, while 1.36 and below hit
+# polars behavior changes (upsample row counts, ``over`` inside ``agg``,
+# Bool/String schema differences) that no analyzer guard can paper over.
+# When polars ships a new minor, bump ``POLARS_LATEST_KNOWN``; only move
+# ``POLARS_FLOOR`` deliberately, with corpus evidence. Anything below the
+# floor triggers a PLW010 warning.
 POLARS_LATEST_KNOWN = Version(1, 41, 0)
-POLARS_FLOOR = Version(POLARS_LATEST_KNOWN.major, POLARS_LATEST_KNOWN.minor - 1, 0)
+POLARS_FLOOR = Version(1, 37, 0)
 POLARS_SUPPORT_NOTE = (
-    f"polypolarism supports polars >= {POLARS_FLOOR} (the latest two 1.x minor "
-    "releases — older minors are best-effort)"
+    f"polypolarism supports polars >= {POLARS_FLOOR} "
+    "(older minors are best-effort; polars behavior changes below this "
+    "floor make analysis claims unreliable)"
 )
 
 # Pandera: the AST-relevant surface is just class-name matching
 # (DataFrameModel / SchemaModel), which has been stable since 0.19. We keep
-# the floor at 0.19 rather than tracking a "latest two minors" window
-# because there is no per-minor variation for polypolarism to test against.
+# the floor at 0.19 because there is no per-minor variation for
+# polypolarism to test against.
 PANDERA_FLOOR = Version(0, 19, 0)
 PANDERA_SUPPORT_NOTE = (
     "polypolarism supports pandera >= 0.19.0 (both DataFrameModel and "

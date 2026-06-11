@@ -148,11 +148,14 @@ does not import `polars` or `pandera` at runtime. Even so, the dispatch
 tables encode assumptions about the libraries' surface, so the supported
 window is narrow and explicit:
 
-- **Polars**: latest two 1.x minor releases (currently `1.39` / `1.40`).
-  Pre-1.0 surface is **out of scope** — the analyzer doesn't recognize
-  the legacy method spellings (`groupby`, `cumsum`, `apply`, `Utf8`,
-  `outer`-join, …) and will silently misanalyse code written against
-  those.
+- **Polars**: `1.37+` (a fixed floor, set empirically — see ADR-0004: a
+  35-example corpus runs unchanged on `1.37`–`1.41`, while `1.36` and
+  below hit behavior changes such as `upsample` row counts, `over`
+  inside `agg`, and Bool/String schema differences that no analyzer
+  guard can absorb). Older minors are best-effort. Pre-1.0 surface is
+  **out of scope** — the analyzer doesn't recognize the legacy method
+  spellings (`groupby`, `cumsum`, `apply`, `Utf8`, `outer`-join, …) and
+  will silently misanalyse code written against those.
 - **Pandera**: `0.19+`. Both `DataFrameModel` (post-0.20) and the
   legacy `SchemaModel` are accepted indefinitely; the difference is
   one entry in a name set and costs nothing.
