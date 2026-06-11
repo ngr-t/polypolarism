@@ -140,14 +140,11 @@ Status legend: `[ ]` open / `[x]` done / `[-]` deliberately deferred.
      `add_columns` / `remove_columns` derivation (probed immutable).
      Statement-level loops (`for c in ...: cols[c] = ...`) are NOT
      folded — comprehension-only by design.
-  3. *Genuinely dynamic* (config/env/IO-driven class bodies,
-     `type(...)` calls): statically undecidable. Options: degrade to an
-     open frame (`rest` + Unknown — zero false positives, partial
-     checking survives downstream); a user-declared schema stub/registry
-     in `[tool.polypolarism]`; or a "schema provider" mode that imports
-     the user module at check time and reads `Model.to_schema()` —
-     crosses the current never-execute-user-code line (only the runtime
-     differential harness crosses it today), so it needs an ADR.
+  3. [-] *Genuinely dynamic* — deliberately NOT implemented per
+     **ADR-0008** (2026-06-12). The open-frame degrade option shipped
+     via issue #90 (unresolved schemas bind as open assumption frames +
+     PLW011); the execute-user-code "schema provider" stays out of
+     scope. Revival conditions in the ADR.
 - [ ] **C-12: Implicit schemas for unannotated frames** (user request
   2026-06-11). Two independent halves:
   1. [x] *Open-frame propagation from unannotated sources* — Done
@@ -161,14 +158,11 @@ Status legend: `[ ]` open / `[x]` done / `[-]` deliberately deferred.
      ("lacks" constraints for drop/rename), backward narrowing,
      `pl.DataFrame(non_literal)` as open frame, eager/lazy check for
      bare return annotations.
-  2. [ ] *Source-schema snapshots* (C-12b): parquet/IPC footers carry
-     exact schemas (`pl.read_parquet_schema` reads them without loading
-     data). A `polypolarism snapshot` command could write a committed
-     path -> schema snapshot file consumed at check time, keeping checks
-     hermetic (no IO during checking, CI-safe, staleness reviewed as a
-     diff). CSV has no embedded schema — inference only, lower
-     confidence tier. Needs an ADR: literal-path resolution root,
-     staleness policy, opt-in surface.
+  2. [-] *Source-schema snapshots* (C-12b) — deliberately NOT
+     implemented per **ADR-0008** (2026-06-12): polypolarism stays a
+     purely static verifier; open-frame assumption semantics (ADR-0006)
+     plus validate-narrowing cover the gap. Revival conditions recorded
+     in the ADR.
 
 ## D. Tooling / distribution
 

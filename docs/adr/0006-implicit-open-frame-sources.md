@@ -164,6 +164,7 @@ snapshots read from parquet/IPC footers).
 
 ## Future work
 
-- **C-12b**: `polypolarism snapshot` writing committed path→schema
-  snapshots from parquet/IPC metadata, turning source assumptions into
-  verified facts without check-time IO.
+- ~~**C-12b**: committed path→schema snapshots from parquet/IPC
+  metadata~~ — deliberately not implemented; see **ADR-0008** (the tool
+  stays purely static; open-frame assumptions + validate-narrowing
+  cover the gap, revival conditions recorded there).
