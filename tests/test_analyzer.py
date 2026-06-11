@@ -13695,3 +13695,92 @@ class TestOptionalColumnsAtStrictBoundaries:
         target = [r for r in results if r.function_name == "passthrough"]
         assert target[0].passed, target[0].errors
         assert any("sku" in note for note in target[0].leniency), target[0].leniency
+
+
+class TestObjectApiSchemaNarrowing:
+    """Backlog C-11: object-API schemas participate in the full pipeline —
+    ``schema.validate(df)`` narrowing, checked-island provenance, and
+    PLW011 surfacing — exactly like class schemas."""
+
+    def test_validate_narrowing_with_object_schema(self):
+        source = textwrap.dedent(
+            """
+            import polars as pl
+            import pandera.polars as pa
+
+            order_schema = pa.DataFrameSchema(
+                {"order_id": pa.Column(int), "amount": pa.Column(float)},
+                strict=True,
+            )
+
+            def load(df: pl.DataFrame) -> pl.DataFrame:
+                out = order_schema.validate(df)
+                return out.select(pl.col("amount") - 1)
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == [], results[0].errors
+
+    def test_strict_object_schema_makes_misses_provable(self):
+        source = textwrap.dedent(
+            """
+            import polars as pl
+            import pandera.polars as pa
+
+            order_schema = pa.DataFrameSchema({"order_id": pa.Column(int)}, strict=True)
+
+            def load(df: pl.DataFrame) -> pl.DataFrame:
+                out = order_schema.validate(df)
+                return out.select(pl.col("missing"))
+            """
+        )
+        results = analyze_source(source)
+        assert any("PLY001" in str(e) for e in results[0].errors), results[0].errors
+
+    def test_nonstrict_object_schema_is_checked_island(self):
+        source = textwrap.dedent(
+            """
+            import polars as pl
+            import pandera.polars as pa
+
+            order_schema = pa.DataFrameSchema({"order_id": pa.Column(int)})
+
+            def load(df: pl.DataFrame) -> pl.DataFrame:
+                out = order_schema.validate(df)
+                return out.select(pl.col("undeclared"))
+            """
+        )
+        results = analyze_source(source)
+        errors = [str(e) for e in results[0].errors]
+        assert any("PLY042" in e and "order_schema" in e for e in errors), errors
+
+    def test_pipe_validate_with_object_schema(self):
+        source = textwrap.dedent(
+            """
+            import polars as pl
+            import pandera.polars as pa
+
+            s = pa.DataFrameSchema({"a": pa.Column(int)}, strict=True)
+
+            def f(df: pl.DataFrame) -> pl.DataFrame:
+                return df.pipe(s.validate).select(pl.col("a") + 1)
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == [], results[0].errors
+
+    def test_dtype_violation_against_object_schema(self):
+        source = textwrap.dedent(
+            """
+            import polars as pl
+            import pandera.polars as pa
+
+            s = pa.DataFrameSchema({"a": pa.Column(int)}, strict=True)
+
+            def f(df: pl.DataFrame) -> pl.DataFrame:
+                out = s.validate(df)
+                return out.select(pl.col("a").str.to_uppercase())
+            """
+        )
+        results = analyze_source(source)
+        assert any("PLY012" in str(e) for e in results[0].errors), results[0].errors

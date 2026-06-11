@@ -756,3 +756,25 @@ class TestAliasedBaseRepeatImport:
         assert not target[0].passed
         assert any("id" in str(e) for e in target[0].errors), target[0].errors
         assert not any("PLW006" in str(w) for w in target[0].warnings), target[0].warnings
+
+
+class TestObjectApiCrossModule:
+    """Backlog C-11: object-API schemas merge through imports like class
+    schemas (they live in the same registry)."""
+
+    def test_imported_object_schema_resolves(self, tmp_path: Path):
+        _project_marker(tmp_path)
+        _write(
+            tmp_path / "schemas.py",
+            """
+            import pandera.polars as pa
+
+            order_schema = pa.DataFrameSchema({"order_id": pa.Column(int)}, strict=True)
+            """,
+        )
+        source = "from schemas import order_schema\n"
+        registry = collect_schemas_with_imports(ast.parse(source), tmp_path / "app.py")
+        schema = registry.get("order_schema")
+        assert schema is not None
+        assert set(schema.columns) == {"order_id"}
+        assert schema.strict is True

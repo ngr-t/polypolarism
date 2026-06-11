@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Pandera object-API schemas (backlog C-11, tiers 1-2): module-level
+  `NAME = pa.DataFrameSchema({"a": pa.Column(int)}, strict=..., coerce=...)`
+  assignments register like class schemas keyed by the variable name —
+  `schema.validate(df)` / `df.pipe(schema.validate)` narrowing, strict
+  closure, checked-island provenance for non-strict schemas, cross-file
+  import resolution and the PLW011 loud-degrade channel (string dtype
+  aliases like `pa.Column("int64")`, non-literal kwargs) all apply
+  uniformly. Construction folds statically: dict comprehensions over
+  literal/module-const string lists, `**` spreads of module-level column
+  dicts, direct `Name` column-dict arguments, and
+  `add_columns`/`remove_columns` derivation (probed: pandera's object
+  API is immutable).
+
 - Implicit open-frame sources (ADR-0006, backlog C-12a): a parameter
   annotated with bare `pl.DataFrame` / `pl.LazyFrame` now opts the
   function into checking with an empty *open* frame, and

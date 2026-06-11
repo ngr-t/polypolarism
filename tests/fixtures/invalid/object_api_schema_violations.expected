@@ -1,0 +1,4 @@
+missing_after_strict_validate: FAIL
+  error: [PLY001] Column 'missing' not found. Available columns: ['order_id']
+str_on_int_column: FAIL
+  error: [PLY012] `.str` accessor requires a String column, but column 'order_id' is Int64 — polars raises InvalidOperationError at runtime

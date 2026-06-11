@@ -109,13 +109,22 @@ Status legend: `[ ]` open / `[x]` done / `[-]` deliberately deferred.
   literal type; accepted leniency.
 - [ ] **C-11: Programmatic / dynamic schema generation** (user request
   2026-06-11). Three feasibility tiers, cheapest first:
-  1. *Statically-readable object API*: `pa.DataFrameSchema({"a":
-     pa.Column(int), ...})` with literal dicts parses exactly like the
-     class form — a second front-end onto `pandera_schema`, no new
-     theory.
-  2. *Constant-foldable construction*: fields built by comprehensions /
-     loops over literal lists. The B-5 int-constant propagation is the
-     precedent; needs a bounded partial evaluator, diminishing returns.
+  1. [x] *Statically-readable object API* — Done 2026-06-12:
+     module-level `NAME = pa.DataFrameSchema({"a": pa.Column(int,
+     nullable=..., required=...)}, strict=..., coerce=...)` registers
+     like a class schema keyed by the variable name; `schema.validate`
+     narrowing, checked-island provenance, cross-file imports and
+     PLW011 loud-degrade (string dtype aliases, non-literal kwargs)
+     apply uniformly. Module-level only; `update_columns` /
+     `rename_columns` and dotted `mod.schema.validate` not modeled.
+  2. [x] *Constant-foldable construction* — Done 2026-06-12: dict
+     comprehensions over literal/module-const string lists (key = bare
+     loop var, no conditions; a loop-var-referencing value registers
+     the known keys as Unknown + PLW011), `**` spreads of module-level
+     column dicts, direct `Name` column-dict arguments, and
+     `add_columns` / `remove_columns` derivation (probed immutable).
+     Statement-level loops (`for c in ...: cols[c] = ...`) are NOT
+     folded — comprehension-only by design.
   3. *Genuinely dynamic* (config/env/IO-driven class bodies,
      `type(...)` calls): statically undecidable. Options: degrade to an
      open frame (`rest` + Unknown — zero false positives, partial

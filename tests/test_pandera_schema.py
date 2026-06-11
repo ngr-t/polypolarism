@@ -8,10 +8,14 @@ import textwrap
 from polypolarism.pandera_schema import collect_schemas
 from polypolarism.types import (
     ColumnSpec,
+    Datetime,
+    Decimal,
+    Enum,
     Float64,
     Int64,
     List,
     Nullable,
+    Unknown,
     Utf8,
 )
 
@@ -566,3 +570,223 @@ class TestUnrecognizedAnnotationDegrade:
         assert schema is not None
         assert "v" in schema.definition_errors
         assert schema.definition_warnings == {}
+
+
+class TestObjectApiSchemas:
+    """Backlog C-11 tier 1: module-level ``pa.DataFrameSchema({...})``
+    object-API assignments register like class schemas, keyed by the
+    variable name."""
+
+    def test_basic_registration(self):
+        registry = _collect(
+            """
+            import pandera.polars as pa
+            import polars as pl
+
+            order_schema = pa.DataFrameSchema(
+                {
+                    "order_id": pa.Column(int),
+                    "amount": pa.Column(pl.Float64, nullable=True),
+                    "note": pa.Column(str, required=False),
+                }
+            )
+            """
+        )
+        schema = registry.get("order_schema")
+        assert schema is not None
+        assert schema.columns["order_id"] == ColumnSpec(Int64(), required=True)
+        assert schema.columns["amount"] == ColumnSpec(Nullable(Float64()), required=True)
+        assert schema.columns["note"] == ColumnSpec(Utf8(), required=False)
+        assert schema.strict is False and schema.coerce is False
+
+    def test_strict_and_coerce_kwargs(self):
+        registry = _collect(
+            """
+            import pandera.polars as pa
+
+            s = pa.DataFrameSchema({"a": pa.Column(int)}, strict=True, coerce=True)
+            """
+        )
+        schema = registry.get("s")
+        assert schema is not None
+        assert schema.strict is True and schema.coerce is True
+        # strict=True object schema binds closed (no checked-island mark).
+        assert schema.to_frame_type().nonstrict_schema is None
+
+    def test_nonstrict_object_schema_is_checked_island(self):
+        registry = _collect(
+            """
+            import pandera.polars as pa
+
+            s = pa.DataFrameSchema({"a": pa.Column(int)})
+            """
+        )
+        ft = registry.get("s").to_frame_type()
+        assert ft.nonstrict_schema == "s"
+
+    def test_parametrized_dtypes_match_class_form(self):
+        registry = _collect(
+            """
+            import pandera.polars as pa
+            import polars as pl
+
+            s = pa.DataFrameSchema(
+                {
+                    "t": pa.Column(pl.Datetime("ms", "UTC")),
+                    "d": pa.Column(pl.Decimal),
+                    "e": pa.Column(pl.Enum(["a", "b"])),
+                }
+            )
+            """
+        )
+        cols = registry.get("s").columns
+        assert cols["t"].dtype == Datetime(tz="UTC", unit="ms")
+        # Probed: pandera resolves the bare class through its engine
+        # default (28, 0) in Column dtype position too.
+        assert cols["d"].dtype == Decimal(28, 0)
+        assert cols["e"].dtype == Enum(categories=("a", "b"))
+
+    def test_string_dtype_degrades_loudly(self):
+        # Probed: pandera accepts "int64" string aliases; polypolarism
+        # does not model them — the column registers as Unknown with a
+        # definition warning (PLW011 channel), not silently dropped.
+        registry = _collect(
+            """
+            import pandera.polars as pa
+
+            s = pa.DataFrameSchema({"a": pa.Column("int64")})
+            """
+        )
+        schema = registry.get("s")
+        assert schema is not None
+        assert isinstance(schema.columns["a"].dtype, Unknown)
+        assert "a" in schema.definition_warnings
+
+    def test_non_literal_kwarg_degrades_loudly(self):
+        registry = _collect(
+            """
+            import pandera.polars as pa
+
+            s = pa.DataFrameSchema({"a": pa.Column(int, nullable=flag)})
+            """
+        )
+        schema = registry.get("s")
+        assert isinstance(schema.columns["a"].dtype, Unknown)
+        assert "a" in schema.definition_warnings
+
+    def test_rebinding_to_non_schema_unregisters(self):
+        registry = _collect(
+            """
+            import pandera.polars as pa
+
+            s = pa.DataFrameSchema({"a": pa.Column(int)})
+            s = 42
+            """
+        )
+        assert registry.get("s") is None
+
+
+class TestObjectApiConstruction:
+    """Backlog C-11 tier 2: constant-foldable construction — dict
+    comprehensions over literal/const string lists, ``**`` spreads of
+    module-level column dicts, and add_columns/remove_columns
+    derivation."""
+
+    def test_dict_comprehension_over_literal_list(self):
+        registry = _collect(
+            """
+            import pandera.polars as pa
+            import polars as pl
+
+            s = pa.DataFrameSchema({c: pa.Column(pl.Float64) for c in ["x", "y", "z"]})
+            """
+        )
+        cols = registry.get("s").columns
+        assert set(cols) == {"x", "y", "z"}
+        assert all(spec.dtype == Float64() for spec in cols.values())
+
+    def test_dict_comprehension_over_module_const(self):
+        registry = _collect(
+            """
+            import pandera.polars as pa
+            import polars as pl
+
+            METRICS = ["clicks", "views"]
+
+            s = pa.DataFrameSchema({c: pa.Column(int) for c in METRICS})
+            """
+        )
+        cols = registry.get("s").columns
+        assert set(cols) == {"clicks", "views"}
+
+    def test_comprehension_value_referencing_loopvar_degrades(self):
+        registry = _collect(
+            """
+            import pandera.polars as pa
+
+            s = pa.DataFrameSchema({c: pa.Column(int, alias=c) for c in ["x", "y"]})
+            """
+        )
+        schema = registry.get("s")
+        assert schema is not None
+        assert set(schema.columns) == {"x", "y"}
+        assert all(isinstance(spec.dtype, Unknown) for spec in schema.columns.values())
+        assert "x" in schema.definition_warnings
+
+    def test_spread_of_module_column_dict(self):
+        registry = _collect(
+            """
+            import pandera.polars as pa
+            import polars as pl
+
+            COMMON = {"id": pa.Column(int)}
+
+            s = pa.DataFrameSchema({**COMMON, "price": pa.Column(pl.Float64)})
+            """
+        )
+        cols = registry.get("s").columns
+        assert set(cols) == {"id", "price"}
+        assert cols["id"].dtype == Int64()
+
+    def test_direct_name_argument(self):
+        registry = _collect(
+            """
+            import pandera.polars as pa
+
+            COLS = {"id": pa.Column(int)}
+
+            s = pa.DataFrameSchema(COLS, strict=True)
+            """
+        )
+        schema = registry.get("s")
+        assert schema is not None
+        assert set(schema.columns) == {"id"}
+        assert schema.strict is True
+
+    def test_add_columns_derivation(self):
+        registry = _collect(
+            """
+            import pandera.polars as pa
+            import polars as pl
+
+            base = pa.DataFrameSchema({"a": pa.Column(int)}, strict=True, coerce=True)
+            wide = base.add_columns({"b": pa.Column(pl.Float64)})
+            """
+        )
+        base = registry.get("base")
+        wide = registry.get("wide")
+        assert set(base.columns) == {"a"}  # immutable derivation
+        assert set(wide.columns) == {"a", "b"}
+        assert wide.strict is True and wide.coerce is True
+
+    def test_remove_columns_derivation(self):
+        registry = _collect(
+            """
+            import pandera.polars as pa
+
+            base = pa.DataFrameSchema({"a": pa.Column(int), "b": pa.Column(str)})
+            narrow = base.remove_columns(["a"])
+            """
+        )
+        narrow = registry.get("narrow")
+        assert set(narrow.columns) == {"b"}

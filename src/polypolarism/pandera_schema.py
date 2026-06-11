@@ -13,13 +13,17 @@ import contextlib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from polypolarism.compat.pandera_api import (
+    OBJECT_COLUMN_CALLABLE_NAME,
+    OBJECT_SCHEMA_CALLABLE_NAME,
+)
 from polypolarism.compat.pandera_api import SCHEMA_BASE_NAMES as _BASE_NAMES
 from polypolarism.pandera_dtype import (
     annotated_arity_error,
     parse_field_annotation,
     unrecognized_field_spec,
 )
-from polypolarism.types import ColumnSpec, FrameType
+from polypolarism.types import ColumnSpec, FrameType, Nullable, Unknown
 
 
 @dataclass
@@ -146,7 +150,296 @@ def collect_schemas(tree: ast.Module) -> SchemaRegistry:
     for name in sorted_names:
         registry.schemas[name] = _parse_schema(candidates[name], registry)
 
+    _collect_object_schemas(tree, registry)
+
     return registry
+
+
+def _name_tail_matches(node: ast.expr, name: str) -> bool:
+    """``Name(name)`` or any qualified ``X.name`` (``pa.DataFrameSchema``)."""
+    if isinstance(node, ast.Name) and node.id == name:
+        return True
+    return isinstance(node, ast.Attribute) and node.attr == name
+
+
+def _parse_object_column(node: ast.expr) -> tuple[ColumnSpec, str | None]:
+    """Parse one ``pa.Column(dtype, nullable=..., required=...)`` entry.
+
+    Returns ``(spec, warning_detail)``. The dtype expression reuses the
+    class-annotation parser (the AST shapes are identical — probed:
+    parametrized ``pl.Datetime(...)`` / ``pl.Enum([...])`` and the bare
+    ``pl.Decimal`` -> (28, 0) engine default all resolve like class
+    fields). Anything statically unreadable — a non-``Column`` value, a
+    string dtype alias (``pa.Column("int64")``, accepted by pandera but
+    not modeled), a non-literal ``nullable``/``required`` — degrades to
+    an ``Unknown`` column with a warning detail (the PLW011 channel,
+    mirroring issue #77's loud-degrade rule).
+    """
+    if not (
+        isinstance(node, ast.Call) and _name_tail_matches(node.func, OBJECT_COLUMN_CALLABLE_NAME)
+    ):
+        return ColumnSpec(dtype=Unknown()), "value is not a pa.Column(...) call"
+    dtype_node: ast.expr | None = node.args[0] if node.args else None
+    for kw in node.keywords:
+        if kw.arg == "dtype":
+            dtype_node = kw.value
+    if dtype_node is None:
+        return ColumnSpec(dtype=Unknown()), "pa.Column(...) has no dtype argument"
+
+    nullable = False
+    required = True
+    for kw in node.keywords:
+        if kw.arg in ("nullable", "required"):
+            if not (isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, bool)):
+                return ColumnSpec(dtype=Unknown()), (
+                    f"pa.Column(..., {kw.arg}=...) is not a literal bool — statically unreadable"
+                )
+            if kw.arg == "nullable":
+                nullable = kw.value.value
+            else:
+                required = kw.value.value
+
+    spec = parse_field_annotation(dtype_node)
+    if spec is None:
+        return ColumnSpec(dtype=Unknown(), required=required), (
+            "dtype expression is not statically readable (string aliases "
+            'like pa.Column("int64") are not modeled)'
+        )
+    dtype = spec.dtype
+    if nullable and not isinstance(dtype, Nullable):
+        dtype = Nullable(dtype)
+    return ColumnSpec(dtype=dtype, required=required), None
+
+
+def _parse_object_columns(
+    node: ast.expr,
+    str_list_consts: dict[str, list[str]],
+    column_dicts: dict[str, tuple[dict[str, ColumnSpec], dict[str, str]]],
+) -> tuple[dict[str, ColumnSpec], dict[str, str]] | None:
+    """Parse a columns expression of the object API (backlog C-11 tier 2).
+
+    Accepted shapes:
+    - a dict literal ``{"a": pa.Column(...), ...}`` — ``**`` spreads of a
+      nested dict literal or of a module-level column-dict ``Name`` recurse;
+    - a dict comprehension ``{c: pa.Column(...) for c in <list/tuple of
+      str literals | module-level str-list const>}`` (single generator, no
+      conditions, key is the bare loop variable; a value referencing the
+      loop variable is not constant-foldable — the keys still register,
+      as Unknown columns with warnings);
+    - a bare ``Name`` bound to a previously recorded column dict.
+
+    Returns ``(columns, per-field warning details)`` or ``None`` when the
+    shape is not statically readable at all.
+    """
+    if isinstance(node, ast.Name):
+        recorded = column_dicts.get(node.id)
+        if recorded is None:
+            return None
+        columns, warnings = recorded
+        return dict(columns), dict(warnings)
+
+    if isinstance(node, ast.Dict):
+        columns: dict[str, ColumnSpec] = {}
+        warnings: dict[str, str] = {}
+        for key_node, value_node in zip(node.keys, node.values, strict=True):
+            if key_node is None:
+                # ``**spread`` — a nested literal or a recorded Name.
+                spread = _parse_object_columns(value_node, str_list_consts, column_dicts)
+                if spread is None:
+                    return None
+                columns.update(spread[0])
+                warnings.update(spread[1])
+                continue
+            if not (isinstance(key_node, ast.Constant) and isinstance(key_node.value, str)):
+                return None
+            spec, detail = _parse_object_column(value_node)
+            columns[key_node.value] = spec
+            if detail is not None:
+                warnings[key_node.value] = detail
+            else:
+                warnings.pop(key_node.value, None)
+        return columns, warnings
+
+    if isinstance(node, ast.DictComp):
+        if len(node.generators) != 1:
+            return None
+        gen = node.generators[0]
+        if gen.ifs or gen.is_async or not isinstance(gen.target, ast.Name):
+            return None
+        loop_var = gen.target.id
+        if not (isinstance(node.key, ast.Name) and node.key.id == loop_var):
+            return None
+        keys: list[str] | None = None
+        if isinstance(gen.iter, (ast.List, ast.Tuple)):
+            keys = []
+            for elt in gen.iter.elts:
+                if not (isinstance(elt, ast.Constant) and isinstance(elt.value, str)):
+                    return None
+                keys.append(elt.value)
+        elif isinstance(gen.iter, ast.Name):
+            keys = str_list_consts.get(gen.iter.id)
+        if keys is None:
+            return None
+        # A value referencing the loop variable is not constant per key —
+        # register the (known) keys as Unknown columns, loudly.
+        refs_loop_var = any(
+            isinstance(sub, ast.Name) and sub.id == loop_var for sub in ast.walk(node.value)
+        )
+        if refs_loop_var:
+            detail = (
+                "dict-comprehension value references the loop variable — "
+                "not constant-foldable; the column registers as Unknown"
+            )
+            return (
+                {k: ColumnSpec(dtype=Unknown()) for k in keys},
+                {k: detail for k in keys},
+            )
+        spec, detail = _parse_object_column(node.value)
+        columns = {k: spec for k in keys}
+        warnings = {k: detail for k in keys} if detail is not None else {}
+        return columns, warnings
+
+    return None
+
+
+def _collect_object_schemas(tree: ast.Module, registry: SchemaRegistry) -> None:
+    """Register module-level ``pa.DataFrameSchema`` object-API schemas
+    (backlog C-11, tiers 1–2).
+
+    Processes top-level assignments in source order:
+
+    - ``NAME = pa.DataFrameSchema(<columns>, strict=..., coerce=...)``
+      registers like a class schema, keyed by the variable name — the
+      whole downstream machinery (``validate`` narrowing, checked-island
+      ``nonstrict_schema`` provenance, cross-file import merging, PLW011
+      definition warnings) applies uniformly.
+    - ``NAME = other.add_columns({...})`` / ``other.remove_columns([...])``
+      derive a NEW schema from a registered one (probed: pandera's object
+      API is immutable). ``update_columns`` / ``rename_columns`` are not
+      modeled.
+    - ``NAME = ["a", "b"]`` string-list constants and
+      ``NAME = {"a": pa.Column(...)}`` column dicts are tracked so tier-2
+      construction (dict comprehensions, ``**`` spreads, direct ``Name``
+      arguments) folds against them.
+
+    Function-local schemas are out of scope (the registry is
+    module-level). Rebinding a schema name to something unreadable drops
+    the registration — last binding wins, mirroring runtime name binding.
+    """
+    str_list_consts: dict[str, list[str]] = {}
+    column_dicts: dict[str, tuple[dict[str, ColumnSpec], dict[str, str]]] = {}
+
+    for node in tree.body:
+        target: ast.expr | None = None
+        value: ast.expr | None = None
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+            value = node.value
+        elif isinstance(node, ast.AnnAssign):
+            target = node.target
+            value = node.value
+        if not isinstance(target, ast.Name) or value is None:
+            continue
+        name = target.id
+
+        # Track tier-2 building blocks.
+        if isinstance(value, (ast.List, ast.Tuple)) and all(
+            isinstance(e, ast.Constant) and isinstance(e.value, str) for e in value.elts
+        ):
+            str_list_consts[name] = [e.value for e in value.elts]  # type: ignore[union-attr]
+            continue
+        if isinstance(value, (ast.Dict, ast.DictComp)):
+            cols = _parse_object_columns(value, str_list_consts, column_dicts)
+            if cols is not None:
+                column_dicts[name] = cols
+            else:
+                column_dicts.pop(name, None)
+            continue
+
+        schema = _parse_object_schema_value(name, value, registry, str_list_consts, column_dicts)
+        if schema is not None:
+            registry.schemas[name] = schema
+        elif name in registry.schemas and registry.get(name) is not None:
+            # The name was a schema and is rebound to something unreadable
+            # — last binding wins (runtime name binding).
+            existing = registry.schemas[name]
+            if not existing.bases and existing.name == name:
+                registry.schemas.pop(name, None)
+
+
+def _parse_object_schema_value(
+    name: str,
+    value: ast.expr,
+    registry: SchemaRegistry,
+    str_list_consts: dict[str, list[str]],
+    column_dicts: dict[str, tuple[dict[str, ColumnSpec], dict[str, str]]],
+) -> Schema | None:
+    """Parse one RHS as an object-API schema; ``None`` if it isn't one."""
+    if not isinstance(value, ast.Call):
+        return None
+
+    # ``pa.DataFrameSchema(<columns>, strict=..., coerce=...)``
+    if _name_tail_matches(value.func, OBJECT_SCHEMA_CALLABLE_NAME):
+        if not value.args:
+            return None
+        parsed = _parse_object_columns(value.args[0], str_list_consts, column_dicts)
+        if parsed is None:
+            return None
+        columns, warnings = parsed
+        schema = Schema(name=name, columns=columns, definition_warnings=warnings)
+        for kw in value.keywords:
+            if kw.arg in ("strict", "coerce"):
+                if isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, bool):
+                    setattr(schema, kw.arg, kw.value.value)
+        return schema
+
+    # ``base.add_columns({...})`` / ``base.remove_columns([...])``
+    if (
+        isinstance(value.func, ast.Attribute)
+        and isinstance(value.func.value, ast.Name)
+        and value.func.attr in ("add_columns", "remove_columns")
+    ):
+        base = registry.get(value.func.value.id)
+        if base is None or not value.args:
+            return None
+        if value.func.attr == "add_columns":
+            parsed = _parse_object_columns(value.args[0], str_list_consts, column_dicts)
+            if parsed is None:
+                return None
+            added, added_warnings = parsed
+            columns = {**base.columns, **added}
+            warnings = {**base.definition_warnings, **added_warnings}
+            for col in added:
+                if col not in added_warnings:
+                    warnings.pop(col, None)
+            return Schema(
+                name=name,
+                columns=columns,
+                strict=base.strict,
+                coerce=base.coerce,
+                definition_errors=dict(base.definition_errors),
+                definition_warnings=warnings,
+            )
+        removed_node = value.args[0]
+        if not isinstance(removed_node, (ast.List, ast.Tuple)):
+            return None
+        removed: set[str] = set()
+        for elt in removed_node.elts:
+            if not (isinstance(elt, ast.Constant) and isinstance(elt.value, str)):
+                return None
+            removed.add(elt.value)
+        return Schema(
+            name=name,
+            columns={k: v for k, v in base.columns.items() if k not in removed},
+            strict=base.strict,
+            coerce=base.coerce,
+            definition_errors={k: v for k, v in base.definition_errors.items() if k not in removed},
+            definition_warnings={
+                k: v for k, v in base.definition_warnings.items() if k not in removed
+            },
+        )
+
+    return None
 
 
 def _looks_like_schema(node: ast.ClassDef, known_schemas: set[str]) -> bool:

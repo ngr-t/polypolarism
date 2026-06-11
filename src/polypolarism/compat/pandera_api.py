@@ -45,3 +45,13 @@ FRAME_ANNOTATION_HEADS: frozenset[str] = frozenset({"DataFrame", "LazyFrame"})
 # (when imported as ``from pandera import Field``) or as
 # ``pa.Field`` / ``pandera.Field``.
 FIELD_CALLABLE_NAME: str = "Field"
+
+# Pandera's object API (backlog C-11): ``pa.DataFrameSchema({...})`` with
+# ``pa.Column(dtype, nullable=..., required=...)`` entries. Matched on the
+# trailing attribute name like the class-based names above. Probed
+# (pandera 0.31.1): Column kwargs map 1:1 onto polypolarism's ColumnSpec
+# (nullable -> Nullable wrap, required=False -> may-be-absent), schema
+# strict/coerce default to False, and ``add_columns`` / ``remove_columns``
+# derive NEW schemas without mutating the receiver.
+OBJECT_SCHEMA_CALLABLE_NAME: str = "DataFrameSchema"
+OBJECT_COLUMN_CALLABLE_NAME: str = "Column"
