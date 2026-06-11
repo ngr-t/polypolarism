@@ -1,0 +1,4 @@
+dtype_conflict: FAIL
+  error: validate: argument column 'a' has type Int64 but schema 'StrictStr' declares Utf8 — SchemaError on every call
+provably_missing: FAIL
+  error: validate: argument is provably missing column 'b' (Int64) required by schema 'NeedsB' — SchemaError on every call

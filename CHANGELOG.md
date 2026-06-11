@@ -146,6 +146,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Validate-result bindings follow pandera's three strict modes (issue
+  #88, class and object schemas alike): a `strict=False` validate result
+  binds as an OPEN ISLAND — the input's extras provably flow through, so
+  frame-level subtyping (e.g. a declared return needing those extras) is
+  lenient, while undeclared lookups keep the PLY042 interface lint —
+  and `strict="filter"` is now modeled (extras are REMOVED: the result
+  is closed and island-free, so a filtered-away column lookup is the
+  PLY001 proof it deserves instead of a factually wrong PLY042 message).
+  Parameter bindings keep the issue #83 checked-island design.
+- `Schema.validate(arg)` checks its INPUT for provable incompatibilities
+  (issue #89): a required column missing from a genuinely exact argument
+  frame, a pinned dtype the schema's coerce cannot repair, and a
+  required pinned extra against `strict=True` all raise SchemaError on
+  every call and now error statically. Island/open arguments stay
+  lenient — upgrading a weaker frame IS the validate-narrowing use case.
+  The check exposed a real bug in an existing test fixture (an agg
+  output validated against a schema it provably never satisfied).
+- Unsupported object-schema derivations no longer silently unregister
+  the schema (issue #90): non-literal `remove_columns`,
+  `update_columns` / `rename_columns`, and unreadable `DataFrameSchema`
+  arguments register as UNRESOLVED — `validate` still narrows (to a
+  fully open assumption frame) and PLW011 surfaces the degrade.
+
 - Temporal receivers are no longer rejected by the reduction matrix
   (issue #85): `mean`/`median`/`quantile` on `Datetime`/`Duration`/`Time`
   now preserve the receiver dtype exactly — the time unit AND tz flow

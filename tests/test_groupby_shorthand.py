@@ -104,11 +104,16 @@ class TestTopLevelAggShorthand:
         )
 
     def test_pl_min_with_alias(self):
+        # The aggregated frame must actually carry Out's ``sales`` column:
+        # the original body validated {model_code, sales_min} against
+        # Out{sales} — a guaranteed runtime SchemaError that the issue #89
+        # validate-input check now correctly flags. The alias resolution
+        # under test is unchanged.
         assert _all_pass(
             """
             def f(df: DataFrame[Sales]) -> DataFrame[Out]:
                 df_g = df.group_by("model_code").agg(pl.min("sales").alias("sales_min"))
-                return cast(DataFrame[Out], Out.validate(df_g.with_columns(pl.col("sales_min"))))
+                return cast(DataFrame[Out], Out.validate(df_g.with_columns(sales=pl.col("sales_min"))))
             """
         )
 

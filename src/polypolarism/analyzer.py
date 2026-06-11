@@ -4943,6 +4943,64 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 )
             )
 
+    def _check_validate_argument(
+        self, schema_name: str, declared: FrameType, arg_type: FrameType | None
+    ) -> None:
+        """Provable input incompatibilities of ``Schema.validate(arg)`` (issue #89).
+
+        Only proofs fire: a required column provably missing from the
+        argument (closed frame / negative knowledge), a pinned dtype that
+        cannot satisfy the declared one and is not coerce-repairable, and
+        a REQUIRED pinned extra against ``strict=True`` (``"filter"``
+        removes extras instead, and optional / unknown-open extras are
+        value-dependent — issues #82/#84/#88). Mirrors the function-call
+        argument checks: ``check_types`` and an explicit ``validate`` run
+        the same validation.
+        """
+        if arg_type is None:
+            return
+        from polypolarism.checker import _is_coercible_difference
+
+        for col_name, declared_spec in declared.columns.items():
+            arg_spec = arg_type.columns.get(col_name)
+            if arg_spec is None:
+                # Provably missing requires a genuinely EXACT frame: a
+                # checked-island frame (non-strict provenance) admits
+                # runtime extras, so absence there is value-dependent —
+                # and upgrading such a frame is exactly what
+                # validate-narrowing is FOR (the runtime check is the
+                # user's justification).
+                if (
+                    declared_spec.required
+                    and arg_type.lacks(col_name)
+                    and arg_type.nonstrict_schema is None
+                ):
+                    self.errors.append(
+                        f"validate: argument is provably missing column "
+                        f"'{col_name}' ({declared_spec.dtype}) required by schema "
+                        f"'{schema_name}' — SchemaError on every call"
+                    )
+                continue
+            if not arg_spec.required:
+                continue  # presence is value-dependent
+            if _is_column_subtype(arg_spec.dtype, declared_spec.dtype):
+                continue
+            if declared.coerce and _is_coercible_difference(arg_spec.dtype, declared_spec.dtype):
+                continue
+            self.errors.append(
+                f"validate: argument column '{col_name}' has type {arg_spec.dtype} "
+                f"but schema '{schema_name}' declares {declared_spec.dtype} — "
+                f"SchemaError on every call"
+            )
+        if declared.strict:
+            for col_name, arg_spec in arg_type.columns.items():
+                if col_name not in declared.columns and arg_spec.required:
+                    self.errors.append(
+                        f"validate: argument has extra column '{col_name}' "
+                        f"({arg_spec.dtype}) but schema '{schema_name}' is strict — "
+                        f"SchemaError on every call"
+                    )
+
     def _infer_validate_call(self, node: ast.Call) -> FrameType | None:
         """Resolve ``Schema.validate(df_or_lf)`` to the schema's FrameType.
 
@@ -4954,7 +5012,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         schema_node = node.func.value
         if not isinstance(schema_node, ast.Name):
             return None
-        ft = self.schema_registry.to_frame_type(schema_node.id)
+        # Validate RESULTS of non-strict schemas bind open (issue #88) —
+        # the input's extras provably flow through.
+        ft = self.schema_registry.validate_result_frame(schema_node.id)
         if ft is not None:
             self._note_schema_use(schema_node.id)
         if ft is None or not node.args:
@@ -4971,6 +5031,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         self.warnings[warnings_before_arg:] = [
             w for w in self.warnings[warnings_before_arg:] if not w.startswith(f"[{PLW007}]")
         ]
+        declared = self.schema_registry.to_frame_type(schema_node.id)
+        if declared is not None:
+            self._check_validate_argument(schema_node.id, declared, arg_type)
         if arg_type is not None:
             ft.is_lazy = arg_type.is_lazy
         return ft
@@ -4998,9 +5061,15 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         # 1) Schema.validate — preserves laziness of the piped-in receiver
         if isinstance(callable_arg, ast.Attribute) and callable_arg.attr == "validate":
             if isinstance(callable_arg.value, ast.Name):
-                ft = self.schema_registry.to_frame_type(callable_arg.value.id)
+                # Non-strict validate results bind open (issue #88).
+                ft = self.schema_registry.validate_result_frame(callable_arg.value.id)
                 if ft is not None:
                     self._note_schema_use(callable_arg.value.id)
+                    declared = self.schema_registry.to_frame_type(callable_arg.value.id)
+                    if declared is not None:
+                        self._check_validate_argument(
+                            callable_arg.value.id, declared, receiver_type
+                        )
                 if ft is not None and receiver_type is not None:
                     ft.is_lazy = receiver_type.is_lazy
                 return ft
@@ -5541,6 +5610,12 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     )
                 )
                 return None
+            if input_frame.nonstrict_schema is not None:
+                # OPEN ISLAND (issues #83/#88): undeclared lookups stay
+                # flagged even though the rest keeps subtyping lenient.
+                code, msg = _missing_column_diag(input_frame, name)
+                self.errors.append(tag(code, msg))
+                return None
             result_columns[output_name or name] = Unknown()
             return output_name or name
         code, msg = _missing_column_diag(input_frame, name)
@@ -5602,8 +5677,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     spec = input_frame.columns.get(c)
                     if spec is None:
                         # On an open frame the column may exist among the
-                        # unknown extras — select it as Unknown.
-                        if input_frame.rest is not None:
+                        # unknown extras — select it as Unknown. An OPEN
+                        # ISLAND (nonstrict provenance) keeps the lint.
+                        if input_frame.rest is not None and input_frame.nonstrict_schema is None:
                             result_columns[c] = Unknown()
                             self._track_output_name(c, seen_outputs, "select")
                             continue

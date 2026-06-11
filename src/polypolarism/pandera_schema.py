@@ -23,7 +23,7 @@ from polypolarism.pandera_dtype import (
     parse_field_annotation,
     unrecognized_field_spec,
 )
-from polypolarism.types import ColumnSpec, FrameType, Nullable, Unknown
+from polypolarism.types import ColumnSpec, FrameType, Nullable, RowVar, Unknown
 
 
 @dataclass
@@ -33,6 +33,13 @@ class Schema:
     name: str
     columns: dict[str, ColumnSpec] = field(default_factory=dict)
     strict: bool = False
+    # ``strict="filter"`` (issue #88): validate REMOVES extra input
+    # columns. Input-acceptance-wise it behaves like strict=False (wider
+    # frames pass), output-shape-wise like strict=True (the result has
+    # exactly the declared columns) — so ``strict`` stays False and the
+    # output binds closed without island provenance (removed-column
+    # lookups are PLY001 proofs).
+    filters_extras: bool = False
     coerce: bool = False
     bases: list[str] = field(default_factory=list)
     # Field annotations that provably crash pandera at runtime (issue #69):
@@ -52,20 +59,60 @@ class Schema:
     # surfaces these as PLW011 on every function that references the
     # schema. Inheritance/repair semantics mirror ``definition_errors``.
     definition_warnings: dict[str, str] = field(default_factory=dict)
+    # Issue #90: the schema's columns could not be derived statically at
+    # all (non-literal remove_columns, update_columns/rename_columns,
+    # unreadable DataFrameSchema arguments). The schema still EXISTS and
+    # validate runs at runtime, so it binds as a fully OPEN assumption
+    # frame (no island lint — nothing is declared to lint against) and
+    # PLW011 surfaces the degrade via ``definition_warnings``.
+    unresolved: bool = False
 
     def to_frame_type(self) -> FrameType:
-        # Checked-island semantics (issue #83): a strict=False schema
-        # binds CLOSED — the declaration is the function's interface and
-        # undeclared references are flagged — but carries its name as
-        # ``nonstrict_schema`` provenance so the diagnostic says
-        # "interface violation" (PLY042) instead of claiming a provable
-        # runtime failure (PLY001): the schema admits extras at runtime.
+        # Checked-island semantics (issue #83, user-approved): a
+        # strict=False schema binds CLOSED with ``nonstrict_schema``
+        # provenance — the declaration is the contract; undeclared
+        # lookups flag PLY042 with honest wording. strict=True and
+        # strict="filter" (issue #88) bind closed and island-free: their
+        # outputs hold exactly the declared columns, so missing-column
+        # lookups are PLY001 proofs. VALIDATE-RESULT bindings additionally
+        # open the non-strict frame (see ``validate_result_frame``) —
+        # runtime extras provably flow through a non-strict validate, so
+        # frame-level subtyping there is value-dependent, not provable.
+        if self.unresolved:
+            # Issue #90: columns unknowable — a fully open assumption
+            # frame (validate still narrows; PLW011 carries the degrade).
+            return FrameType({}, rest=RowVar(self.name), coerce=self.coerce)
+        if self.strict or self.filters_extras:
+            return FrameType(
+                columns=dict(self.columns),
+                strict=self.strict,
+                coerce=self.coerce,
+            )
         return FrameType(
             columns=dict(self.columns),
             strict=self.strict,
             coerce=self.coerce,
-            nonstrict_schema=None if self.strict else self.name,
+            nonstrict_schema=self.name,
         )
+
+    def validate_result_frame(self) -> FrameType:
+        """The FrameType a ``schema.validate(df)`` RESULT binds (issue #88).
+
+        A non-strict validate passes the input's extra columns through —
+        the result provably carries them — so the binding is an OPEN
+        ISLAND: ``rest`` keeps frame-level subtyping lenient
+        (missing-column claims against the result are value-dependent),
+        while the ``nonstrict_schema`` provenance keeps undeclared
+        lookups flagged as the PLY042 interface lint. strict=True and
+        strict="filter" results are exactly the declared columns —
+        closed, island-free (filter's removed-column lookups are PLY001
+        proofs).
+        """
+        ft = self.to_frame_type()
+        if self.unresolved or self.strict or self.filters_extras:
+            return ft
+        ft.rest = RowVar(self.name)
+        return ft
 
 
 @dataclass
@@ -82,6 +129,14 @@ class SchemaRegistry:
         if schema is None:
             return None
         return schema.to_frame_type()
+
+    def validate_result_frame(self, name: str) -> FrameType | None:
+        """Binding for a ``schema.validate(df)`` RESULT (issue #88) —
+        non-strict schemas open (extras provably flow through)."""
+        schema = self.schemas.get(name)
+        if schema is None:
+            return None
+        return schema.validate_result_frame()
 
     def __contains__(self, name: str) -> bool:
         return name in self.schemas
@@ -302,6 +357,49 @@ def _parse_object_columns(
     return None
 
 
+
+
+_OBJECT_SCHEMA_DERIVATIONS: frozenset[str] = frozenset(
+    {"add_columns", "remove_columns", "update_columns", "rename_columns", "set_index", "reset_index"}
+)
+
+
+def _unresolved_object_schema(
+    name: str, value: ast.expr, registry: SchemaRegistry
+) -> Schema | None:
+    """Recognize a schema-SHAPED RHS that could not be folded (issue #90).
+
+    Two shapes register as ``unresolved`` (everything else returns
+    ``None`` — not schema-related at all):
+
+    - ``pa.DataFrameSchema(<unreadable columns>)``;
+    - ``<registered schema>.<derivation>(...)`` for any pandera object-API
+      derivation method, with arguments (or a method like
+      ``update_columns`` / ``rename_columns``) we do not model.
+    """
+    if not isinstance(value, ast.Call):
+        return None
+    detail: str | None = None
+    if _name_tail_matches(value.func, OBJECT_SCHEMA_CALLABLE_NAME):
+        detail = "DataFrameSchema columns argument is not statically readable"
+    elif (
+        isinstance(value.func, ast.Attribute)
+        and isinstance(value.func.value, ast.Name)
+        and value.func.attr in _OBJECT_SCHEMA_DERIVATIONS
+        and registry.get(value.func.value.id) is not None
+    ):
+        detail = (
+            f"derivation '.{value.func.attr}(...)' is not statically foldable "
+            f"(only literal add_columns/remove_columns are modeled)"
+        )
+    if detail is None:
+        return None
+    return Schema(
+        name=name,
+        unresolved=True,
+        definition_warnings={"<derivation>": detail},
+    )
+
 def _collect_object_schemas(tree: ast.Module, registry: SchemaRegistry) -> None:
     """Register module-level ``pa.DataFrameSchema`` object-API schemas
     (backlog C-11, tiers 1–2).
@@ -357,6 +455,11 @@ def _collect_object_schemas(tree: ast.Module, registry: SchemaRegistry) -> None:
             continue
 
         schema = _parse_object_schema_value(name, value, registry, str_list_consts, column_dicts)
+        if schema is None:
+            # Issue #90: a schema-SHAPED value we cannot fold must not
+            # vanish silently — register it as unresolved (open
+            # assumption frame + PLW011) so validate sites stay loud.
+            schema = _unresolved_object_schema(name, value, registry)
         if schema is not None:
             registry.schemas[name] = schema
         elif name in registry.schemas and registry.get(name) is not None:
@@ -391,6 +494,12 @@ def _parse_object_schema_value(
             if kw.arg in ("strict", "coerce"):
                 if isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, bool):
                     setattr(schema, kw.arg, kw.value.value)
+                elif (
+                    kw.arg == "strict"
+                    and isinstance(kw.value, ast.Constant)
+                    and kw.value.value == "filter"
+                ):
+                    schema.filters_extras = True
         return schema
 
     # ``base.add_columns({...})`` / ``base.remove_columns([...])``
@@ -529,6 +638,13 @@ def _apply_config(schema: Schema, config_node: ast.ClassDef) -> None:
                 if isinstance(target, ast.Name) and target.id in ("strict", "coerce"):
                     if isinstance(stmt.value, ast.Constant) and isinstance(stmt.value.value, bool):
                         setattr(schema, target.id, stmt.value.value)
+                    elif (
+                        target.id == "strict"
+                        and isinstance(stmt.value, ast.Constant)
+                        and stmt.value.value == "filter"
+                    ):
+                        schema.strict = False
+                        schema.filters_extras = True
 
 
 _PROJECT_MARKERS = ("pyproject.toml", "setup.py", "setup.cfg")

@@ -110,6 +110,19 @@ def infer_col(column_name: str, frame: FrameType) -> DataType:
                     f"Column '{column_name}' not found — it was removed earlier "
                     f"in this chain (drop/rename)"
                 )
+            if frame.nonstrict_schema is not None:
+                # OPEN ISLAND (issues #83/#88): the rest keeps frame-level
+                # subtyping lenient, but undeclared lookups stay flagged —
+                # the declaration is still the contract.
+                raise ColumnNotFoundError(
+                    f"column '{column_name}' is not declared in schema "
+                    f"'{frame.nonstrict_schema}' — the (non-strict) schema admits "
+                    f"extra columns at runtime, but this function's declaration "
+                    f"does not promise it. Declare the column on the schema, or "
+                    f"take a bare pl.DataFrame parameter for row-polymorphic "
+                    f"helpers",
+                    code="PLY042",
+                )
             return Unknown()
         if frame.nonstrict_schema is not None:
             # Checked-island semantics (issue #83): the non-strict schema

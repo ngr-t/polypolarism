@@ -790,3 +790,51 @@ class TestObjectApiConstruction:
         )
         narrow = registry.get("narrow")
         assert set(narrow.columns) == {"b"}
+
+
+class TestUnresolvedObjectSchemaDerivations:
+    """Issue #90: a derivation polypolarism cannot fold (non-literal
+    remove_columns, update_columns/rename_columns, unreadable
+    DataFrameSchema columns) must not silently unregister the schema —
+    it registers as UNRESOLVED: validate still narrows (to a fully open
+    assumption frame) and PLW011 surfaces the degrade."""
+
+    def test_nonliteral_remove_columns_registers_unresolved(self):
+        registry = _collect(
+            """
+            import pandera.polars as pa
+
+            base = pa.DataFrameSchema({"a": pa.Column(int), "b": pa.Column(str)})
+            narrow = base.remove_columns(cols_var)
+            """
+        )
+        schema = registry.get("narrow")
+        assert schema is not None
+        assert schema.unresolved
+        assert schema.definition_warnings
+        ft = schema.to_frame_type()
+        assert ft.rest is not None and ft.columns == {}
+        assert ft.nonstrict_schema is None  # pure assumption, no island lint
+
+    def test_update_columns_registers_unresolved(self):
+        registry = _collect(
+            """
+            import pandera.polars as pa
+
+            base = pa.DataFrameSchema({"a": pa.Column(int)})
+            tweaked = base.update_columns({"a": {"nullable": True}})
+            """
+        )
+        schema = registry.get("tweaked")
+        assert schema is not None and schema.unresolved
+
+    def test_unreadable_dataframeschema_columns_registers_unresolved(self):
+        registry = _collect(
+            """
+            import pandera.polars as pa
+
+            s = pa.DataFrameSchema(make_columns())
+            """
+        )
+        schema = registry.get("s")
+        assert schema is not None and schema.unresolved

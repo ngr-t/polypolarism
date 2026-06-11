@@ -13956,3 +13956,234 @@ class TestOpenStructVerdict:
 
         assert _subtype_verdict(Struct({"city": Utf8()}), Struct({"city": Utf8()})).ok
         assert not _subtype_verdict(Struct({"city": Utf8()}), Struct({"town": Utf8()})).ok
+
+
+class TestValidateResultBinding:
+    """Issue #88: validate RESULTS follow pandera's three strict modes —
+    strict=False binds as an open island (extras provably flow through;
+    undeclared lookups keep the PLY042 lint), strict='filter' and
+    strict=True bind closed (filter's removed-column lookups are PLY001
+    proofs)."""
+
+    def test_nonstrict_validate_result_extras_survive(self):
+        # The issue's FP repro: validate(strict=False) passes 'b' through,
+        # so the declared return is satisfiable — leniency, not Missing.
+        from polypolarism.checker import check_source
+
+        source = textwrap.dedent(
+            """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+
+            open_schema = pa.DataFrameSchema({"a": pa.Column(pl.Int64)})
+
+            class Src(pa.DataFrameModel):
+                a: int
+                b: str
+
+            class NeedsB(pa.DataFrameModel):
+                a: int
+                b: str
+
+                class Config:
+                    strict = False
+                    coerce = True
+
+            def open_obj_extras_survive(df: DataFrame[Src]) -> DataFrame[NeedsB]:
+                out = open_schema.validate(df.select(pl.col("a"), pl.col("b")))
+                return out
+            """
+        )
+        results = check_source(source)
+        target = [r for r in results if r.function_name == "open_obj_extras_survive"]
+        assert target[0].passed, target[0].errors
+
+    def test_nonstrict_validate_result_keeps_island_lint(self):
+        source = textwrap.dedent(
+            """
+            import polars as pl
+            import pandera.polars as pa
+
+            open_schema = pa.DataFrameSchema({"a": pa.Column(pl.Int64)})
+
+            def f(df: pl.DataFrame) -> pl.DataFrame:
+                out = open_schema.validate(df)
+                return out.select(pl.col("undeclared"))
+            """
+        )
+        results = analyze_source(source)
+        errors = [str(e) for e in results[0].errors]
+        assert any("PLY042" in e and "open_schema" in e for e in errors), errors
+
+    def test_filter_removed_column_lookup_is_ply001_proof(self):
+        source = textwrap.dedent(
+            """
+            import polars as pl
+            import pandera.polars as pa
+
+            filter_schema = pa.DataFrameSchema({"a": pa.Column(pl.Int64)}, strict="filter")
+
+            def f(df: pl.DataFrame) -> pl.DataFrame:
+                out = filter_schema.validate(df)
+                return out.select(pl.col("b"))
+            """
+        )
+        results = analyze_source(source)
+        errors = [str(e) for e in results[0].errors]
+        assert any("PLY001" in e and "'b'" in e for e in errors), errors
+        assert not any("PLY042" in e for e in errors), errors
+
+    def test_filter_class_config_supported_too(self):
+        source = textwrap.dedent(
+            """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+
+            class FilterSchema(pa.DataFrameModel):
+                a: int
+
+                class Config:
+                    strict = "filter"
+
+            def f(df: pl.DataFrame) -> pl.DataFrame:
+                out = FilterSchema.validate(df)
+                return out.select(pl.col("b"))
+            """
+        )
+        results = analyze_source(source)
+        errors = [str(e) for e in results[0].errors]
+        assert any("PLY001" in e and "'b'" in e for e in errors), errors
+
+
+class TestValidateInputChecking:
+    """Issue #89: ``Schema.validate(arg)`` checks its INPUT for provable
+    incompatibilities — a required column missing from a genuinely exact
+    frame, a pinned dtype that coerce cannot repair, a required pinned
+    extra against strict=True. Island/open frames stay lenient: upgrading
+    a weaker frame is what validate-narrowing is for."""
+
+    _COMMON = """
+        import polars as pl
+        import pandera.polars as pa
+        from pandera.typing.polars import DataFrame
+
+        class Src(pa.DataFrameModel):
+            a: int
+
+            class Config:
+                strict = True
+                coerce = True
+
+        class StrictA(pa.DataFrameModel):
+            a: str
+
+            class Config:
+                strict = True
+    """
+
+    def test_provable_dtype_conflict_flags(self):
+        source = textwrap.dedent(
+            self._COMMON
+            + """
+        def f(df: DataFrame[Src]) -> pl.DataFrame:
+            out = StrictA.validate(df.select(pl.col("a")))
+            return out
+        """
+        )
+        results = analyze_source(source)
+        errors = [str(e) for e in results[0].errors]
+        assert any("validate" in e and "'a'" in e and "Utf8" in e for e in errors), errors
+
+    def test_coerce_repairable_difference_passes(self):
+        source = textwrap.dedent(
+            """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+
+            class Src(pa.DataFrameModel):
+                a: int
+
+                class Config:
+                    strict = True
+
+            class CoercedStr(pa.DataFrameModel):
+                a: str
+
+                class Config:
+                    strict = True
+                    coerce = True
+
+            def f(df: DataFrame[Src]) -> pl.DataFrame:
+                return CoercedStr.validate(df.select(pl.col("a")))
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == [], results[0].errors
+
+    def test_provable_missing_column_on_exact_frame_flags(self):
+        source = textwrap.dedent(
+            self._COMMON
+            + """
+        class NeedsB(pa.DataFrameModel):
+            b: int
+
+        def f(df: DataFrame[Src]) -> pl.DataFrame:
+            picked = df.select(pl.col("a"))
+            return NeedsB.validate(picked)
+        """
+        )
+        results = analyze_source(source)
+        errors = [str(e) for e in results[0].errors]
+        assert any("missing column" in e and "'b'" in e for e in errors), errors
+
+    def test_island_frame_upgrade_stays_lenient(self):
+        # Upgrading a non-strict-sourced frame is the validate-narrowing
+        # use case — its runtime extras may satisfy the target schema.
+        source = textwrap.dedent(
+            """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+
+            class Loose(pa.DataFrameModel):
+                a: int
+
+            class Wide(pa.DataFrameModel):
+                a: int
+                b: str
+
+            def f(df: DataFrame[Loose]) -> pl.DataFrame:
+                return Wide.validate(df)
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == [], results[0].errors
+
+    def test_object_schema_input_checked_too(self):
+        source = textwrap.dedent(
+            self._COMMON
+            + """
+        strict_s = pa.DataFrameSchema({"a": pa.Column(str)}, strict=True)
+
+        def f(df: DataFrame[Src]) -> pl.DataFrame:
+            return strict_s.validate(df.select(pl.col("a")))
+        """
+        )
+        results = analyze_source(source)
+        errors = [str(e) for e in results[0].errors]
+        assert any("validate" in e and "Utf8" in e for e in errors), errors
+
+    def test_pipe_validate_input_checked(self):
+        source = textwrap.dedent(
+            self._COMMON
+            + """
+        def f(df: DataFrame[Src]) -> pl.DataFrame:
+            return df.select(pl.col("a")).pipe(StrictA.validate)
+        """
+        )
+        results = analyze_source(source)
+        errors = [str(e) for e in results[0].errors]
+        assert any("validate" in e and "Utf8" in e for e in errors), errors
