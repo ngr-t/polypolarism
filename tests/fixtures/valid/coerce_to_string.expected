@@ -1,0 +1,3 @@
+counts_as_text: OK
+  via: column 'n': UInt32 -> Utf8 via coerce
+  via: column 'top_amount': Int64 -> Utf8 via coerce

@@ -416,9 +416,15 @@ class TestArrayCoercibleDifference:
     def test_array_vs_array_inner_difference_is_coercible(self):
         assert _is_coercible_difference(Array(Int64()), Array(Utf8())) is True
 
-    def test_list_vs_list_difference_is_not_affected(self):
-        # List-vs-List coercion stays out of the new rule (unprobed).
-        assert _is_coercible_difference(ListType(Int64()), ListType(Utf8())) is False
+    def test_list_vs_list_recurses_on_elements(self):
+        # Issue #58: coerce casts list elements too (probed: List(Int64) ->
+        # declared List(Utf8) / List(Float64) pass under pandera coerce).
+        assert _is_coercible_difference(ListType(Int64()), ListType(Utf8())) is True
+        assert _is_coercible_difference(ListType(Int64()), ListType(Float64())) is True
+        # ... but value-dependent element casts stay errors,
+        assert _is_coercible_difference(ListType(Utf8()), ListType(Int64())) is False
+        # ... and casting does not remove element nulls.
+        assert _is_coercible_difference(ListType(Nullable(Int64())), ListType(Utf8())) is False
 
     def test_array_vs_scalar_is_not_coercible(self):
         assert _is_coercible_difference(Array(Int64()), Int64()) is False
@@ -608,7 +614,15 @@ class TestLeniencyTracing:
 
 
 class TestIsCoercibleDifference:
-    """Unit tests for the coercion-compatibility helper."""
+    """Unit tests for the coercion-compatibility helper.
+
+    Direction-aware since issue #58: coercibility means "the INFERRED dtype
+    is always castable to the DECLARED dtype" — probed against pandera
+    ``coerce=True`` (polars 1.41.2 + pandera 0.31) with adversarial values.
+    Value-DEPENDENT casts (Utf8 -> Int64 fails on "total", numeric ->
+    Enum, ...) stay errors; the boundary pin is
+    ``tests/fixtures/invalid/coerce_limits.py``.
+    """
 
     def test_numeric_to_numeric_is_coercible(self):
         assert _is_coercible_difference(UInt32(), Int64()) is True
@@ -616,13 +630,75 @@ class TestIsCoercibleDifference:
     def test_float_to_int_is_coercible(self):
         assert _is_coercible_difference(Float64(), Int64()) is True
 
-    def test_non_numeric_is_not_coercible(self):
+    def test_formattable_to_string_is_coercible(self):
+        # Issue #58 headline: anything probed always-castable -> String.
+        from polypolarism.types import Boolean, Categorical, Date, Datetime, Decimal, Enum, Time
+
+        assert _is_coercible_difference(UInt32(), Utf8()) is True
+        assert _is_coercible_difference(Int64(), Utf8()) is True
+        assert _is_coercible_difference(Float64(), Utf8()) is True
+        assert _is_coercible_difference(Boolean(), Utf8()) is True
+        assert _is_coercible_difference(Date(), Utf8()) is True
+        assert _is_coercible_difference(Datetime(tz="UTC"), Utf8()) is True
+        assert _is_coercible_difference(Time(), Utf8()) is True
+        assert _is_coercible_difference(Categorical(), Utf8()) is True
+        assert _is_coercible_difference(Enum(), Utf8()) is True
+        assert _is_coercible_difference(Decimal(38, 2), Utf8()) is True
+
+    def test_string_to_numeric_is_not_coercible(self):
+        # Value-dependent ("total" fails) — the coerce_limits boundary pin.
         assert _is_coercible_difference(Utf8(), Int64()) is False
-        assert _is_coercible_difference(Int64(), Utf8()) is False
+        assert _is_coercible_difference(Utf8(), Float64()) is False
+
+    def test_duration_and_binary_to_string_are_not_coercible(self):
+        # Probed: Duration -> String raises InvalidOperationError; Binary ->
+        # String depends on the bytes being valid UTF-8 (value-dependent).
+        from polypolarism.types import Binary, Duration
+
+        assert _is_coercible_difference(Duration(), Utf8()) is False
+        assert _is_coercible_difference(Binary(), Utf8()) is False
+
+    def test_boolean_numeric_cells_are_coercible(self):
+        # Probed: bool -> num is 0/1; num -> bool is "!= 0" (NaN included).
+        from polypolarism.types import Boolean
+
+        assert _is_coercible_difference(Boolean(), Int64()) is True
+        assert _is_coercible_difference(Boolean(), Float64()) is True
+        assert _is_coercible_difference(Int64(), Boolean()) is True
+        assert _is_coercible_difference(Float64(), Boolean()) is True
+
+    def test_temporal_always_cells_are_coercible(self):
+        # Probed value-independent: date -> datetime (midnight), datetime ->
+        # date (truncation), datetime -> time (extraction), time -> dur.
+        from polypolarism.types import Date, Datetime, Duration, Time
+
+        assert _is_coercible_difference(Date(), Datetime()) is True
+        assert _is_coercible_difference(Date(), Datetime(tz="UTC")) is True
+        assert _is_coercible_difference(Datetime(), Date()) is True
+        assert _is_coercible_difference(Datetime(tz="UTC"), Time()) is True
+        assert _is_coercible_difference(Time(), Duration()) is True
+        # ... but the reverse Duration -> Time is a probed runtime error.
+        assert _is_coercible_difference(Duration(), Time()) is False
+
+    def test_categorical_always_cells_are_coercible(self):
+        # Probed: any string is a valid category; Enum categories are strings.
+        from polypolarism.types import Categorical, Enum
+
+        assert _is_coercible_difference(Utf8(), Categorical()) is True
+        assert _is_coercible_difference(Enum(), Categorical()) is True
+
+    def test_enum_target_is_not_coercible(self):
+        # Membership in the declared categories is value-dependent.
+        from polypolarism.types import Categorical, Enum
+
+        assert _is_coercible_difference(Utf8(), Enum()) is False
+        assert _is_coercible_difference(Categorical(), Enum()) is False
+        assert _is_coercible_difference(Int64(), Enum()) is False
 
     def test_nullable_inferred_to_non_nullable_declared_is_not_coercible(self):
         # Coercion casts values; it does not remove nulls.
         assert _is_coercible_difference(Nullable(UInt32()), Int64()) is False
+        assert _is_coercible_difference(Nullable(UInt32()), Utf8()) is False
 
     def test_nullable_inferred_to_nullable_declared_is_coercible(self):
         assert _is_coercible_difference(Nullable(UInt32()), Nullable(Int64())) is True
@@ -640,11 +716,12 @@ class TestIsCoercibleDifference:
         assert _is_coercible_difference(Datetime(tz="UTC"), Datetime()) is True
         assert _is_coercible_difference(Datetime(tz="UTC"), Datetime(tz="Asia/Tokyo")) is True
 
-    def test_datetime_vs_non_datetime_is_not_coercible(self):
+    def test_string_to_temporal_is_not_coercible(self):
+        # Parsing strings into temporals is value-dependent.
         from polypolarism.types import Date, Datetime
 
-        assert _is_coercible_difference(Datetime(tz="UTC"), Utf8()) is False
-        assert _is_coercible_difference(Date(), Datetime()) is False
+        assert _is_coercible_difference(Utf8(), Datetime(tz="UTC")) is False
+        assert _is_coercible_difference(Utf8(), Date()) is False
 
 
 class TestCheckCoerce:
@@ -666,6 +743,17 @@ class TestCheckCoerce:
         result = check_function(self._analysis(UInt32(), Int64(), coerce=True))
         assert result.passed is True
         assert result.errors == []
+
+    def test_uint32_vs_string_passes_with_coerce_and_records_leniency(self):
+        # Issue #58: ``n: str`` declared for a ``pl.len()`` (UInt32) column
+        # passes under coerce — and the pass is visible as a leniency note.
+        result = check_function(self._analysis(UInt32(), Utf8(), coerce=True))
+        assert result.passed is True
+        assert result.leniency == ["column 'n': UInt32 -> Utf8 via coerce"]
+
+    def test_uint32_vs_string_fails_without_coerce(self):
+        result = check_function(self._analysis(UInt32(), Utf8(), coerce=False))
+        assert result.passed is False
 
     def test_uint32_vs_int64_fails_without_coerce(self):
         result = check_function(self._analysis(UInt32(), Int64(), coerce=False))
