@@ -11347,9 +11347,11 @@ class TestUnmodeledMethodWarning:
 
 
 class TestAnnotatedAssignmentChecking:
-    """ADR-0005: ``x: DataFrame[A] = expr`` is checked against the inferred
-    RHS. Phase 1 (案1): every provable contradiction warns PLW008; the
-    annotation still wins for the variable's downstream type."""
+    """ADR-0005 two-direction rule: ``x: DataFrame[A] = expr`` is checked
+    against the inferred RHS. Pure narrowing assertions (declared <:
+    inferred) warn PLW008 with a ``Schema.validate`` remedy; contradictions
+    where neither subtype direction holds are PLY033 errors. The annotation
+    still wins for the variable's downstream type in both cases."""
 
     HEADER = textwrap.dedent(
         PANDERA_HEADER
@@ -11390,22 +11392,26 @@ class TestAnnotatedAssignmentChecking:
             """
         )
         assert not any("PLW008" in w for w in result.warnings), result.warnings
+        assert result.errors == [], result.errors
 
-    def test_unrelated_dtype_contradiction_warns(self):
-        # half infers Float64; WrongDtype declares str.
+    def test_unrelated_dtype_contradiction_is_error(self):
+        # half infers Float64; WrongDtype declares str — neither subtype
+        # direction holds, so the re-interpretation is a PLY033 error.
         result = self._result(
             """
             x: DataFrame[WrongDtype] = df.select("v", half=pl.col("v") / 2)
             return df
             """
         )
-        plw = [w for w in result.warnings if "PLW008" in w]
-        assert plw, result.warnings
-        assert "half" in plw[0]
+        ply = [e for e in result.errors if "PLY033" in e]
+        assert ply, result.errors
+        assert "half" in ply[0]
+        assert not any("PLW008" in w for w in result.warnings), result.warnings
 
-    def test_narrowing_assertion_warns_in_phase1(self):
-        # Left-join shape: m infers Int64? (nullable); annotation asserts
-        # non-null Int64 — a narrowing assertion, warned in phase 1.
+    def test_narrowing_assertion_warns(self):
+        # Left-join shape: m infers Int64? (nullable); the annotation
+        # asserts non-null Int64 — declared <: inferred, a pure narrowing
+        # assertion: PLW008, never an error.
         source = self.HEADER + textwrap.dedent(
             """
             class Other(pa.DataFrameModel):
@@ -11419,6 +11425,7 @@ class TestAnnotatedAssignmentChecking:
         )
         results = analyze_source(source)
         assert any("PLW008" in w for w in results[0].warnings), results[0].warnings
+        assert results[0].errors == [], results[0].errors
 
     def test_unknown_inference_stays_silent(self):
         # peak_max degrades to Unknown — Unknown-leniency must keep the
@@ -11430,35 +11437,85 @@ class TestAnnotatedAssignmentChecking:
             """
         )
         assert not any("PLW008" in w for w in result.warnings), result.warnings
+        assert not any("PLY033" in e for e in result.errors), result.errors
 
     def test_annotation_still_wins_downstream(self):
-        # After the (warned) contradiction, downstream typing follows the
-        # annotation: selecting 'half' as str-typed must not error.
+        # After the PLY033, downstream typing follows the annotation:
+        # selecting 'half' off x must not raise a column error on top.
         result = self._result(
             """
             x: DataFrame[WrongDtype] = df.select("v", half=pl.col("v") / 2)
-            return df.select("v", "s")
+            y = x.select("half")
+            return df
             """
         )
-        assert result.errors == [], result.errors
+        non_ply033 = [e for e in result.errors if "PLY033" not in e]
+        assert non_ply033 == [], result.errors
 
-    def test_provably_absent_column_warns(self):
-        # Halved declares 'half' but the RHS provably lacks it (closed frame).
+    def test_provably_absent_column_is_error(self):
+        # Halved declares 'half' but the RHS provably lacks it (closed
+        # frame) — a column cannot be asserted into existence.
         result = self._result(
             """
             x: DataFrame[Halved] = df.select("v")
             return df
             """
         )
-        assert any("PLW008" in w for w in result.warnings), result.warnings
+        assert any("PLY033" in e for e in result.errors), result.errors
 
-    def test_laziness_mismatch_warns(self):
+    def test_laziness_mismatch_is_error(self):
         result = self._result(
             """
             x: DataFrame[Halved] = df.lazy().select("v", half=pl.col("v") / 2)
             return df
             """
         )
-        plw = [w for w in result.warnings if "PLW008" in w]
-        assert plw, result.warnings
-        assert "Lazy" in plw[0]
+        ply = [e for e in result.errors if "PLY033" in e]
+        assert ply, result.errors
+        assert "Lazy" in ply[0]
+
+    def test_strict_extra_column_is_error(self):
+        # The strict annotation says nothing else is present, but 's' is
+        # provably there — not narrowable.
+        source = self.HEADER + textwrap.dedent(
+            """
+            class StrictV(pa.DataFrameModel):
+                v: int
+
+                class Config:
+                    strict = True
+
+            def f(df: DataFrame[In]) -> DataFrame[In]:
+                x: DataFrame[StrictV] = df.select("v", "s")
+                return df
+            """
+        )
+        results = analyze_source(source)
+        assert any("PLY033" in e for e in results[0].errors), results[0].errors
+
+    def test_mixed_narrowing_and_contradiction_reports_both(self):
+        # 'extra_typed' is an unrelated re-interpretation (PLY033) while
+        # 'm' is a pure narrowing (PLW008) — both surface, separately.
+        source = self.HEADER + textwrap.dedent(
+            """
+            class Other(pa.DataFrameModel):
+                v: int
+                m: int
+
+            class MixedTarget(pa.DataFrameModel):
+                v: int
+                m: int
+                extra_typed: str
+
+            def f(df: DataFrame[In], other: DataFrame[Other]) -> DataFrame[In]:
+                x: DataFrame[MixedTarget] = df.join(other, on="v", how="left").select(
+                    "v", "m", extra_typed=pl.col("v") * 2
+                )
+                return df
+            """
+        )
+        results = analyze_source(source)
+        assert any("PLY033" in e and "extra_typed" in e for e in results[0].errors), results[
+            0
+        ].errors
+        assert any("PLW008" in w and "'m'" in w for w in results[0].warnings), results[0].warnings

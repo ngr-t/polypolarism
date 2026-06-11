@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Annotated assignments are now checked against the inferred RHS
+  (ADR-0005 two-direction rule): `x: DataFrame[A] = expr` where the
+  expression provably infers an *unrelated* schema is a new error
+  `PLY033`; a pure *narrowing* assertion (e.g. non-null over a
+  post-left-join nullable) stays allowed and warns `PLW008` with
+  `Schema.validate(...)` as the runtime-backed upgrade. Pivot-style
+  annotations over `Unknown` inference remain silent; the annotation
+  still wins for downstream typing.
 - New warning `PLW007`: a method polypolarism does not model on a
   precisely-known receiver now warns that the dtype degrades to
   `Unknown` (one warning per chain; a `.cast(...)` directly after the

@@ -1,2 +1,2 @@
 enrich: WARN
-  warning: [PLW008] annotation `DataFrame[Enriched]` contradicts the inferred schema: column 'segment': declared Int64 but inferred Int64?. Fix the annotation, or narrow at runtime with `Schema.validate(...)`.
+  warning: [PLW008] annotation `DataFrame[Enriched]` narrows the inferred schema without runtime backing: column 'segment': declared Int64 but inferred Int64?. Assert it with `Schema.validate(...)` (which retypes the value), or widen the annotation.

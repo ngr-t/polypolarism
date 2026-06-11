@@ -68,6 +68,7 @@ from polypolarism.diagnostics import (
     PLY030,
     PLY031,
     PLY032,
+    PLY033,
     tag,
 )
 from polypolarism.expr_infer import (
@@ -4018,18 +4019,28 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         declared: FrameType,
         inferred: FrameType,
     ) -> None:
-        """ADR-0005: surface a provable contradiction between a variable
-        annotation and the inferred RHS schema (PLW008, warn-only phase).
+        """ADR-0005 two-direction rule: check a variable annotation against
+        the inferred RHS schema.
 
-        The comparison reuses the checker's verdict engine, so every
+        The forward comparison reuses the checker's verdict engine, so every
         leniency rule (Unknown compatibility, open-frame skips, ``coerce``)
         applies — a pivot/Unknown RHS never contradicts its annotation.
+        Forward failures are then classified by the REVERSE direction:
+
+        - ``declared <: inferred`` holds — a pure *narrowing assertion*
+          (non-null over nullable, required over optional): allowed,
+          surfaced as PLW008 with the runtime-backed upgrade.
+        - neither direction holds (unrelated dtype, provably-absent
+          column, strict extras, eager/lazy mismatch): PLY033 error — the
+          annotation re-interprets the frame as something it provably is
+          not.
         """
         # Function-level import: checker imports analyzer at module level
         # (check_source -> analyze_source), so the reverse import must be
         # deferred to call time to avoid the cycle.
         from polypolarism.checker import _is_coercible_difference, _subtype_verdict
 
+        narrowings: list[str] = []
         contradictions: list[str] = []
         if declared.is_lazy != inferred.is_lazy:
             declared_kind = "LazyFrame" if declared.is_lazy else "DataFrame"
@@ -4047,7 +4058,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     )
                 continue
             if declared_spec.required and not inferred_spec.required:
-                contradictions.append(
+                # Asserting an optional column always-present is the
+                # column-existence flavor of narrowing.
+                narrowings.append(
                     f"column '{col_name}': declared always-present but inferred optional"
                 )
                 continue
@@ -4058,10 +4071,14 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 inferred_spec.dtype, declared_spec.dtype
             ):
                 continue
-            contradictions.append(
+            detail = (
                 f"column '{col_name}': declared {declared_spec.dtype} but "
                 f"inferred {inferred_spec.dtype}"
             )
+            if _subtype_verdict(declared_spec.dtype, inferred_spec.dtype).ok:
+                narrowings.append(detail)
+            else:
+                contradictions.append(detail)
         if declared.strict:
             for col_name, inferred_spec in inferred.columns.items():
                 if col_name not in declared.columns:
@@ -4070,12 +4087,24 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                         f"contradicts the strict annotation"
                     )
         if contradictions:
+            self.errors.append(
+                tag(
+                    PLY033,
+                    f"annotation `{ast.unparse(annotation)}` re-interprets the "
+                    "inferred frame as an unrelated type: "
+                    + "; ".join(contradictions)
+                    + ". Fix the annotation or the expression.",
+                )
+            )
+        if narrowings:
             self.warnings.append(
                 tag(
                     PLW008,
-                    f"annotation `{ast.unparse(annotation)}` contradicts the "
-                    "inferred schema: " + "; ".join(contradictions) + ". Fix the "
-                    "annotation, or narrow at runtime with `Schema.validate(...)`.",
+                    f"annotation `{ast.unparse(annotation)}` narrows the "
+                    "inferred schema without runtime backing: "
+                    + "; ".join(narrowings)
+                    + ". Assert it with `Schema.validate(...)` (which retypes "
+                    "the value), or widen the annotation.",
                 )
             )
 

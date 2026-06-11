@@ -446,6 +446,7 @@ Errors are tagged with a stable `[PLY###]` prefix for IDE/CI consumers:
 | `PLY030` | eager-only method called on a `LazyFrame` (e.g. `lf.write_csv(...)`) — suggests `.collect()` |
 | `PLY031` | lazy-only method called on a `DataFrame` (e.g. `df.sink_csv(...)`, `df.collect()`) — suggests `.lazy()` or removing the call |
 | `PLY032` | function-call argument or return type mixes up `DataFrame[S]` and `LazyFrame[S]` — suggests the appropriate `.collect()` / `.lazy()` |
+| `PLY033` | a variable annotation re-interprets the inferred frame as an unrelated type (neither subtype direction holds, ADR-0005) |
 
 ### Apply-style helpers and warning codes
 
@@ -477,7 +478,7 @@ Warning codes:
 | `PLW005` | `pivot()` output schema is data-dependent; bind to a `DataFrame[Schema]` variable |
 | `PLW006` | `DataFrame[X]` / `LazyFrame[X]` annotation references a schema the analyzer cannot resolve |
 | `PLW007` | method not modeled by polypolarism — the result dtype degrades to `Unknown`; pin it with `.cast(...)` or a schema validation (a `.cast(...)` directly after the call retracts the warning) |
-| `PLW008` | a variable annotation contradicts the inferred RHS schema (ADR-0005); fix the annotation or narrow at runtime with `Schema.validate(...)` |
+| `PLW008` | a variable annotation *narrows* the inferred schema without runtime backing (ADR-0005) — e.g. non-null over a post-join nullable; assert it with `Schema.validate(...)` or widen the annotation |
 | `PLW010` | detected polars / pandera version is below the supported floor (see [Supported versions](#supported-versions)) |
 
 JSON output (`--format json`) emits warnings as `severity: "warning"`

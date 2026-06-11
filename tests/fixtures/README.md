@@ -105,6 +105,7 @@ Rules with both sides present (valid twin -> invalid twin):
 | frame literals | `frame_literal` | `frame_literal_wrong_declared` |
 | pl expression constructors | `m6_pl_constructors` | `m6_pl_constructors_wrong_declared` |
 | variable annotations | `variable_annotation_basic`, `variable_annotation_chain` | `variable_annotation_wrong_downstream` |
+| annotation vs inferred RHS (ADR-0005, PLY033/PLW008) | `warning/annotation_narrowing` (narrowing assertion warns) | `variable_annotation_contradiction` |
 | plural col | `m9_plural_col`, `plural_col_exprs` | `plural_col_wrong_dtype` |
 | struct rename_fields | `struct_rename_fields` | `struct_rename_wrong_dtype` |
 | hstack | `m4_unpivot_and_hstack` | `m4_hstack_wrong_dtype` |
@@ -118,16 +119,10 @@ Intentionally unpaired:
 
 ### Known gaps (backlog — add the invalid twin when touching the rule)
 
-- **variable annotation contradicting the assigned expression** —
-  discovered false negative (2026-06, while pairing the 7 gaps above):
-  `visit_AnnAssign` lets a `DataFrame[Schema]` annotation win
-  unconditionally, so an annotation that contradicts an *inferable* RHS
-  (e.g. `x: DataFrame[A] = df.select(...)` where the select infers B ≠ A)
-  passes silently — the RHS inference result is discarded and only walked
-  for warnings. `variable_annotation_wrong_downstream` therefore places
-  its wrong declaration downstream (the return schema); an invalid twin
-  for the contradiction itself needs the checker to compare the inferred
-  RHS against the annotation first.
+(none at the moment — the variable-annotation contradiction gap was
+closed by ADR-0005: `invalid/variable_annotation_contradiction` pins the
+PLY033 error, `warning/annotation_narrowing` pins the PLW008 narrowing
+assertion.)
 
 ## Runtime differential harness (ADR-0003, separate module)
 

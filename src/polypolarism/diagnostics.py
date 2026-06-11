@@ -42,6 +42,9 @@ PLY022 = "PLY022"  # unpivot: column missing / value dtype unification failure
 PLY030 = "PLY030"  # eager-only method called on a LazyFrame (suggest .collect())
 PLY031 = "PLY031"  # lazy-only method called on a DataFrame (suggest .lazy())
 PLY032 = "PLY032"  # function expected DataFrame[S] but got LazyFrame[S] (or vice versa)
+PLY033 = (
+    "PLY033"  # variable annotation re-interprets the inferred frame as an unrelated type (ADR-0005)
+)
 
 
 # Warnings (PLW###): inference is imprecise here, but the user can usually
@@ -53,7 +56,7 @@ PLW004 = "PLW004"  # lambda / inline callable used where its return dtype is unk
 PLW005 = "PLW005"  # pivot result schema is data-dependent; user should annotate
 PLW006 = "PLW006"  # DataFrame[X] / LazyFrame[X] annotation references an unknown schema
 PLW007 = "PLW007"  # method not modeled by the analyzer; result dtype degrades to Unknown
-PLW008 = "PLW008"  # variable annotation contradicts the inferred RHS schema (ADR-0005)
+PLW008 = "PLW008"  # variable annotation narrows the inferred RHS without runtime backing (ADR-0005)
 
 # Environment / version
 PLW010 = "PLW010"  # detected polars or pandera version below polypolarism's supported floor

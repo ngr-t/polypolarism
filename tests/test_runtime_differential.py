@@ -79,6 +79,14 @@ PolarsDType = pl.DataType | DataTypeClass
 # one-line justification; stale keys fail test_skip_list_is_not_stale.
 # ---------------------------------------------------------------------------
 SKIP: dict[str, str] = {
+    # -- annotation contradiction (PLY033) is static-only by design
+    #    (ADR-0005): pandera annotations are inert at runtime (validation
+    #    happens only via validate/check_types), so the function executes
+    #    cleanly while the static verdict is FAIL — same family as the
+    #    PLY032 annotation-contract skip below.
+    "invalid/variable_annotation_contradiction.py": (
+        "ADR-0005: annotations are inert at runtime; the contradiction is static-only"
+    ),
     # -- validate-narrowing fixtures: the annotated *input* schema is a lower
     #    bound; the body's Schema.validate() call demands columns beyond it.
     #    Inputs synthesized from the annotation alone can never satisfy the
