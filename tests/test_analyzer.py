@@ -10610,9 +10610,6 @@ class TestTzAwareDtypeOutputs:
             ("pl.col('utc').dt.replace_time_zone(None)", Datetime()),
             ("pl.col('utc').dt.convert_time_zone('Asia/Tokyo')", Datetime(tz="Asia/Tokyo")),
             ("pl.col('n').dt.convert_time_zone('UTC')", Datetime(tz="UTC")),
-            # Unknowable arguments degrade to Unknown — never guess a tz.
-            ("pl.col('n').dt.replace_time_zone(tzvar)", Unknown()),
-            ("pl.col('utc').dt.convert_time_zone(tzvar)", Unknown()),
             # str.to_datetime tz forms
             ("pl.col('s').str.to_datetime()", Datetime()),
             ("pl.col('s').str.to_datetime('%Y-%m-%d %H:%M:%S')", Datetime()),
@@ -10648,6 +10645,37 @@ class TestTzAwareDtypeOutputs:
     )
     def test_to_datetime_non_literal_args_degrade_to_unknown(self, expr: str) -> None:
         analyzer = _run_body(self._frame(), f"out = df.select(r={expr})")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["r"].dtype == Unknown()
+
+    # upgrade trigger: types.py Datetime gains a tz wildcard ("aware,
+    # tz statically unknown") — these always yield SOME Datetime
+    # (replace_time_zone(var) may even strip to naive if the variable
+    # is None), but Datetime equality/subtyping is exact on tz, so any
+    # concrete claim would be a guess.
+    @pytest.mark.imprecision
+    @pytest.mark.parametrize(
+        "expr",
+        [
+            "pl.col('n').dt.replace_time_zone(tzvar)",
+            "pl.col('utc').dt.convert_time_zone(tzvar)",
+        ],
+    )
+    def test_time_zone_non_literal_arg_degrades_to_unknown(self, expr: str) -> None:
+        analyzer = _run_body(self._frame(), f"out = df.select(r={expr})")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["r"].dtype == Unknown()
+
+    # upgrade trigger: convert_time_zone(None) gains a guaranteed-crash
+    # diagnostic — probed (polars 1.41.2): it raises TypeError at
+    # expression-construction time ("argument 'time_zone': 'None' is
+    # not an instance of 'str'"), so any dtype claim is moot and the
+    # silent Unknown is sound but undiagnosed.
+    @pytest.mark.imprecision
+    def test_convert_time_zone_none_degrades_to_unknown(self) -> None:
+        analyzer = _run_body(
+            self._frame(), "out = df.select(r=pl.col('utc').dt.convert_time_zone(None))"
+        )
         assert analyzer.errors == [], analyzer.errors
         assert analyzer.var_types["out"].columns["r"].dtype == Unknown()
 

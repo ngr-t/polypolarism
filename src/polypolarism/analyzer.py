@@ -1182,9 +1182,16 @@ def _time_zone_arg_dtype(method: str, call_node: ast.Call | None) -> DataType:
     on a Datetime receiver (issue #50 collateral).
 
     Probed (polars 1.41.2): both methods yield ``Datetime[arg]`` for naive
-    AND aware receivers; ``replace_time_zone(None)`` strips the tz.
-    Anything not statically readable (a variable, ``convert_time_zone(None)``
-    — unprobed) degrades to Unknown: claiming a tz would be a guess.
+    AND aware receivers; ``replace_time_zone(None)`` strips the tz;
+    ``convert_time_zone(None)`` raises TypeError at expression-construction
+    time ("argument 'time_zone': 'None' is not an instance of 'str'"), so
+    its silent Unknown is sound — no frame ever materializes.
+
+    A non-literal time_zone stays Unknown deliberately (backlog B-6): the
+    result is always SOME Datetime (or naive, if a variable None reaches
+    ``replace_time_zone``), but ``types.Datetime`` equality/subtyping is
+    exact on tz and has no "aware, tz unknown" wildcard, so any concrete
+    claim would be a guess — a wrong precise type is worse than Unknown.
     """
     tz_node = _call_arg(call_node, position=0, name="time_zone")
     if isinstance(tz_node, ast.Constant):
