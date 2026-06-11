@@ -671,8 +671,9 @@ class TestContainerCallForms:
     def test_pl_list_of_int64_call(self):
         assert _parse("pl.List(pl.Int64())") == ColumnSpec(List(Int64()), required=True)
 
-    def test_pl_list_of_bare_struct_is_list_unknown(self):
-        assert _parse("pl.List(pl.Struct)") == ColumnSpec(List(Unknown()), required=True)
+    def test_pl_list_of_bare_struct_is_list_open_struct(self):
+        # Backlog C-9: the nested bare struct keeps its struct-ness too.
+        assert _parse("pl.List(pl.Struct)") == ColumnSpec(List(Struct(open=True)), required=True)
 
     def test_pl_list_nested(self):
         assert _parse("pl.List(pl.List(pl.Int64))") == ColumnSpec(
@@ -721,12 +722,16 @@ class TestContainerCallForms:
             Struct({"a": Unknown()}), required=True
         )
 
-    def test_pl_struct_non_dict_arg_is_unknown(self):
-        assert _parse('pl.Struct([pl.Field("a", pl.Utf8)])') == ColumnSpec(Unknown(), required=True)
+    def test_pl_struct_non_dict_arg_is_open_struct(self):
+        # Backlog C-9: an unreadable construction still provably builds a
+        # struct.
+        assert _parse('pl.Struct([pl.Field("a", pl.Utf8)])') == ColumnSpec(
+            Struct(open=True), required=True
+        )
 
     def test_pl_list_with_field_value(self):
         assert _parse("pl.List(pl.Struct)", "pa.Field()") == ColumnSpec(
-            List(Unknown()), required=True
+            List(Struct(open=True)), required=True
         )
 
     def test_pl_list_nullable_field(self):
@@ -744,11 +749,12 @@ class TestContainerBareForms:
     def test_pl_array_bare(self):
         assert _parse("pl.Array") == ColumnSpec(Array(Unknown()), required=True)
 
-    def test_pl_struct_bare_is_unknown(self):
-        """A struct whose fields we don't know carries no usable shape —
-        Unknown keeps everything downstream lenient (not Struct({}), which
-        would unnest to zero columns)."""
-        assert _parse("pl.Struct") == ColumnSpec(Unknown(), required=True)
+    def test_pl_struct_bare_is_open_struct(self):
+        """Backlog C-9: a struct whose fields we don't know is still
+        provably a STRUCT — an open Struct keeps receiver checks (.str on
+        it is a proof) while field lookups stay lenient (not Struct({}),
+        which would unnest to zero columns)."""
+        assert _parse("pl.Struct") == ColumnSpec(Struct(open=True), required=True)
 
 
 def _arity_error(annotation_src: str) -> str | None:

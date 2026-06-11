@@ -3162,15 +3162,21 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 if field_name is not None and isinstance(receiver_inner, Struct):
                     field_dtype = receiver_inner.fields.get(field_name)
                     if field_dtype is None:
-                        self.errors.append(
-                            tag(
-                                PLY001,
-                                f"struct.field: '{field_name}' not found in "
-                                f"{receiver_inner}. Available fields: "
-                                f"{list(receiver_inner.fields.keys())}",
+                        if receiver_inner.open:
+                            # OPEN struct (backlog C-9): the field may
+                            # exist among the unknown ones — ADR-0006
+                            # assumption semantics.
+                            field_dtype = Unknown()
+                        else:
+                            self.errors.append(
+                                tag(
+                                    PLY001,
+                                    f"struct.field: '{field_name}' not found in "
+                                    f"{receiver_inner}. Available fields: "
+                                    f"{list(receiver_inner.fields.keys())}",
+                                )
                             )
-                        )
-                        return None
+                            return None
                     result = field_dtype
             elif method == "rename_fields":
                 # Probed (polars 1.41.2; issue #48): the new names are
@@ -3183,7 +3189,11 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 new_names: list[str] | None = None
                 if call_node is not None and call_node.args:
                     new_names = _str_list_or_tuple(call_node.args[0])
-                if new_names is not None and isinstance(receiver_inner, Struct):
+                if (
+                    new_names is not None
+                    and isinstance(receiver_inner, Struct)
+                    and not receiver_inner.open
+                ):
                     # strict=False: zip-truncation IS the probed semantics.
                     result = Struct(
                         dict(zip(new_names, receiver_inner.fields.values(), strict=False))
@@ -6500,6 +6510,11 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 )
                 continue
             del result_columns[col]
+            if inner.open:
+                # OPEN struct (backlog C-9): fields beyond the pinned ones
+                # are unknown — the result frame opens, like the Unknown
+                # branch above, but the pinned fields still register.
+                result_rest = RowVar("unnest")
             for field_name, field_dtype in inner.fields.items():
                 wrapped: DataType = field_dtype
                 if outer_nullable and not isinstance(wrapped, Nullable):

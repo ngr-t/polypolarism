@@ -8527,6 +8527,13 @@ class TestNamespaceReceiverDtype:
             'pl.col("s").cat.get_categories()',
             'pl.col("xs").cat.get_categories()',
             'pl.col("d").cat.len_chars()',
+            # Backlog C-9: a bare ``pl.Struct`` column is provably a
+            # struct (probed: pandera validates any struct; `.str` on a
+            # struct is a runtime SchemaError) — wrong-namespace
+            # accessors are now proofs, not Unknown-mediated silence.
+            'pl.col("st").str.contains("x")',
+            'pl.col("st").cat.get_categories()',
+            'pl.col("st").arr.sum()',
         ],
     )
     def test_wrong_receiver_dtype_flags_ply012(self, expr: str):
@@ -8548,11 +8555,10 @@ class TestNamespaceReceiverDtype:
             # Issue #54: `.cat` on Categorical / Enum is valid.
             'pl.col("cat").cat.get_categories()',
             'pl.col("en").cat.get_categories()',
-            # Bare ``pl.Struct`` parses to Unknown — exempt from validation.
+            # Bare ``pl.Struct`` is an OPEN struct (backlog C-9): the
+            # struct-ness is provable, so `.struct` is accepted and field
+            # lookups get assumption semantics.
             'pl.col("st").struct.field("x")',
-            'pl.col("st").str.contains("x")',
-            'pl.col("st").cat.get_categories()',
-            'pl.col("st").arr.sum()',
         ],
     )
     def test_valid_or_unknown_receiver_passes(self, expr: str):
@@ -13784,3 +13790,133 @@ class TestObjectApiSchemaNarrowing:
         )
         results = analyze_source(source)
         assert any("PLY012" in str(e) for e in results[0].errors), results[0].errors
+
+
+class TestOpenStruct:
+    """Backlog C-9 (open-struct design): a bare ``pl.Struct`` annotation
+    is "some struct, fields unknown" — ``Struct({}, open=True)`` instead
+    of ``Unknown``. The struct-ness is provable (probed: pandera's bare
+    ``pl.Struct`` validates any struct and rejects non-structs; ``.str``
+    on a struct column is a runtime SchemaError), so receiver checks
+    fire; field lookups get assumption semantics."""
+
+    _SCHEMA = """
+        import polars as pl
+        import pandera.polars as pa
+        from pandera.typing.polars import DataFrame
+
+        class WithMeta(pa.DataFrameModel):
+            id: int
+            meta: pl.Struct
+
+            class Config:
+                strict = True
+    """
+
+    def test_str_on_bare_struct_column_is_provable(self):
+        source = textwrap.dedent(
+            self._SCHEMA
+            + """
+        def f(df: DataFrame[WithMeta]) -> pl.DataFrame:
+            return df.select(pl.col("meta").str.to_uppercase())
+        """
+        )
+        results = analyze_source(source)
+        assert any("PLY012" in str(e) for e in results[0].errors), results[0].errors
+
+    def test_struct_field_on_open_struct_is_assumed(self):
+        source = textwrap.dedent(
+            self._SCHEMA
+            + """
+        def f(df: DataFrame[WithMeta]) -> pl.DataFrame:
+            return df.select(pl.col("meta").struct.field("city"))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == [], results[0].errors
+
+    def test_struct_field_typo_on_closed_struct_still_provable(self):
+        source = textwrap.dedent(
+            """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+
+            class WithAddr(pa.DataFrameModel):
+                addr: pl.Struct({"city": pl.Utf8})
+
+                class Config:
+                    strict = True
+
+            def f(df: DataFrame[WithAddr]) -> pl.DataFrame:
+                return df.select(pl.col("addr").struct.field("ctiy"))
+            """
+        )
+        results = analyze_source(source)
+        assert any("PLY001" in str(e) and "ctiy" in str(e) for e in results[0].errors), results[
+            0
+        ].errors
+
+    def test_unnest_of_open_struct_opens_the_frame(self):
+        source = textwrap.dedent(
+            self._SCHEMA
+            + """
+        def f(df: DataFrame[WithMeta]) -> pl.DataFrame:
+            return df.unnest("meta").select(pl.col("id"), pl.col("anything"))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == [], results[0].errors
+        inferred = results[0].inferred_return_type
+        assert inferred is not None
+        assert "anything" in inferred.columns
+
+    def test_rename_fields_on_open_struct_degrades(self):
+        source = textwrap.dedent(
+            self._SCHEMA
+            + """
+        def f(df: DataFrame[WithMeta]) -> pl.DataFrame:
+            return df.select(pl.col("meta").struct.rename_fields(["a"]))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == [], results[0].errors
+
+
+class TestOpenStructVerdict:
+    """Checker-side open-struct comparisons (mirrors Array-width / Enum-
+    category wildcards): overlapping pins compared, a pin missing from a
+    CLOSED other side is a provable mismatch, otherwise leniency."""
+
+    def test_open_inferred_vs_closed_declared_is_lenient(self):
+        from polypolarism.checker import _subtype_verdict
+        from polypolarism.types import Struct, Utf8
+
+        verdict = _subtype_verdict(Struct({}, open=True), Struct({"city": Utf8()}))
+        assert verdict.ok
+        assert verdict.reason is not None and "Struct" in verdict.reason
+
+    def test_overlapping_pin_conflict_is_provable(self):
+        from polypolarism.checker import _subtype_verdict
+        from polypolarism.types import Int64, Struct, Utf8
+
+        verdict = _subtype_verdict(Struct({"city": Int64()}, open=True), Struct({"city": Utf8()}))
+        assert not verdict.ok
+
+    def test_extra_pin_vs_closed_declared_is_provable(self):
+        # Struct dtypes are exact at runtime: an inferred struct provably
+        # carrying a field the closed declared struct lacks cannot match.
+        from polypolarism.checker import _subtype_verdict
+        from polypolarism.types import Int64, Struct, Utf8
+
+        verdict = _subtype_verdict(
+            Struct({"city": Utf8(), "zip": Int64()}, open=True), Struct({"city": Utf8()})
+        )
+        assert not verdict.ok
+
+    def test_closed_vs_closed_stays_exact(self):
+        from polypolarism.checker import _subtype_verdict
+        from polypolarism.types import Struct, Utf8
+
+        assert _subtype_verdict(Struct({"city": Utf8()}), Struct({"city": Utf8()})).ok
+        assert not _subtype_verdict(Struct({"city": Utf8()}), Struct({"town": Utf8()})).ok

@@ -1,0 +1,5 @@
+str_on_open_struct: FAIL
+  error: [PLY012] `.str` accessor requires a String column, but column 'meta' is Struct{...} — polars raises InvalidOperationError at runtime
+field_typo_on_closed_struct: FAIL
+  error: [PLY001] struct.field: 'ctiy' not found in Struct{city: Utf8}. Available fields: ['city']
+  warning: [PLW007] `.struct.field()` is not modeled by polypolarism — the result dtype degrades to Unknown and downstream dtype checks weaken. Pin the dtype with `.cast(...)` after the call, or validate the frame against a schema, to keep checking precise.

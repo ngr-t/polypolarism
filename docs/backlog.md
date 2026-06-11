@@ -101,9 +101,24 @@ Status legend: `[ ]` open / `[x]` done / `[-]` deliberately deferred.
 - [-] **C-8: `pivot()` output schema inference** — data-dependent,
   fundamentally not inferable; current PLW005 warning + user annotation
   is the accepted design.
-- [ ] **C-9: Stricter open-struct semantics** — bare `pl.Struct` means
-  "any fields"; field-name typos surface only at runtime. Tightening
-  trades false negatives for false positives.
+- [x] **C-9: Open-struct semantics** — Done 2026-06-12 (user-approved
+  design). The original framing ("tighten = close, trading FN for FP")
+  predated ADR-0006; the open-frame machinery enables the middle ground:
+  bare `pl.Struct` (and unreadable `pl.Struct(...)` constructions) parse
+  to `Struct({}, open=True)` instead of `Unknown` — the struct-ness is
+  provable (probed: pandera's bare declaration validates any struct and
+  rejects non-structs; `.str` on a struct is a runtime SchemaError), so
+  wrong-namespace accessors became proofs (PLY012), while field lookups
+  get ADR-0006 assumption semantics (`struct.field` pins Unknown,
+  `unnest` opens the frame with pinned fields registered). Checker
+  verdict mirrors Array-width/Enum-categories wildcards: overlapping
+  pins compared, a pin provably absent from a CLOSED other side fails
+  (struct dtypes are exact at runtime), otherwise leniency. Closed
+  structs keep exact field proofs (typo detection unchanged). The full
+  "checked island" tightening (require field declarations) remains
+  possible but unattractive — bare `pl.Struct` is chosen precisely to
+  avoid enumerating fields. Pair: `valid/open_struct` +
+  `invalid/open_struct_misuse`.
 - [-] **C-10: when/then mixed non-literal int branches degrade to Int32**
   (`expr_infer.py`, issue #40 area) — polars itself has no integer
   literal type; accepted leniency.

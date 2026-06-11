@@ -215,15 +215,17 @@ def _parse_plain_dtype(node: ast.expr) -> DataType | None:
                     return resolved
                 # Bare container forms carry no element/field information:
                 # ``pl.List`` / ``pl.Array`` hold elements of an unknown
-                # dtype; bare ``pl.Struct`` has no usable shape at all, so
-                # it parses to ``Unknown`` (NOT ``Struct({})``, which would
-                # mean "empty struct" and unnest to zero columns).
+                # dtype; bare ``pl.Struct`` is an OPEN struct (backlog C-9
+                # — "some struct, fields unknown"; probed: pandera
+                # validates any struct and rejects non-structs, so the
+                # struct-ness is claimable, while closed ``Struct({})``
+                # would wrongly mean "empty struct").
                 if node.attr == "List":
                     return List(Unknown())
                 if node.attr == "Array":
                     return Array(Unknown())
                 if node.attr == "Struct":
-                    return Unknown()
+                    return Struct(open=True)
                 return None
             # ``datetime.date`` / ``dt.datetime`` / ``datetime.timedelta``
             # — any non-``pl`` prefix is treated as the Python stdlib
@@ -283,18 +285,20 @@ def _parse_plain_dtype(node: ast.expr) -> DataType | None:
 def _parse_struct_call(node: ast.Call) -> DataType:
     """Parse ``pl.Struct({...})``.
 
-    A dict literal yields a ``Struct`` whose unparseable field values fall
-    back to ``Unknown``. Any other argument shape (``pl.Struct([pl.Field(...)])``,
-    a variable, no args) carries no statically-readable shape — ``Unknown``.
+    A dict literal yields a closed ``Struct`` whose unparseable field
+    values fall back to ``Unknown``. Any other argument shape
+    (``pl.Struct([pl.Field(...)])``, a variable, no args, ``**spread`` /
+    non-string keys) still provably constructs SOME struct — an OPEN
+    ``Struct`` with unknown fields (backlog C-9).
     """
     if not (node.args and isinstance(node.args[0], ast.Dict)):
-        return Unknown()
+        return Struct(open=True)
     mapping = node.args[0]
     fields: dict[str, DataType] = {}
     for k, v in zip(mapping.keys, mapping.values, strict=True):
         if not (isinstance(k, ast.Constant) and isinstance(k.value, str)):
             # ``**spread`` / non-string keys — no readable shape.
-            return Unknown()
+            return Struct(open=True)
         inner = _parse_plain_dtype(v)
         fields[k.value] = inner if inner is not None else Unknown()
     return Struct(fields)
@@ -348,7 +352,14 @@ def _parse_annotated(node: ast.expr) -> tuple[DataType, bool] | None:
         return List(inner_dtype), True
 
     if _is_pl_attr(head, "Struct"):
-        if not meta or not isinstance(meta[0], ast.Dict):
+        if not meta:
+            return None
+        if len(meta) == 1 and not isinstance(meta[0], ast.Dict):
+            # Correct arity but an unreadable field mapping (a variable,
+            # a list of pl.Field objects) — still provably SOME struct:
+            # an OPEN Struct (backlog C-9).
+            return Struct(open=True), True
+        if not isinstance(meta[0], ast.Dict):
             return None
         fields: dict[str, DataType] = {}
         for k, v in zip(meta[0].keys, meta[0].values, strict=True):

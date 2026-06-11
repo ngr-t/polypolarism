@@ -522,18 +522,35 @@ class Array(DataType):
 
 @dataclass(frozen=True, eq=False)
 class Struct(DataType):
-    """Struct type with named fields."""
+    """Struct type with named fields.
+
+    ``open=True`` is the row-polymorphic "some struct, fields beyond the
+    pinned ones unknown" (backlog C-9) — produced by a bare ``pl.Struct``
+    annotation or an unreadable ``pl.Struct(...)`` call. Probed (pandera
+    0.31.1): a bare ``pl.Struct`` declaration validates ANY struct and
+    rejects non-structs, so the struct-ness itself is provable (receiver
+    checks like ``.str``-on-struct fire) while field lookups get
+    ADR-0006 assumption semantics. Structural equality is exact
+    (``open`` participates); the wildcard treatment lives in the
+    checker's subtype verdict, mirroring ``Array.width`` /
+    ``Enum.categories``. NOT to be confused with the cast target
+    ``cast(pl.Struct)``, which polars materializes as the CLOSED empty
+    ``struct[0]`` (probed).
+    """
 
     fields: dict[str, DataType] = field(default_factory=dict)
+    open: bool = False
 
     def __eq__(self, other: object) -> bool:
-        return isinstance(other, Struct) and self.fields == other.fields
+        return isinstance(other, Struct) and self.fields == other.fields and self.open == other.open
 
     def __hash__(self) -> int:
-        return hash(("Struct", tuple(sorted(self.fields.items(), key=lambda x: x[0]))))
+        return hash(("Struct", tuple(sorted(self.fields.items(), key=lambda x: x[0])), self.open))
 
     def __str__(self) -> str:
         fields_str = ", ".join(f"{k}: {v}" for k, v in sorted(self.fields.items()))
+        if self.open:
+            return f"Struct{{{fields_str}, ...}}" if fields_str else "Struct{...}"
         return f"Struct{{{fields_str}}}"
 
 

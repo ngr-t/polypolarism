@@ -8,7 +8,16 @@ from typing import NamedTuple
 
 from polypolarism.analyzer import FunctionAnalysis, _cast_verdict, analyze_source
 from polypolarism.diagnostics import PLY040, tag
-from polypolarism.types import NUMERIC_DTYPES, Array, DataType, Enum, List, Nullable, Unknown
+from polypolarism.types import (
+    NUMERIC_DTYPES,
+    Array,
+    DataType,
+    Enum,
+    List,
+    Nullable,
+    Struct,
+    Unknown,
+)
 
 
 class TypeMismatch:
@@ -173,6 +182,30 @@ def _subtype_verdict(inferred: DataType, declared: DataType) -> Verdict:
                 return Verdict(True)  # both unknown — nothing to compare
             return Verdict(True, "passed via unknown Enum categories")
         return Verdict(inferred_base.categories == declared_base.categories)
+
+    # Struct fields are dtype identity at runtime (polars struct dtypes
+    # compare exactly). An OPEN side (backlog C-9 — bare ``pl.Struct`` /
+    # unreadable construction) is a wildcard over its UNKNOWN fields, but
+    # its pinned fields still prove: an overlapping-pin conflict fails,
+    # and a pin provably absent from a CLOSED other side fails (struct
+    # dtypes are exact, so a definite extra field cannot match).
+    if isinstance(inferred_base, Struct) and isinstance(declared_base, Struct):
+        if not inferred_base.open and not declared_base.open:
+            return Verdict(inferred_base.fields == declared_base.fields)
+        for name, inferred_field in inferred_base.fields.items():
+            declared_field = declared_base.fields.get(name)
+            if declared_field is None:
+                if not declared_base.open:
+                    return Verdict(False)
+                continue
+            field_verdict = _subtype_verdict(inferred_field, declared_field)
+            if not field_verdict.ok:
+                return Verdict(False)
+        if not inferred_base.open:
+            for name in declared_base.fields:
+                if name not in inferred_base.fields:
+                    return Verdict(False)
+        return Verdict(True, "passed via open Struct fields")
 
     # List / Array containers: compare element types with the same rules so
     # the Unknown leniency reaches nested dtypes. Array vs List falls

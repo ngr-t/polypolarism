@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Open structs (backlog C-9): a bare `pl.Struct` annotation (and
+  unreadable `pl.Struct(...)` constructions) now parses to an OPEN
+  `Struct` — "some struct, fields unknown" — instead of `Unknown`.
+  The struct-ness is provable (probed: pandera's bare declaration
+  validates any struct and rejects non-structs), so `.str`/`.cat`/`.arr`
+  on such a column became PLY012 proofs that were previously silent;
+  field lookups get assumption semantics (`struct.field` pins Unknown,
+  `unnest` opens the frame with the pinned fields registered, and
+  Annotated `pl.Struct` forms with unreadable mappings keep their
+  struct-ness). The checker compares overlapping pinned fields, fails a
+  pin provably absent from a closed other side (struct dtypes are exact
+  at runtime), and records "passed via open Struct fields" leniency
+  otherwise; closed structs keep their exact field-typo proofs.
+
 - Pandera object-API schemas (backlog C-11, tiers 1-2): module-level
   `NAME = pa.DataFrameSchema({"a": pa.Column(int)}, strict=..., coerce=...)`
   assignments register like class schemas keyed by the variable name —
