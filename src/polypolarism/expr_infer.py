@@ -35,6 +35,9 @@ from polypolarism.types import (
 from polypolarism.types import (
     List as ListT,
 )
+from polypolarism.types import (
+    unwrap_nullable as _unwrap_nullable,
+)
 
 
 class ColumnNotFoundError(Exception):
@@ -55,8 +58,11 @@ class TypeUnificationError(Exception):
     pass
 
 
-# Type hierarchy for numeric type promotion
-# Higher number = wider type
+# Type hierarchy for numeric type promotion (higher number = wider type).
+# Deliberately a SUBSET of ``types.NUMERIC_DTYPES``: ``promote_types`` only
+# models these four widths; callers needing the other widths go through the
+# probed ``supertype`` lattice instead (``analyzer._numeric_arith`` degrades
+# explicitly when an operand falls outside this dict).
 _NUMERIC_TYPE_ORDER: dict[type, int] = {
     Int32: 1,
     Int64: 2,
@@ -119,13 +125,6 @@ def infer_lit(value: Any) -> DataType:
         return Binary()
     # For unsupported types, we could raise an error or return a generic type
     raise TypeError(f"Unsupported literal type: {type(value).__name__}")
-
-
-def _unwrap_nullable(dtype: DataType) -> tuple[DataType, bool]:
-    """Unwrap a Nullable type and return (inner_type, is_nullable)."""
-    if isinstance(dtype, Nullable):
-        return dtype.inner, True
-    return dtype, False
 
 
 def _is_numeric(dtype: DataType) -> bool:

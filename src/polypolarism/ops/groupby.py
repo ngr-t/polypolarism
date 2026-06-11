@@ -19,6 +19,12 @@ from polypolarism.types import (
     UInt64,
     Unknown,
 )
+from polypolarism.types import (
+    unwrap_nullable as _unwrap_nullable,
+)
+from polypolarism.types import (
+    wrap_nullable as _wrap_nullable,
+)
 
 
 class GroupByTypeError(Exception):
@@ -74,7 +80,11 @@ class AggExpr:
         return self.alias if self.alias is not None else self.column
 
 
-# Type sets for validation
+# Receiver dtypes accepted by numeric aggregations (sum/mean/std/...).
+# Deliberately a SUBSET of ``types.NUMERIC_DTYPES``: only these widths have
+# probed aggregation signatures (e.g. polars upcasts ``sum(Int8)`` to Int64,
+# which ``_infer_sum``'s type-preserving rule would get wrong). Widening this
+# tuple requires probing the small-int/Float16/128-bit signatures first.
 NUMERIC_TYPES = (Int64, Int32, UInt32, UInt64, Float64, Float32)
 
 
@@ -82,20 +92,6 @@ def _is_numeric(dtype: DataType) -> bool:
     """Check if a type is numeric (considering Nullable wrapper)."""
     inner = dtype.inner if isinstance(dtype, Nullable) else dtype
     return isinstance(inner, NUMERIC_TYPES)
-
-
-def _unwrap_nullable(dtype: DataType) -> tuple[DataType, bool]:
-    """Unwrap Nullable and return (inner_type, is_nullable)."""
-    if isinstance(dtype, Nullable):
-        return dtype.inner, True
-    return dtype, False
-
-
-def _wrap_nullable(dtype: DataType, is_nullable: bool) -> DataType:
-    """Wrap type in Nullable if needed."""
-    if is_nullable:
-        return Nullable(dtype)
-    return dtype
 
 
 # Aggregation function type signatures

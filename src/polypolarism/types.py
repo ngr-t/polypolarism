@@ -436,6 +436,20 @@ class Nullable(DataType):
         return f"{self.inner}?"
 
 
+def unwrap_nullable(dtype: DataType) -> tuple[DataType, bool]:
+    """Unwrap one Nullable layer and return ``(inner_type, was_nullable)``."""
+    if isinstance(dtype, Nullable):
+        return dtype.inner, True
+    return dtype, False
+
+
+def wrap_nullable(dtype: DataType, is_nullable: bool) -> DataType:
+    """Wrap ``dtype`` in Nullable when ``is_nullable`` is true."""
+    if is_nullable:
+        return Nullable(dtype)
+    return dtype
+
+
 @dataclass(frozen=True)
 class List(DataType):
     """List type containing elements of a single type."""

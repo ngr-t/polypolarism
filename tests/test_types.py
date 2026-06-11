@@ -19,6 +19,8 @@ from polypolarism.types import (
     Time,
     Unknown,
     Utf8,
+    unwrap_nullable,
+    wrap_nullable,
 )
 
 
@@ -243,6 +245,31 @@ class TestFrameType:
         coercing = FrameType({"id": Int64()}, coerce=True)
         plain = FrameType({"id": Int64()})
         assert coercing == plain
+
+
+class TestNullableHelpers:
+    """Shared unwrap/wrap helpers for the Nullable wrapper (backlog A-2)."""
+
+    def test_unwrap_nullable_on_nullable(self):
+        assert unwrap_nullable(Nullable(Int64())) == (Int64(), True)
+
+    def test_unwrap_nullable_on_plain(self):
+        assert unwrap_nullable(Int64()) == (Int64(), False)
+
+    def test_unwrap_nullable_does_not_recurse(self):
+        # Nested Nullable should not occur, but unwrap only one layer.
+        assert unwrap_nullable(Nullable(Nullable(Utf8()))) == (Nullable(Utf8()), True)
+
+    def test_wrap_nullable_true(self):
+        assert wrap_nullable(Int64(), True) == Nullable(Int64())
+
+    def test_wrap_nullable_false(self):
+        assert wrap_nullable(Int64(), False) == Int64()
+
+    def test_wrap_unwrap_roundtrip(self):
+        for dtype in (Int64(), Nullable(Utf8())):
+            inner, is_nullable = unwrap_nullable(dtype)
+            assert wrap_nullable(inner, is_nullable) == dtype
 
 
 class TestDataTypeStr:
