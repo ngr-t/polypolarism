@@ -1,1 +1,3 @@
 counts_by_country: OK
+  via: column 'n': UInt32 -> Int64 via coerce
+  via: column 'unique_amounts': UInt32 -> Int64 via coerce

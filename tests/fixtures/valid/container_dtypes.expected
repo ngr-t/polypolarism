@@ -1,3 +1,4 @@
 explode_lines: OK
+  via: column 'qty': not provably absent (open frame)
 explode_vals: OK
 array_total: OK
