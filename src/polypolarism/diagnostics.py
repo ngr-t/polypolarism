@@ -53,6 +53,7 @@ PLW004 = "PLW004"  # lambda / inline callable used where its return dtype is unk
 PLW005 = "PLW005"  # pivot result schema is data-dependent; user should annotate
 PLW006 = "PLW006"  # DataFrame[X] / LazyFrame[X] annotation references an unknown schema
 PLW007 = "PLW007"  # method not modeled by the analyzer; result dtype degrades to Unknown
+PLW008 = "PLW008"  # variable annotation contradicts the inferred RHS schema (ADR-0005)
 
 # Environment / version
 PLW010 = "PLW010"  # detected polars or pandera version below polypolarism's supported floor

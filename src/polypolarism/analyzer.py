@@ -44,6 +44,7 @@ from polypolarism.diagnostics import (
     PLW005,
     PLW006,
     PLW007,
+    PLW008,
     PLY001,
     PLY002,
     PLY003,
@@ -3981,11 +3982,18 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             frame_type, _ = _resolve_declared_type(node.annotation, self.schema_registry)
             if frame_type is not None:
                 self.var_types[var_name] = frame_type
-                # Still walk the RHS so warnings (e.g. PLW005 from pivot) and
-                # column-resolution errors surface even though the declared
-                # annotation wins for the variable's static type.
+                # Walk the RHS so expression-level warnings (e.g. PLW005
+                # from pivot) and column-resolution errors surface, and
+                # check the annotation against the inferred frame
+                # (ADR-0005). The annotation wins for the variable's
+                # static type either way — one clear diagnostic at the
+                # assignment, no downstream cascade.
                 if node.value:
-                    self._infer_expr_type(node.value)
+                    inferred = self._infer_expr_type(node.value)
+                    if inferred is not None:
+                        self._check_annotation_against_inferred(
+                            node.annotation, frame_type, inferred
+                        )
                 return
             # Fall back to inference from value
             if node.value:
@@ -4003,6 +4011,73 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     if const_val is not None:
                         self.var_consts[var_name] = const_val
         self.generic_visit(node)
+
+    def _check_annotation_against_inferred(
+        self,
+        annotation: ast.expr,
+        declared: FrameType,
+        inferred: FrameType,
+    ) -> None:
+        """ADR-0005: surface a provable contradiction between a variable
+        annotation and the inferred RHS schema (PLW008, warn-only phase).
+
+        The comparison reuses the checker's verdict engine, so every
+        leniency rule (Unknown compatibility, open-frame skips, ``coerce``)
+        applies — a pivot/Unknown RHS never contradicts its annotation.
+        """
+        # Function-level import: checker imports analyzer at module level
+        # (check_source -> analyze_source), so the reverse import must be
+        # deferred to call time to avoid the cycle.
+        from polypolarism.checker import _is_coercible_difference, _subtype_verdict
+
+        contradictions: list[str] = []
+        if declared.is_lazy != inferred.is_lazy:
+            declared_kind = "LazyFrame" if declared.is_lazy else "DataFrame"
+            inferred_kind = "LazyFrame" if inferred.is_lazy else "DataFrame"
+            contradictions.append(
+                f"annotation declares {declared_kind} but the expression is {inferred_kind}"
+            )
+        for col_name, declared_spec in declared.columns.items():
+            inferred_spec = inferred.columns.get(col_name)
+            if inferred_spec is None:
+                if declared_spec.required and inferred.rest is None:
+                    contradictions.append(
+                        f"column '{col_name}' ({declared_spec.dtype}) is provably "
+                        f"absent from the inferred frame"
+                    )
+                continue
+            if declared_spec.required and not inferred_spec.required:
+                contradictions.append(
+                    f"column '{col_name}': declared always-present but inferred optional"
+                )
+                continue
+            verdict = _subtype_verdict(inferred_spec.dtype, declared_spec.dtype)
+            if verdict.ok:
+                continue
+            if declared.coerce and _is_coercible_difference(
+                inferred_spec.dtype, declared_spec.dtype
+            ):
+                continue
+            contradictions.append(
+                f"column '{col_name}': declared {declared_spec.dtype} but "
+                f"inferred {inferred_spec.dtype}"
+            )
+        if declared.strict:
+            for col_name, inferred_spec in inferred.columns.items():
+                if col_name not in declared.columns:
+                    contradictions.append(
+                        f"extra column '{col_name}' ({inferred_spec.dtype}) "
+                        f"contradicts the strict annotation"
+                    )
+        if contradictions:
+            self.warnings.append(
+                tag(
+                    PLW008,
+                    f"annotation `{ast.unparse(annotation)}` contradicts the "
+                    "inferred schema: " + "; ".join(contradictions) + ". Fix the "
+                    "annotation, or narrow at runtime with `Schema.validate(...)`.",
+                )
+            )
 
     def _infer_expr_type(self, node: ast.expr) -> FrameType | None:
         """Infer the FrameType of an expression."""

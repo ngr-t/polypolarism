@@ -477,6 +477,7 @@ Warning codes:
 | `PLW005` | `pivot()` output schema is data-dependent; bind to a `DataFrame[Schema]` variable |
 | `PLW006` | `DataFrame[X]` / `LazyFrame[X]` annotation references a schema the analyzer cannot resolve |
 | `PLW007` | method not modeled by polypolarism — the result dtype degrades to `Unknown`; pin it with `.cast(...)` or a schema validation (a `.cast(...)` directly after the call retracts the warning) |
+| `PLW008` | a variable annotation contradicts the inferred RHS schema (ADR-0005); fix the annotation or narrow at runtime with `Schema.validate(...)` |
 | `PLW010` | detected polars / pandera version is below the supported floor (see [Supported versions](#supported-versions)) |
 
 JSON output (`--format json`) emits warnings as `severity: "warning"`

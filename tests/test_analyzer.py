@@ -11344,3 +11344,121 @@ class TestUnmodeledMethodWarning:
         # warning emitted for the receiver chain is retracted.
         result = self._frame('df.select(pl.col("a").peak_max().cast(pl.Int64))')
         assert not any("PLW007" in w for w in result.warnings), result.warnings
+
+
+class TestAnnotatedAssignmentChecking:
+    """ADR-0005: ``x: DataFrame[A] = expr`` is checked against the inferred
+    RHS. Phase 1 (案1): every provable contradiction warns PLW008; the
+    annotation still wins for the variable's downstream type."""
+
+    HEADER = textwrap.dedent(
+        PANDERA_HEADER
+        + """
+            class In(pa.DataFrameModel):
+                v: int
+                s: str
+
+            class Halved(pa.DataFrameModel):
+                v: int
+                half: float
+
+            class WrongDtype(pa.DataFrameModel):
+                v: int
+                half: str
+
+            class NarrowNonNull(pa.DataFrameModel):
+                v: int
+                m: int
+        """
+    )
+
+    def _result(self, body: str):
+        source = self.HEADER + textwrap.dedent(
+            f"""
+            def f(df: DataFrame[In]) -> DataFrame[In]:
+{textwrap.indent(textwrap.dedent(body), "                ")}
+            """
+        )
+        results = analyze_source(source)
+        return results[0]
+
+    def test_matching_annotation_is_silent(self):
+        result = self._result(
+            """
+            x: DataFrame[Halved] = df.select("v", half=pl.col("v") / 2)
+            return df
+            """
+        )
+        assert not any("PLW008" in w for w in result.warnings), result.warnings
+
+    def test_unrelated_dtype_contradiction_warns(self):
+        # half infers Float64; WrongDtype declares str.
+        result = self._result(
+            """
+            x: DataFrame[WrongDtype] = df.select("v", half=pl.col("v") / 2)
+            return df
+            """
+        )
+        plw = [w for w in result.warnings if "PLW008" in w]
+        assert plw, result.warnings
+        assert "half" in plw[0]
+
+    def test_narrowing_assertion_warns_in_phase1(self):
+        # Left-join shape: m infers Int64? (nullable); annotation asserts
+        # non-null Int64 — a narrowing assertion, warned in phase 1.
+        source = self.HEADER + textwrap.dedent(
+            """
+            class Other(pa.DataFrameModel):
+                v: int
+                m: int
+
+            def f(df: DataFrame[In], other: DataFrame[Other]) -> DataFrame[In]:
+                x: DataFrame[NarrowNonNull] = df.join(other, on="v", how="left").select("v", "m")
+                return df
+            """
+        )
+        results = analyze_source(source)
+        assert any("PLW008" in w for w in results[0].warnings), results[0].warnings
+
+    def test_unknown_inference_stays_silent(self):
+        # peak_max degrades to Unknown — Unknown-leniency must keep the
+        # annotation non-contradictory (the PLW005 pivot workflow shape).
+        result = self._result(
+            """
+            x: DataFrame[NarrowNonNull] = df.select("v", m=pl.col("v").peak_max())
+            return df
+            """
+        )
+        assert not any("PLW008" in w for w in result.warnings), result.warnings
+
+    def test_annotation_still_wins_downstream(self):
+        # After the (warned) contradiction, downstream typing follows the
+        # annotation: selecting 'half' as str-typed must not error.
+        result = self._result(
+            """
+            x: DataFrame[WrongDtype] = df.select("v", half=pl.col("v") / 2)
+            return df.select("v", "s")
+            """
+        )
+        assert result.errors == [], result.errors
+
+    def test_provably_absent_column_warns(self):
+        # Halved declares 'half' but the RHS provably lacks it (closed frame).
+        result = self._result(
+            """
+            x: DataFrame[Halved] = df.select("v")
+            return df
+            """
+        )
+        assert any("PLW008" in w for w in result.warnings), result.warnings
+
+    def test_laziness_mismatch_warns(self):
+        result = self._result(
+            """
+            x: DataFrame[Halved] = df.lazy().select("v", half=pl.col("v") / 2)
+            return df
+            """
+        )
+        plw = [w for w in result.warnings if "PLW008" in w]
+        assert plw, result.warnings
+        assert "Lazy" in plw[0]
