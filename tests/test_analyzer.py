@@ -14446,8 +14446,7 @@ class TestGroupedAllNullTemporalAggs:
         assert any("PLY011" in str(e) for e in results[0].errors), results[0].errors
 
 
-class TestValidateNullabilityNotProof(  # issue #92
-):
+class TestValidateNullabilityNotProof:  # issue #92
     """Issue #92: pandera's nullable check is VALUE-based — a
     Nullable-typed column with no actual nulls passes a non-nullable
     schema. Validating a post-join nullable into a non-null schema is
