@@ -3396,7 +3396,9 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                     return receiver_name, Nullable(widened)
             return receiver_name, Nullable(inner)
 
-        # Rolling reductions returning Float64. Rows whose window holds
+        # Rolling reductions returning Float64 — except a Float32 receiver,
+        # which keeps Float32 (probed 1.41.2; backlog N-2 — Float16 is NOT
+        # width-preserved: it widens to Float64). Rows whose window holds
         # fewer than ``min_samples`` (default: window_size) values are null
         # (probed 1.41.2; issue #57), so the result is Nullable unless the
         # call provably fills every window (see _rolling_min_samples_total).
@@ -3408,6 +3410,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         # min_samples=1).
         if method in self._ROLLING_FLOAT_METHODS and receiver_type is not None:
             inner = receiver_type.inner if isinstance(receiver_type, Nullable) else receiver_type
+            rolling_float: DataType = Float32() if isinstance(inner, Float32) else Float64()
             total = _rolling_min_samples_total(method, node)
             if method in ("rolling_std", "rolling_var"):
                 total = total and _rolling_ddof_zero(node)
@@ -3416,8 +3419,8 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 and not isinstance(receiver_type, Nullable)
                 and not isinstance(inner, (Utf8, Null))
             ):
-                return receiver_name, Float64()
-            return receiver_name, Nullable(Float64())
+                return receiver_name, rolling_float
+            return receiver_name, Nullable(rolling_float)
 
         # Dtype-carrying rolling reducers (rolling_sum/min/max): strictly
         # typed receivers — the probed matrix on
@@ -3557,13 +3560,16 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             # non-empty input (probed 1.41.2: singleton group -> 0.0), so
             # the Nullable wrap from ``infer_agg_result_type`` is undone;
             # the receiver's own nullability still propagates (an all-null
-            # window stays null even with ddof=0).
+            # window stays null even with ddof=0). The inferred width
+            # (Float64, or Float32 for a Float32 receiver — backlog N-2)
+            # is kept as-is.
             if (
                 method in ("std", "var")
                 and _stdvar_ddof_zero(node)
-                and result_type == Nullable(Float64())
+                and isinstance(result_type, Nullable)
+                and isinstance(result_type.inner, (Float32, Float64))
             ):
-                result_type = _wrap_like(receiver_type, Float64())
+                result_type = _wrap_like(receiver_type, result_type.inner)
             return receiver_name, result_type
 
         # ``cast(pl.<dtype>)`` chained directly on column. A structurally
