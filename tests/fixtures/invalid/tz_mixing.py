@@ -7,6 +7,9 @@ Probed on polars 1.41.2:
 - ``aware - naive`` raises SchemaError ("failed to determine supertype
   of datetime[μs, UTC] and datetime[μs]") -> PLY009.
 - Comparing two different time zones raises SchemaError too -> PLY009.
+- ``str.to_datetime`` with an offset directive in the format (here the
+  ``%:z`` variant) yields ``Datetime[UTC]``, never a naive Datetime —
+  false-negative twin of ``valid/tz_same_ops`` (the ``parse`` function).
 """
 
 import pandera.polars as pa
@@ -46,3 +49,15 @@ def elapsed(df: DataFrame[Mixed]) -> DataFrame[Span]:
 
 def compare_zones(df: DataFrame[Mixed]) -> DataFrame[Flag]:
     return df.select(same=pl.col("b") == pl.col("c"))
+
+
+class Raw(pa.DataFrameModel):
+    stamp: str
+
+
+class ParsedNaive(pa.DataFrameModel):
+    stamp: pl.Datetime  # WRONG: an offset directive in the format yields Datetime[UTC]
+
+
+def parse_offset(df: DataFrame[Raw]) -> DataFrame[ParsedNaive]:
+    return df.with_columns(pl.col("stamp").str.to_datetime("%Y-%m-%dT%H:%M:%S%:z"))

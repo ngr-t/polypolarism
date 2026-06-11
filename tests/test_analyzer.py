@@ -10619,14 +10619,37 @@ class TestTzAwareDtypeOutputs:
             ("pl.col('s').str.to_datetime(time_zone='UTC')", Datetime(tz="UTC")),
             ("pl.col('s').str.to_datetime('%Y-%m-%dT%H:%M:%S%z')", Datetime(tz="UTC")),
             ("pl.col('s').str.to_datetime(format='%Y-%m-%dT%H:%M:%S%z')", Datetime(tz="UTC")),
-            ("pl.col('s').str.to_datetime(fmtvar)", Unknown()),
-            ("pl.col('s').str.to_datetime(time_zone=tzvar)", Unknown()),
+            # Every chrono offset-directive variant resolves the dtype
+            # to Datetime[UTC] — probed (polars 1.41.2), including %#z
+            # and the colon forms.
+            ("pl.col('s').str.to_datetime('%Y-%m-%dT%H:%M:%S%:z')", Datetime(tz="UTC")),
+            ("pl.col('s').str.to_datetime('%Y-%m-%dT%H:%M:%S%::z')", Datetime(tz="UTC")),
+            ("pl.col('s').str.to_datetime('%Y-%m-%dT%H:%M:%S%:::z')", Datetime(tz="UTC")),
+            ("pl.col('s').str.to_datetime('%Y-%m-%dT%H:%M:%S%#z')", Datetime(tz="UTC")),
         ],
     )
     def test_tz_setting_method_output(self, expr: str, expected) -> None:
         analyzer = _run_body(self._frame(), f"out = df.select(r={expr})")
         assert analyzer.errors == [], analyzer.errors
         assert analyzer.var_types["out"].columns["r"].dtype == expected
+
+    # upgrade trigger: types.py Datetime gains a tz wildcard ("aware,
+    # tz statically unknown") — a non-literal format/time_zone always
+    # yields a Datetime, but with which tz cannot be known statically
+    # and Datetime equality/subtyping is exact on tz, so claiming any
+    # concrete tz (or naive) would be wrong.
+    @pytest.mark.imprecision
+    @pytest.mark.parametrize(
+        "expr",
+        [
+            "pl.col('s').str.to_datetime(fmtvar)",
+            "pl.col('s').str.to_datetime(time_zone=tzvar)",
+        ],
+    )
+    def test_to_datetime_non_literal_args_degrade_to_unknown(self, expr: str) -> None:
+        analyzer = _run_body(self._frame(), f"out = df.select(r={expr})")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["r"].dtype == Unknown()
 
     def test_nullable_receiver_keeps_wrapper(self) -> None:
         analyzer = _run_body(

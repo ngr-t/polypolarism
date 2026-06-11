@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1194,14 +1195,26 @@ def _time_zone_arg_dtype(method: str, call_node: ast.Call | None) -> DataType:
     return Unknown()
 
 
+# chrono offset directives: %z, %:z, %::z, %:::z, %#z. Probed (polars
+# 1.41.2): a format literal containing ANY of them resolves the dtype to
+# Datetime[UTC] — even when row-level parsing later fails (the error
+# message names `datetime[μs, UTC]` as the target). Polars' own dtype
+# resolution is substring-level: the escaped ``%%z`` also resolves to
+# UTC (probed), so a plain scan — not an escape-aware one — is faithful.
+_TZ_DIRECTIVE_RE = re.compile(r"%(?::{0,3}|#)z")
+
+
 def _str_to_datetime_dtype(call_node: ast.Call | None) -> DataType:
     """Result dtype of ``str.to_datetime(...)`` (issue #50 collateral).
 
     Probed (polars 1.41.2): no tz-affecting arguments -> naive Datetime;
     ``time_zone="X"`` (string literal) -> ``Datetime[X]``; a format literal
-    containing ``%z`` -> ``Datetime[UTC]``. A non-literal ``time_zone`` /
-    format (and the unprobed ``%:z`` / ``%#z`` directives) degrade to
-    Unknown rather than claiming naive.
+    containing an offset directive (``%z`` and its ``%:z`` / ``%::z`` /
+    ``%:::z`` / ``%#z`` variants) -> ``Datetime[UTC]``. A non-literal
+    ``time_zone`` / format degrades to Unknown: the result is always SOME
+    Datetime, but ``types.Datetime`` equality/subtyping is exact on tz and
+    has no "aware, tz unknown" wildcard, so claiming naive (or any
+    concrete tz) would be a guess.
     """
     if call_node is not None:
         for kw in call_node.keywords:
@@ -1218,10 +1231,8 @@ def _str_to_datetime_dtype(call_node: ast.Call | None) -> DataType:
     fmt = _str_constant(fmt_node)
     if fmt is None:
         return Unknown()
-    if "%z" in fmt:
+    if _TZ_DIRECTIVE_RE.search(fmt):
         return Datetime(tz="UTC")
-    if "%:z" in fmt or "%#z" in fmt:
-        return Unknown()
     return Datetime()
 
 

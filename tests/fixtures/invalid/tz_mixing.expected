@@ -6,3 +6,5 @@ elapsed: FAIL
   via: column 'span': passed via Unknown
 compare_zones: FAIL
   error: [PLY009] comparison 'Datetime[UTC] == Datetime[Asia/Tokyo]' is not supported — polars rejects comparing these dtypes at runtime; cast an operand first
+parse_offset: FAIL
+  error: Column 'stamp' has type Datetime[UTC], but declared type is Datetime
