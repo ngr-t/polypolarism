@@ -1,0 +1,2 @@
+process: FAIL
+  error: Column 'doubled' has type Int64, but declared type is Utf8
