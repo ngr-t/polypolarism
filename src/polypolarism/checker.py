@@ -157,7 +157,21 @@ def _subtype_verdict(inferred: DataType, declared: DataType) -> Verdict:
     if isinstance(inferred_base, List) and isinstance(declared_base, List):
         return _subtype_verdict(inferred_base.inner, declared_base.inner)
     if isinstance(inferred_base, Array) and isinstance(declared_base, Array):
-        return _subtype_verdict(inferred_base.inner, declared_base.inner)
+        if (
+            inferred_base.width is not None
+            and declared_base.width is not None
+            and inferred_base.width != declared_base.width
+        ):
+            # Probed (backlog C-7): pandera rejects an Array width mismatch
+            # and coerce cannot repair it ("cannot cast Array to a
+            # different width").
+            return Verdict(False)
+        verdict = _subtype_verdict(inferred_base.inner, declared_base.inner)
+        if verdict.ok and verdict.reason is None and inferred_base.width != declared_base.width:
+            # One side's width is statically unknown — surface the leniency
+            # like the Unknown rule (ADR-0003 visibility).
+            return Verdict(True, "passed via unknown Array width")
+        return verdict
 
     # Non-nullable is subtype of nullable with same base type
     if isinstance(declared, Nullable) and not isinstance(inferred, Nullable):
@@ -209,6 +223,16 @@ def _is_coercible_difference(inferred: DataType, declared: DataType) -> bool:
     inferred_base = _get_base_type(inferred)
     declared_base = _get_base_type(declared)
     if isinstance(inferred_base, (List, Array)) and isinstance(declared_base, (List, Array)):
+        if (
+            isinstance(inferred_base, Array)
+            and isinstance(declared_base, Array)
+            and inferred_base.width is not None
+            and declared_base.width is not None
+            and inferred_base.width != declared_base.width
+        ):
+            # Probed (backlog C-7): coerce's underlying cast raises
+            # "cannot cast Array to a different width".
+            return False
         if isinstance(inferred_base, Array) or isinstance(declared_base, Array):
             return True
         return _is_coercible_difference(inferred_base.inner, declared_base.inner)

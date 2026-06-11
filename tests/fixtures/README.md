@@ -80,6 +80,7 @@ Rules with both sides present (valid twin -> invalid twin):
 | str/dt/list namespaces | `m3_*_namespace` | `namespace_wrong_dtype`, `m3_str_method_missing_column`, `str_to_decimal_wrong_scale` |
 | bin / cat namespaces | `bin_namespace`, `cat_namespace` | `bin_on_int`, `cat_on_int` |
 | Array vs List | `array_dtype` | `arr_list_mismatch` |
+| Array width (C-7) | `array_dtype` (widths flow through) | `array_width_mismatch` |
 | arr.eval as_list container | `array_dtype` (`eval_array`) | `arr_eval_as_list_declared_array` |
 | explode / concat / unpivot | `m4_*` | `m4_explode_non_list`, `m4_concat_mismatch`, `unpivot_incompatible_values` |
 | struct field building | `struct_kwarg_fields`, `m9_struct_and_unnest` | `struct_field_wrong_dtype`, `m9_unnest_non_struct` |

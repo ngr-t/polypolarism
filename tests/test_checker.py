@@ -8,6 +8,7 @@ from polypolarism.checker import (
     MissingColumn,
     TypeDifference,
     _is_coercible_difference,
+    _subtype_verdict,
     check_function,
     check_source,
 )
@@ -3225,3 +3226,43 @@ class TestIssue56NameNamespaceEndToEnd:
         assert len(results) == 1
         assert results[0].passed is True, results[0].errors
         assert any("PLW004" in str(w) for w in results[0].warnings), results[0].warnings
+
+
+class TestArrayWidthVerdict:
+    """Array width participates in the subtype verdict (backlog C-7).
+
+    Probed (polars 1.41.2): pandera rejects a width mismatch (coerce
+    cannot repair it — the underlying cast raises "cannot cast Array to a
+    different width"), so two known-but-different widths fail; an unknown
+    width on either side passes leniently (ADR-0003 visibility).
+    """
+
+    def test_same_width_passes_precisely(self):
+        verdict = _subtype_verdict(Array(Int64(), 3), Array(Int64(), 3))
+        assert verdict.ok and verdict.reason is None
+
+    def test_width_mismatch_fails(self):
+        assert not _subtype_verdict(Array(Int64(), 3), Array(Int64(), 5)).ok
+        assert not _subtype_verdict(Array(Int64(), 5), Array(Int64(), 3)).ok
+
+    def test_unknown_inferred_width_passes_with_leniency_note(self):
+        verdict = _subtype_verdict(Array(Int64()), Array(Int64(), 3))
+        assert verdict.ok
+        assert verdict.reason is not None and "width" in verdict.reason
+
+    def test_unknown_declared_width_passes_with_leniency_note(self):
+        verdict = _subtype_verdict(Array(Int64(), 3), Array(Int64()))
+        assert verdict.ok
+        assert verdict.reason is not None and "width" in verdict.reason
+
+    def test_inner_mismatch_still_fails_regardless_of_width(self):
+        assert not _subtype_verdict(Array(Int64(), 3), Array(Utf8(), 3)).ok
+
+    def test_coerce_cannot_fix_width_mismatch(self):
+        assert _is_coercible_difference(Array(Int64(), 5), Array(Int64(), 3)) is False
+
+    def test_coerce_still_tolerates_container_kind_difference(self):
+        # issue #53 policy unchanged: List <-> Array kind differences stay
+        # coerce-tolerated (the List->Array cast is value-dependent).
+        assert _is_coercible_difference(ListType(Int64()), Array(Int64(), 3)) is True
+        assert _is_coercible_difference(Array(Int64(), 3), ListType(Int64())) is True

@@ -8301,7 +8301,7 @@ class TestNamespaceReceiverDtype:
         err = results[0].errors[0]
         assert "PLY012" in err
         assert "a List column" in err
-        assert "Array[Int64]" in err
+        assert "Array[Int64, 3]" in err
 
     def test_cat_message_names_schema_error(self):
         # Probed: `.cat` on a wrong dtype raises SchemaError, not
@@ -8409,10 +8409,10 @@ class TestArrNamespaceReturns:
             ('pl.col("q").arr.unique()', ListT(Int64())),
             ('pl.col("q").arr.head(2)', ListT(Int64())),
             ('pl.col("q").arr.to_list()', ListT(Int64())),
-            # Array-preserving
-            ('pl.col("q").arr.sort()', Array(Int64())),
-            ('pl.col("q").arr.reverse()', Array(Int64())),
-            ('pl.col("q").arr.shift()', Array(Int64())),
+            # Array-preserving (width kept — backlog C-7)
+            ('pl.col("q").arr.sort()', Array(Int64(), 3)),
+            ('pl.col("q").arr.reverse()', Array(Int64(), 3)),
+            ('pl.col("q").arr.shift()', Array(Int64(), 3)),
             # Float aggregations: Int64 -> Float64, Float32 keeps Float32
             ('pl.col("q").arr.mean()', Float64()),
             ('pl.col("q").arr.median()', Float64()),
@@ -8422,9 +8422,9 @@ class TestArrNamespaceReturns:
             ('pl.col("f").arr.sum()', Float32()),
             # sum widens narrow ints to Int64 (probed overflow guard)
             ('pl.col("w").arr.sum()', Int64()),
-            # arr.eval keeps the Array container around the body dtype
-            ('pl.col("q").arr.eval(pl.element() * 2)', Array(Int64())),
-            ('pl.col("q").arr.eval(pl.element().cast(pl.Utf8))', Array(Utf8())),
+            # arr.eval keeps the Array container (and width — C-7)
+            ('pl.col("q").arr.eval(pl.element() * 2)', Array(Int64(), 3)),
+            ('pl.col("q").arr.eval(pl.element().cast(pl.Utf8))', Array(Utf8(), 3)),
             # as_list=True de-arrays into List around the body dtype —
             # probed (polars 1.41.2; the arg landed in 1.41, issue #53):
             # List(body dtype) for dtype-changing, aggregating AND
@@ -8432,7 +8432,7 @@ class TestArrNamespaceReturns:
             # the Array container (same as omitted).
             ('pl.col("q").arr.eval(pl.element() * 2, as_list=True)', ListT(Int64())),
             ('pl.col("q").arr.eval(pl.element().cast(pl.Utf8), as_list=True)', ListT(Utf8())),
-            ('pl.col("q").arr.eval(pl.element() * 2, as_list=False)', Array(Int64())),
+            ('pl.col("q").arr.eval(pl.element() * 2, as_list=False)', Array(Int64(), 3)),
             # Unrecognised method falls through to Unknown (silent)
             ('pl.col("q").arr.to_struct()', Unknown()),
         ],
@@ -9607,12 +9607,12 @@ class TestArrayCastDtypes:
             ("pl.col('q').cast(pl.List(pl.Utf8))", ListT(Utf8())),
             ("pl.col('qd').cast(pl.List(pl.Duration))", ListT(Duration())),
             # List -> Array is width/value-dependent — silent
-            ("pl.col('li').cast(pl.Array(pl.Int64, 3))", Array(Int64())),
+            ("pl.col('li').cast(pl.Array(pl.Int64, 3))", Array(Int64(), 3)),
             # Array -> Array with a castable element pair
-            ("pl.col('q').cast(pl.Array(pl.Float64, 3))", Array(Float64())),
-            ("pl.col('q').cast(pl.Array(pl.Date, 3))", Array(Date())),
+            ("pl.col('q').cast(pl.Array(pl.Float64, 3))", Array(Float64(), 3)),
+            ("pl.col('q').cast(pl.Array(pl.Date, 3))", Array(Date(), 3)),
             # Unknown element on either side stays silent
-            ("pl.col('qu').cast(pl.Array(pl.Int64, 3))", Array(Int64())),
+            ("pl.col('qu').cast(pl.Array(pl.Int64, 3))", Array(Int64(), 3)),
         ],
     )
     def test_allowed_array_cast_infers_target(self, expr: str, expected) -> None:
@@ -10593,13 +10593,13 @@ class TestResolvePlDtypeArray:
         return _resolve_pl_dtype(_ast.parse(src, mode="eval").body)
 
     def test_call_form_with_width(self):
-        assert self._resolve("pl.Array(pl.Int64, 3)") == Array(Int64())
+        assert self._resolve("pl.Array(pl.Int64, 3)") == Array(Int64(), 3)
 
     def test_call_form_nested_list_element(self):
-        assert self._resolve("pl.Array(pl.List(pl.Utf8), 2)") == Array(ListT(Utf8()))
+        assert self._resolve("pl.Array(pl.List(pl.Utf8), 2)") == Array(ListT(Utf8()), 2)
 
     def test_unresolvable_element_degrades_to_array_unknown(self):
-        assert self._resolve("pl.Array(some_var, 3)") == Array(Unknown())
+        assert self._resolve("pl.Array(some_var, 3)") == Array(Unknown(), 3)
 
     def test_bare_attribute_is_unresolved(self):
         # Consistent with bare ``pl.List``: a bare container reference in a
@@ -10607,7 +10607,7 @@ class TestResolvePlDtypeArray:
         assert self._resolve("pl.Array") is None
 
     def test_list_of_array(self):
-        assert self._resolve("pl.List(pl.Array(pl.Int64, 3))") == ListT(Array(Int64()))
+        assert self._resolve("pl.List(pl.Array(pl.Int64, 3))") == ListT(Array(Int64(), 3))
 
     def test_cast_target_array(self):
         # End-to-end: casting a List column to ``pl.Array(...)`` (valid at
@@ -10617,7 +10617,7 @@ class TestResolvePlDtypeArray:
             frame, 'out = df.with_columns(pl.col("v").cast(pl.Array(pl.Int64, 3)))'
         )
         assert analyzer.errors == [], analyzer.errors
-        assert analyzer.var_types["out"].columns["v"].dtype == Array(Int64())
+        assert analyzer.var_types["out"].columns["v"].dtype == Array(Int64(), 3)
 
     def test_frame_literal_schema_array(self):
         frame = FrameType({"id": Int64()})
@@ -10626,7 +10626,7 @@ class TestResolvePlDtypeArray:
             'out = pl.DataFrame({"q": [[1, 2]]}, schema={"q": pl.Array(pl.Int64, 2)})',
         )
         assert analyzer.errors == [], analyzer.errors
-        assert analyzer.var_types["out"].columns["q"].dtype == Array(Int64())
+        assert analyzer.var_types["out"].columns["q"].dtype == Array(Int64(), 2)
 
 
 class TestTzMismatchedDatetimeOps:
@@ -11732,3 +11732,35 @@ class TestRollingFloat32Width:
             'pl.col("v").rolling_mean(window_size=3).alias("m")',
         )
         assert ft.columns["m"].dtype == Nullable(Float64())
+
+
+class TestArrayWidthCast:
+    """Casting an Array to a different width is PLY013 (backlog C-7).
+
+    Probed (polars 1.41.2): "cannot cast Array to a different width" raises
+    in both strict modes; the element-only cast at the SAME width works.
+    """
+
+    def _frame(self) -> FrameType:
+        return FrameType({"q": Array(Int64(), 3)})
+
+    def test_width_change_cast_flags_ply013(self):
+        analyzer = _run_body(
+            self._frame(), 'out = df.select(r=pl.col("q").cast(pl.Array(pl.Int64, 5)))'
+        )
+        assert any("PLY013" in e for e in analyzer.errors), analyzer.errors
+
+    def test_same_width_element_cast_passes(self):
+        analyzer = _run_body(
+            self._frame(), 'out = df.select(r=pl.col("q").cast(pl.Array(pl.Float64, 3)))'
+        )
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["r"].dtype == Array(Float64(), 3)
+
+    def test_unknown_width_cast_stays_silent(self):
+        # A width the parser could not resolve is a wildcard — no error.
+        analyzer = _run_body(
+            FrameType({"q": Array(Int64())}),
+            'out = df.select(r=pl.col("q").cast(pl.Array(pl.Int64, 5)))',
+        )
+        assert analyzer.errors == [], analyzer.errors

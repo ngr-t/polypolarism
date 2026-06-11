@@ -84,8 +84,11 @@ Use Pandera class-based schemas. Field annotations accept Python builtins
 `Annotated[pl.List, pl.Int64()]` / `Annotated[pl.Array, pl.Int64(), 3]` /
 `Annotated[pl.Struct, {...}]` (or the equivalent `pl.List(...)` /
 `pl.Array(...)` / `pl.Struct(...)` call forms) for nested types. `List`
-and `Array` are distinct dtypes — polars does not interchange them — but
-the `Array` width is not tracked.
+and `Array` are distinct dtypes — polars does not interchange them — and
+the `Array` width is tracked: a declared `pl.Array(pl.Int64, 3)` against
+an inferred width 5 is an error (pandera rejects the mismatch and
+`coerce` cannot repair it). A width the analyzer cannot resolve acts as
+a wildcard.
 
 ```python
 class Example(pa.DataFrameModel):
@@ -265,8 +268,9 @@ literal expressions, `pl.col(...)` references, arithmetic, and
 `Decimal(precision, scale)` (polars 1.35+ stabilized — precision and
 scale are preserved, so `Decimal(20, 4)` and `Decimal(20, 2)` are
 distinct types), `List(inner)` and `Array(inner, width)` (the width is
-not tracked — `Array` is a distinct dtype from `List` but two `Array`s
-of the same element type compare equal regardless of width).
+tracked — `Array` is a distinct dtype from `List`, two `Array`s with
+different known widths are distinct types, and a width the analyzer
+cannot resolve compares as a wildcard).
 
 ### Expression predicates and narrowing
 

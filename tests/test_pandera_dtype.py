@@ -324,9 +324,10 @@ class TestAnnotatedList:
         assert _parse("Annotated[pl.List, pl.Utf8()]") == ColumnSpec(List(Utf8()), required=True)
 
     def test_annotated_array_is_array(self):
-        # Issue #53: Array is a real dtype now; the width is still ignored.
+        # Issue #53 / backlog C-7: Array is a real dtype and the width is
+        # tracked.
         assert _parse("Annotated[pl.Array, pl.Int64(), 3]") == ColumnSpec(
-            Array(Int64()), required=True
+            Array(Int64(), 3), required=True
         )
 
 
@@ -465,20 +466,35 @@ class TestContainerCallForms:
         )
 
     def test_pl_array_with_width(self):
-        """Issue #53: ``pl.Array(...)`` parses to Array; the width is ignored."""
-        assert _parse("pl.Array(pl.Int64, 4)") == ColumnSpec(Array(Int64()), required=True)
+        """Issue #53 / backlog C-7: ``pl.Array(...)`` tracks its width."""
+        assert _parse("pl.Array(pl.Int64, 4)") == ColumnSpec(Array(Int64(), 4), required=True)
+
+    def test_pl_array_shape_keyword(self):
+        assert _parse("pl.Array(pl.Int64, shape=4)") == ColumnSpec(Array(Int64(), 4), required=True)
+
+    def test_pl_array_shape_one_tuple(self):
+        assert _parse("pl.Array(pl.Int64, (4,))") == ColumnSpec(Array(Int64(), 4), required=True)
+
+    def test_pl_array_multidim_shape_width_unknown(self):
+        # Multi-dimensional shapes are out of the 1-D width model.
+        assert _parse("pl.Array(pl.Int64, (2, 3))") == ColumnSpec(Array(Int64()), required=True)
+
+    def test_pl_array_non_literal_width_unknown(self):
+        assert _parse("pl.Array(pl.Int64, n)") == ColumnSpec(Array(Int64()), required=True)
 
     def test_pl_array_nested_in_list(self):
         assert _parse("pl.List(pl.Array(pl.Int64, 4))") == ColumnSpec(
-            List(Array(Int64())), required=True
+            List(Array(Int64(), 4)), required=True
         )
 
     def test_pl_array_unparseable_element_is_unknown(self):
-        assert _parse("pl.Array(some_variable, 4)") == ColumnSpec(Array(Unknown()), required=True)
+        assert _parse("pl.Array(some_variable, 4)") == ColumnSpec(
+            Array(Unknown(), 4), required=True
+        )
 
     def test_pl_array_nullable_field(self):
         assert _parse("pl.Array(pl.Int64, 4)", "pa.Field(nullable=True)") == ColumnSpec(
-            Nullable(Array(Int64())), required=True
+            Nullable(Array(Int64(), 4)), required=True
         )
 
     def test_pl_struct_dict_literal(self):

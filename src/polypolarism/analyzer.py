@@ -33,6 +33,7 @@ from polypolarism.compat.polars_api import (
     agg_function_for,
     canonicalize_method,
     container_agg_return,
+    parse_array_shape,
     parse_datetime_call,
     parse_decimal_call,
 )
@@ -196,11 +197,11 @@ def _resolve_pl_dtype(node: ast.expr) -> DataType | None:
             if node.func.attr == "List" and node.args:
                 element = _resolve_pl_dtype(node.args[0])
                 return ListT(element if element is not None else Unknown())
-            # ``pl.Array(pl.Int64, 3)`` — same recursion; the width argument
-            # is not modeled (issue #53, "width ignored").
+            # ``pl.Array(pl.Int64, 3)`` — same recursion; the width is
+            # tracked (backlog C-7), non-literal/multi-dim shapes -> None.
             if node.func.attr == "Array" and node.args:
                 element = _resolve_pl_dtype(node.args[0])
-                return Array(element if element is not None else Unknown())
+                return Array(element if element is not None else Unknown(), parse_array_shape(node))
             # ``pl.Decimal(p, s)`` preserves precision/scale (issue #38);
             # omitted args take polars' defaults. Non-literal args are
             # unknowable — return unresolved (None) rather than fabricating
@@ -930,6 +931,16 @@ def _cast_verdict(source_inner: DataType, target_inner: DataType) -> CastVerdict
         return "value-dependent"
     if (scat == "list" and tcat == "list") or (scat == "array" and tcat == "array"):
         assert isinstance(source_inner, (ListT, Array)) and isinstance(target_inner, (ListT, Array))
+        if (
+            isinstance(source_inner, Array)
+            and isinstance(target_inner, Array)
+            and source_inner.width is not None
+            and target_inner.width is not None
+            and source_inner.width != target_inner.width
+        ):
+            # Probed (polars 1.41.2, backlog C-7): "cannot cast Array to a
+            # different width" raises in both strict modes.
+            return "never"
         source_elem = source_inner.inner
         target_elem = target_inner.inner
         if isinstance(source_elem, Nullable):
@@ -2769,11 +2780,15 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                     else None
                 )
                 if as_list_node is None:
-                    result = Array(element)
+                    result = Array(element, receiver_inner.width)
                 elif isinstance(as_list_node, ast.Constant) and isinstance(
                     as_list_node.value, bool
                 ):
-                    result = ListT(element) if as_list_node.value else Array(element)
+                    result = (
+                        ListT(element)
+                        if as_list_node.value
+                        else Array(element, receiver_inner.width)
+                    )
                 else:
                     result = Unknown()
             elif method in ARR_NAMESPACE_PRESERVING and receiver_inner is not None:

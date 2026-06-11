@@ -475,23 +475,29 @@ class Array(DataType):
     requires a List receiver, casts behave differently, and pandera
     validation rejects one where the other is declared.
 
-    The fixed size (width) is deliberately NOT tracked, consistent with the
-    schema parser ("width ignored"): two ``Array`` dtypes with the same
-    element type compare equal regardless of their runtime widths, so
-    width-mismatch errors (e.g. concatenating ``Array(Int64, 2)`` with
-    ``Array(Int64, 3)``) are out of scope and never flagged.
+    The fixed size is tracked in ``width`` (backlog C-7). Probed (polars
+    1.41.2): widths are part of dtype identity — pandera validation
+    rejects a width mismatch (coerce cannot repair it: the underlying cast
+    raises "cannot cast Array to a different width"), and ``concat``
+    raises on mixed widths. ``width=None`` means "statically unknown";
+    structural equality is exact (``None != 3``) and the wildcard
+    treatment of unknown widths lives in the checker's subtype verdict,
+    mirroring how ``Unknown`` is handled.
     """
 
     inner: DataType
+    width: int | None = None
 
     def __eq__(self, other: object) -> bool:
-        return isinstance(other, Array) and self.inner == other.inner
+        return isinstance(other, Array) and self.inner == other.inner and self.width == other.width
 
     def __hash__(self) -> int:
-        return hash(("Array", self.inner))
+        return hash(("Array", self.inner, self.width))
 
     def __str__(self) -> str:
-        return f"Array[{self.inner}]"
+        if self.width is None:
+            return f"Array[{self.inner}]"
+        return f"Array[{self.inner}, {self.width}]"
 
 
 @dataclass(frozen=True, eq=False)

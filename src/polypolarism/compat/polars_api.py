@@ -141,6 +141,41 @@ def parse_decimal_call(node: ast.Call) -> Decimal | None:
     return Decimal(precision, scale)
 
 
+def parse_int_shape(node: ast.expr) -> int | None:
+    """An int literal, or a 1-tuple of one, as an Array width (backlog C-7).
+
+    Multi-dimensional tuples and non-literal expressions are statically
+    unknowable -> ``None`` (the checker treats an unknown width as a
+    wildcard).
+    """
+    if isinstance(node, ast.Constant) and type(node.value) is int:
+        return node.value
+    if isinstance(node, ast.Tuple) and len(node.elts) == 1:
+        elt = node.elts[0]
+        if isinstance(elt, ast.Constant) and type(elt.value) is int:
+            return elt.value
+    return None
+
+
+def parse_array_shape(node: ast.Call) -> int | None:
+    """Width of a ``pl.Array(inner, shape)`` call (backlog C-7).
+
+    Shared by the analyzer (``cast`` targets) and ``pandera_dtype``
+    (schema field annotations). The shape is the second positional
+    argument or the ``shape=`` keyword; see :func:`parse_int_shape` for
+    the accepted literal forms.
+    """
+    arg: ast.expr | None = node.args[1] if len(node.args) > 1 else None
+    if arg is None:
+        for kw in node.keywords:
+            if kw.arg == "shape":
+                arg = kw.value
+                break
+    if arg is None:
+        return None
+    return parse_int_shape(arg)
+
+
 def parse_datetime_call(node: ast.Call) -> Datetime | None:
     """Parse a ``pl.Datetime(...)`` call form into a ``Datetime`` dtype.
 

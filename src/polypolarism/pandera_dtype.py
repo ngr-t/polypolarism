@@ -8,10 +8,10 @@ Recognised annotation shapes:
   ``pandera.typing.polars.Series``) are accepted.
 - ``Optional[T]`` and ``T | None`` -> ``required=False``
 - ``Annotated[pl.List, pl.Int64()]`` -> ``List(Int64())``
-- ``Annotated[pl.Array, pl.Int64(), 3]`` -> ``Array(Int64())`` (width ignored)
+- ``Annotated[pl.Array, pl.Int64(), 3]`` -> ``Array(Int64(), 3)`` (width tracked; C-7)
 - ``Annotated[pl.Struct, {"a": pl.Utf8(), "b": pl.Float64()}]`` -> ``Struct({...})``
 - Call-form containers: ``pl.List(pl.Int64)`` -> ``List(Int64())``,
-  ``pl.Array(pl.Int64, 4)`` -> ``Array(Int64())`` (width ignored; issue #53),
+  ``pl.Array(pl.Int64, 4)`` -> ``Array(Int64(), 4)`` (width tracked; C-7),
   ``pl.Struct({"a": pl.Utf8})`` -> ``Struct({...})``. Unparseable element /
   field dtypes fall back to ``Unknown()``.
 - Bare containers: ``pl.List`` -> ``List(Unknown())``; ``pl.Array`` ->
@@ -29,7 +29,13 @@ from __future__ import annotations
 import ast
 
 from polypolarism.compat.pandera_api import FIELD_CALLABLE_NAME
-from polypolarism.compat.polars_api import DTYPE_NAME_MAP, parse_datetime_call, parse_decimal_call
+from polypolarism.compat.polars_api import (
+    DTYPE_NAME_MAP,
+    parse_array_shape,
+    parse_datetime_call,
+    parse_decimal_call,
+    parse_int_shape,
+)
 from polypolarism.types import (
     Array,
     Binary,
@@ -166,14 +172,14 @@ def _parse_plain_dtype(node: ast.expr) -> DataType | None:
 
     if isinstance(node, ast.Call):
         # Call-form containers: ``pl.List(pl.Int64)``, ``pl.Array(pl.Int64, 4)``
-        # (width ignored, consistent with the Annotated handling), and
-        # ``pl.Struct({"a": pl.Utf8, ...})``.
+        # (width tracked — backlog C-7; consistent with the Annotated
+        # handling), and ``pl.Struct({"a": pl.Utf8, ...})``.
         if _is_pl_attr(node.func, "List"):
             inner = _parse_plain_dtype(node.args[0]) if node.args else None
             return List(inner if inner is not None else Unknown())
         if _is_pl_attr(node.func, "Array"):
             inner = _parse_plain_dtype(node.args[0]) if node.args else None
-            return Array(inner if inner is not None else Unknown())
+            return Array(inner if inner is not None else Unknown(), parse_array_shape(node))
         if _is_pl_attr(node.func, "Struct"):
             return _parse_struct_call(node)
         # ``pl.Decimal(precision, scale)`` preserves its arguments (shared
@@ -258,7 +264,8 @@ def _parse_annotated(node: ast.expr) -> tuple[DataType, bool] | None:
         if inner_dtype is None:
             return None
         if _is_pl_attr(head, "Array"):
-            return Array(inner_dtype), True
+            width = parse_int_shape(meta[1]) if len(meta) > 1 else None
+            return Array(inner_dtype, width), True
         return List(inner_dtype), True
 
     if _is_pl_attr(head, "Struct"):

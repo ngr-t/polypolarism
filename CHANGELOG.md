@@ -58,6 +58,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `Array` widths are now tracked (closing the issue #53 "width ignored"
+  gap): `pl.Array(pl.Int64, 3)` declared against an inferred width 5 is
+  an error (probed: pandera rejects the mismatch and coerce cannot
+  repair it), width-changing casts flag `PLY013` ("cannot cast Array to
+  a different width" raises in both strict modes), and the `.arr`
+  namespace preserves the receiver's width. A width the analyzer cannot
+  resolve (non-literal or multi-dimensional `shape=`) acts as a wildcard
+  with a `via:` leniency note.
 - Float32 width preservation (probed on polars 1.41.2): the float-family
   reductions (`mean`/`std`/`var`/`median`/`quantile`) keep Float32 on a
   Float32 receiver in rolling, select and `group_by().agg()` contexts,

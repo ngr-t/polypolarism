@@ -83,9 +83,14 @@ Status legend: `[ ]` open / `[x]` done / `[-]` deliberately deferred.
 
 ## C. Long-term (design decisions required)
 
-- [ ] **C-7: Array width tracking** — `Array[Int64, 3]` vs `Array[Int64, 5]`
-  compare equal (`types.py`). Needs Decimal-style parametrization; low
-  user impact, high cost.
+- [x] **C-7: Array width tracking** — Done 2026-06-11. `Array` carries
+  `width: int | None`; widths parse from annotations/cast targets
+  (`shape=` keyword, 1-tuples; multi-dim/non-literal → None wildcard).
+  Probed (1.41.2): pandera rejects width mismatches (coerce cannot
+  repair), width-change casts raise in both strict modes (PLY013), arr
+  namespace + arr.eval preserve the receiver width. Unknown widths pass
+  with a "via: unknown Array width" leniency note. Fixture pair:
+  `invalid/array_width_mismatch` + existing `valid/array_dtype`.
 - [-] **C-8: `pivot()` output schema inference** — data-dependent,
   fundamentally not inferable; current PLW005 warning + user annotation
   is the accepted design.

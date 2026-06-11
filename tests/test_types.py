@@ -119,7 +119,7 @@ class TestListType:
 
 
 class TestArrayType:
-    """Test Array type (issue #53: distinct from List, width not tracked)."""
+    """Test Array type (issue #53: distinct from List; C-7: width tracked)."""
 
     def test_array_of_int64(self):
         array_type = Array(Int64())
@@ -291,3 +291,34 @@ class TestDataTypeStr:
         assert "Struct{" in s_str
         assert "a: Int64" in s_str
         assert "b: Utf8" in s_str
+
+
+class TestArrayWidth:
+    """Array tracks its fixed width (backlog C-7, closes the issue #53 gap).
+
+    Probed (polars 1.41.2): widths are part of dtype identity — pandera
+    validation rejects a width mismatch (with or without coerce), concat
+    raises, and cast cannot change an Array's width. ``width=None`` means
+    "width statically unknown" and compares like a wildcard ONLY in the
+    checker's verdict (not in structural equality).
+    """
+
+    def test_same_width_equal(self):
+        assert Array(Int64(), 3) == Array(Int64(), 3)
+
+    def test_different_width_not_equal(self):
+        assert Array(Int64(), 3) != Array(Int64(), 5)
+
+    def test_unknown_width_not_structurally_equal_to_known(self):
+        assert Array(Int64(), None) != Array(Int64(), 3)
+        assert Array(Int64()) == Array(Int64(), None)
+
+    def test_hash_consistent(self):
+        assert hash(Array(Int64(), 3)) == hash(Array(Int64(), 3))
+        assert hash(Array(Int64(), 3)) != hash(Array(Int64(), 5))
+
+    def test_str_includes_width_when_known(self):
+        assert str(Array(Int64(), 3)) == "Array[Int64, 3]"
+
+    def test_str_omits_unknown_width(self):
+        assert str(Array(Int64())) == "Array[Int64]"
