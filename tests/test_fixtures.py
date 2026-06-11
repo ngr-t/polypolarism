@@ -76,9 +76,7 @@ def test_render_report_includes_leniency_notes() -> None:
         CheckResult(function_name="precise_fn", passed=True),
     ]
     report = render_report(results)
-    assert report == (
-        "lenient_fn: OK\n  via: column 'a': passed via Unknown\nprecise_fn: OK\n"
-    )
+    assert report == ("lenient_fn: OK\n  via: column 'a': passed via Unknown\nprecise_fn: OK\n")
 
 
 def _discover() -> list:
