@@ -2938,6 +2938,37 @@ class TestRollingStrictDtypes:
         assert analyzer.errors == [], analyzer.errors
         assert analyzer.var_types["out"].columns["c"].dtype == Nullable(Int64())
 
+    @pytest.mark.parametrize(
+        ("method", "receiver", "expected"),
+        [
+            ("rolling_sum", Int64(), Int64()),
+            ("rolling_sum", Int8(), Int64()),  # overflow-guard upcast survives
+            ("rolling_min", Float32(), Float32()),
+            ("rolling_max", Date(), Date()),
+        ],
+        ids=lambda p: str(p),
+    )
+    def test_non_literal_window_preserves_dtype_family(self, method, receiver, expected):
+        # Backlog B-5 regression pin: an unresolvable ``window_size`` only
+        # loses nullability precision (Nullable is the sound upper bound,
+        # T <: Nullable[T]); the dtype family stays determined by
+        # (method, receiver dtype) — probed (polars 1.41.2): rolling_sum
+        # dtype is identical across window_size/min_samples combinations.
+        # It must NOT degrade to Nullable[Float64] (pre-issue-#57 behavior).
+        analyzer = self._run(receiver, method, "(n)")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["c"].dtype == Nullable(expected)
+
+    def test_literal_min_samples_one_with_non_literal_window_total(self):
+        # Probed (polars 1.41.2): min_samples=1 fills every window for any
+        # accepted window_size (window_size=0 is an expanding window with 0
+        # nulls; negative raises OverflowError before producing a frame),
+        # so a literal min_samples<=1 is total even when window_size is
+        # unresolvable.
+        analyzer = self._run(Int64(), "rolling_sum", "(window_size=n, min_samples=1)")
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["c"].dtype == Int64()
+
     def test_rolling_sum_unknown_receiver_stays_silent(self):
         analyzer = self._run(Unknown(), "rolling_sum")
         assert analyzer.errors == [], analyzer.errors
