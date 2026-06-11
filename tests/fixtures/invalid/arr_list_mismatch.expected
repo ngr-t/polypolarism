@@ -1,0 +1,4 @@
+arr_on_list: FAIL
+  error: [PLY012] `.arr` accessor requires an Array column, but column 'xs' is List[Int64] — polars raises InvalidOperationError at runtime
+list_on_array: FAIL
+  error: [PLY012] `.list` accessor requires a List column, but column 'q' is Array[Int64] — polars raises InvalidOperationError at runtime

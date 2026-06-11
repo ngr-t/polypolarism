@@ -651,6 +651,100 @@ class TestCheckSource:
         assert results[0].passed is True
 
 
+class TestArrayCatEndToEnd:
+    """End-to-end ``check_source`` runs for the issue #53 / #54 repros."""
+
+    HEADER = textwrap.dedent("""
+        import polars as pl
+        import pandera.polars as pa
+        from pandera.typing.polars import DataFrame
+
+        class In(pa.DataFrameModel):
+            a: int
+            xs: pl.List(pl.Int64) = pa.Field()
+            q: pl.Array(pl.Int64, 3) = pa.Field()
+            c: pl.Categorical
+
+        class Out(pa.DataFrameModel):
+            r: int
+
+            class Config:
+                coerce = True
+    """)
+
+    def _check(self, body: str):
+        source = self.HEADER + textwrap.dedent(f"""
+            def f(df: DataFrame[In]) -> DataFrame[Out]:
+                return df.select(r={body})
+        """)
+        results = check_source(source)
+        assert len(results) == 1
+        return results[0]
+
+    def test_arr_on_list_fails_ply012(self):
+        result = self._check('pl.col("xs").arr.sum()')
+        assert result.passed is False
+        assert any("PLY012" in str(e) for e in result.errors)
+
+    def test_list_on_array_fails_ply012(self):
+        result = self._check('pl.col("q").list.sum()')
+        assert result.passed is False
+        assert any("PLY012" in str(e) for e in result.errors)
+
+    def test_arr_sum_on_array_passes(self):
+        # ``.arr.sum()`` on Array(Int64) -> Int64 satisfies the declared
+        # ``int`` column (coerce on the Out schema is irrelevant here —
+        # the dtypes match exactly).
+        assert self._check('pl.col("q").arr.sum()').passed is True
+
+    def test_list_sum_on_list_passes(self):
+        assert self._check('pl.col("xs").list.sum()').passed is True
+
+    def test_cat_on_int_fails_ply012(self):
+        result = self._check('pl.col("a").cat.get_categories()')
+        assert result.passed is False
+        assert any("PLY012" in str(e) and "SchemaError" in str(e) for e in result.errors)
+
+    def test_cat_on_categorical_passes(self):
+        source = self.HEADER + textwrap.dedent("""
+            class CatsOut(pa.DataFrameModel):
+                cats: str
+
+            def f(df: DataFrame[In]) -> DataFrame[CatsOut]:
+                return df.select(cats=pl.col("c").cat.get_categories())
+        """)
+        results = check_source(source)
+        assert results[0].passed is True, results[0].errors
+
+    def test_declared_array_inferred_list_fails_without_coerce(self):
+        source = self.HEADER + textwrap.dedent("""
+            class ArrOut(pa.DataFrameModel):
+                q: pl.Array(pl.Int64, 3) = pa.Field()
+
+            def f(df: DataFrame[In]) -> DataFrame[ArrOut]:
+                return df.select(q=pl.col("xs"))
+        """)
+        results = check_source(source)
+        assert results[0].passed is False
+        assert any(isinstance(e, TypeDifference) for e in results[0].errors)
+
+    def test_declared_array_inferred_list_passes_with_coerce(self):
+        # Probed: pandera Config.coerce casts the List column into the
+        # declared Array (succeeds whenever the widths line up).
+        source = self.HEADER + textwrap.dedent("""
+            class ArrOut(pa.DataFrameModel):
+                q: pl.Array(pl.Int64, 3) = pa.Field()
+
+                class Config:
+                    coerce = True
+
+            def f(df: DataFrame[In]) -> DataFrame[ArrOut]:
+                return df.select(q=pl.col("xs"))
+        """)
+        results = check_source(source)
+        assert results[0].passed is True, results[0].errors
+
+
 class TestCoerceEndToEnd:
     """Issue #9 repro: pl.len() (UInt32) vs declared int under Config.coerce."""
 
