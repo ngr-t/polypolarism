@@ -113,7 +113,13 @@ Status legend: `[ ]` open / `[x]` done / `[-]` deliberately deferred.
 - [ ] **D-11: VS Code extension feature gaps** (vscode-polypolarism,
   v0.1.0 preview) — QuickFix / hover / rename not implemented; bundled
   install path broken (works only with `importStrategy:
-  "fromEnvironment"`).
+  "fromEnvironment"`). 2026-06-11 catch-up sync done (LSP `code` +
+  README-anchor links, multi-file attribution, parse-failure tolerance,
+  real LSP e2e test). Remaining infra note: `npm test`'s
+  `@vscode/test-electron` runner (`out/test/runTest.js`) was never
+  instantiated from the template — a VS Code-side integration harness
+  needs building before extension-host behavior is testable headlessly;
+  E2E coverage currently lives at the pygls LSP layer.
 - [ ] **D-12: PyPI publication** — `publish.yml` is complete (build +
   Trusted Publishing via OIDC, `pypi` environment, v-tag or manual
   dispatch). The remaining steps are owner actions, not code:
