@@ -8,6 +8,7 @@ from polypolarism.types import (
     Binary,
     Boolean,
     Categorical,
+    ColumnSpec,
     DataType,
     Date,
     Datetime,
@@ -123,6 +124,12 @@ def infer_col(column_name: str, frame: FrameType) -> DataType:
                     f"helpers",
                     code="PLY042",
                 )
+            # Backward narrowing (ADR-0006 amendment): the lookup is
+            # assumed to succeed, so the column provably exists on every
+            # execution that reaches the NEXT statement — pin it into the
+            # frame (object identity carries the knowledge forward, e.g.
+            # to strict-extra proofs at later call sites).
+            frame.columns[column_name] = ColumnSpec(dtype=Unknown())
             return Unknown()
         if frame.nonstrict_schema is not None:
             # Checked-island semantics (issue #83): the non-strict schema

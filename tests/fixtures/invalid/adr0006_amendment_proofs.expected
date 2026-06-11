@@ -1,0 +1,7 @@
+strict_helper: OK
+backward_narrowed_extra: FAIL
+  error: Argument 'df' has extra column 'region' (Unknown) but the parameter schema is strict
+lazy_returned_as_bare_dataframe: FAIL
+  error: [PLY032] Return type annotated bare pl.DataFrame but inferred LazyFrame[...]; .collect() before returning.
+empty_constructor_is_exact: FAIL
+  error: [PLY001] Column 'a' not found. Available columns: []

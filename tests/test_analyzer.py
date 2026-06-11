@@ -8363,9 +8363,12 @@ class TestFrameLiteralInference:
         ft = self._infer('pl.DataFrame({"a": [1], "b": [2]}, schema_overrides={"a": pl.Int8})')
         assert ft == FrameType({"a": Int8(), "b": Int64()})
 
-    def test_opaque_data_without_schema_is_uninferable(self):
+    def test_opaque_data_without_schema_is_open(self):
+        # ADR-0006 amendment: ``pl.DataFrame(some_var)`` provably builds
+        # SOME frame — an open one, not an untracked None.
         ft = self._infer("pl.DataFrame(some_rows)")
-        assert ft is None
+        assert ft is not None
+        assert ft.columns == {} and ft.rest is not None
 
     def test_lazyframe_literal_is_lazy(self):
         ft = self._infer('pl.LazyFrame({"a": [1]})')
@@ -12701,7 +12704,10 @@ class TestOpenFrameSources:
         analysis = results[0]
         assert analysis.errors == [], analysis.errors
         param = analysis.input_types["df"]
-        assert param.columns == {} and param.rest is not None
+        # Backward narrowing (ADR-0006 amendment): the body's assumed
+        # lookup of 'x' pins it into the open param frame.
+        assert param.rest is not None
+        assert set(param.columns) <= {"x"}
         assert param.is_lazy is False
         inferred = analysis.inferred_return_type
         assert inferred is not None and inferred.rest is not None
@@ -14517,3 +14523,190 @@ class TestValidateNullabilityNotProof:  # issue #92
         results = analyze_source(source)
         errors = [str(e) for e in results[0].errors]
         assert any("validate" in e and "Utf8" in e for e in errors), errors
+
+
+class TestBackwardNarrowing:
+    """ADR-0006 future-work: an assumption lookup on an open frame pins
+    the column INTO the frame (object identity carries it forward) — if
+    line N's ``select("a")`` succeeded, ``df`` provably has ``a`` for
+    every later statement, making downstream strict-extra and
+    extra-column proofs real."""
+
+    def test_assumed_lookup_pins_for_strict_param_proof(self):
+        source = textwrap.dedent(
+            """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+
+            class StrictPrice(pa.DataFrameModel):
+                price: float
+
+                class Config:
+                    strict = True
+                    coerce = True
+
+            def helper(df: DataFrame[StrictPrice]) -> DataFrame[StrictPrice]:
+                return df.filter(pl.col("price") > 0)
+
+            def f(df: pl.DataFrame) -> pl.DataFrame:
+                checked = df.filter(pl.col("region") != "x")  # region assumed -> pinned
+                return helper(checked)  # region provably present -> strict extra
+            """
+        )
+        results = analyze_source(source)
+        target = [r for r in results if r.name == "f"]
+        assert any("extra column" in str(e) and "region" in str(e) for e in target[0].errors), (
+            target[0].errors
+        )
+
+    def test_pin_survives_via_object_identity_alias(self):
+        source = textwrap.dedent(
+            """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+
+            class Out(pa.DataFrameModel):
+                total: float
+
+                class Config:
+                    strict = True
+                    coerce = True
+
+            def f(df: pl.DataFrame) -> DataFrame[Out]:
+                df2 = df.filter(pl.col("extra").is_not_null())  # pins 'extra'
+                return df2.select(total=pl.col("amount").cast(pl.Float64))
+            """
+        )
+        # select closes the frame to {total} — the pin doesn't leak into
+        # the shape-determined output.
+        results = analyze_source(source)
+        target = [r for r in results if r.name == "f"]
+        assert target[0].errors == [], target[0].errors
+
+    def test_no_pinning_on_island_frames(self):
+        # Island lookups error (PLY042) — nothing is assumed, so nothing
+        # pins; the frame's declared shape stays authoritative.
+        source = textwrap.dedent(
+            """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+
+            class Loose(pa.DataFrameModel):
+                a: int
+
+            def f(df: DataFrame[Loose]) -> pl.DataFrame:
+                return df.filter(pl.col("ghost") > 0)
+            """
+        )
+        results = analyze_source(source)
+        assert any("PLY042" in str(e) for e in results[0].errors), results[0].errors
+
+
+class TestFrameConstructorOpenFallback:
+    """ADR-0006 future-work: ``pl.DataFrame(some_var)`` provably builds a
+    frame — an OPEN one (untracked lost all downstream checking), while
+    the no-args constructor is the provably EMPTY frame."""
+
+    def test_non_literal_data_is_open_frame(self):
+        source = textwrap.dedent(
+            """
+            import polars as pl
+
+            def f(rows) -> pl.DataFrame:
+                df = pl.DataFrame(rows)
+                return df.with_columns(x=pl.col("a") + 1)
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == [], results[0].errors
+        inferred = results[0].inferred_return_type
+        assert inferred is not None and inferred.rest is not None
+        assert "x" in inferred.columns
+
+    def test_lazyframe_constructor_keeps_laziness(self):
+        source = textwrap.dedent(
+            """
+            import polars as pl
+
+            def f(rows) -> pl.DataFrame:
+                lf = pl.LazyFrame(rows)
+                return lf.collect()
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == [], results[0].errors
+        inferred = results[0].inferred_return_type
+        assert inferred is not None and inferred.is_lazy is False
+
+    def test_no_args_constructor_is_provably_empty(self):
+        source = textwrap.dedent(
+            """
+            import polars as pl
+
+            def f() -> pl.DataFrame:
+                return pl.DataFrame().select(pl.col("a"))
+            """
+        )
+        results = analyze_source(source)
+        assert any("PLY001" in str(e) for e in results[0].errors), results[0].errors
+
+
+class TestBareReturnLaziness:
+    """ADR-0006 future-work: a bare ``-> pl.DataFrame`` / ``pl.LazyFrame``
+    return annotation makes no schema claim, but the eager/lazy bit is a
+    real contract — returning the wrong side is PLY032."""
+
+    def test_returning_lazy_against_bare_dataframe_flags(self):
+        source = textwrap.dedent(
+            """
+            import polars as pl
+
+            def f(df: pl.DataFrame) -> pl.DataFrame:
+                return df.lazy()
+            """
+        )
+        results = analyze_source(source)
+        assert any("PLY032" in str(e) for e in results[0].errors), results[0].errors
+
+    def test_returning_eager_against_bare_lazyframe_flags(self):
+        source = textwrap.dedent(
+            """
+            import polars as pl
+
+            def f(lf: pl.LazyFrame) -> pl.LazyFrame:
+                return lf.collect()
+            """
+        )
+        results = analyze_source(source)
+        assert any("PLY032" in str(e) for e in results[0].errors), results[0].errors
+
+    def test_matching_sides_pass(self):
+        source = textwrap.dedent(
+            """
+            import polars as pl
+
+            def f(df: pl.DataFrame) -> pl.LazyFrame:
+                return df.lazy()
+            """
+        )
+        results = analyze_source(source)
+        assert results[0].errors == [], results[0].errors
+
+    def test_uninferable_return_stays_silent(self):
+        # The bare annotation makes no schema claim — an uninferable body
+        # must NOT produce a could-not-infer error.
+        source = textwrap.dedent(
+            """
+            import polars as pl
+
+            def f(df: pl.DataFrame) -> pl.DataFrame:
+                return some_external_thing(df)
+            """
+        )
+        from polypolarism.checker import check_source
+
+        results = check_source(source)
+        assert results[0].passed, results[0].errors

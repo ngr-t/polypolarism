@@ -125,21 +125,23 @@ snapshots read from parquet/IPC footers).
   parameter is flagged (check_types validates arguments); unknown
   open-frame extras stay lenient.
 
-## Future work
-
-- **Backward narrowing**: `df.select("a")` succeeding implies `df`
-  itself has `a` for *subsequent* statements. Currently unobservable
-  (the pin would be `Unknown` and the frame stays open).
-- **`pl.DataFrame(non_literal)`** could produce an open frame instead
-  of untracked; left out to keep this slice focused on declared intent
-  (annotations) and file sources.
-- **Bare return annotations** could check the eager/lazy bit (a
-  `-> pl.DataFrame` function returning a LazyFrame is a real bug) —
-  needs an "empty declared schema" that does not trigger the
-  could-not-infer error.
-- **C-12b**: `polypolarism snapshot` writing committed path→schema
-  snapshots from parquet/IPC metadata, turning source assumptions into
-  verified facts without check-time IO.
+- **Backward narrowing** — implemented. An assumption lookup on an
+  open frame (expression `pl.col`, string selections) pins the column
+  INTO the frame as `Unknown`: if line N succeeded, the column exists
+  on every execution reaching line N+1, and object identity carries the
+  positive knowledge forward (e.g. to strict-extra proofs at later call
+  sites and extra-column return checks). Island lookups error instead
+  of assuming, so they never pin; join keys and unpivot arguments do
+  not pin (minor, assumption-only paths).
+- **`pl.DataFrame(non_literal)` binds open** — implemented. The
+  constructor provably builds SOME frame; untracked `None` lost all
+  downstream checking. The no-args constructor `pl.DataFrame()` is the
+  provably EMPTY closed frame (column references are proofs), and a
+  readable data dict / `schema=` keeps the exact closed inference.
+- **Bare return annotations check the eager/lazy bit** — implemented.
+  `-> pl.DataFrame` with an inferred LazyFrame return (or vice versa)
+  is PLY032; no schema claim is made, so an uninferable body stays
+  silent (no could-not-infer error).
 - **Checked-island semantics for non-strict declared schemas** (issue
   #83, design decision). A `strict=False` schema on YOUR OWN parameter
   (or a `Schema.validate` narrowing) binds CLOSED: the declaration is
@@ -159,3 +161,9 @@ snapshots read from parquet/IPC footers).
   contract; someone else's return annotation is a lower bound on the
   value you receive. Row-polymorphic helpers have two honest spellings:
   declare the columns you touch, or take a bare `pl.DataFrame`.
+
+## Future work
+
+- **C-12b**: `polypolarism snapshot` writing committed path→schema
+  snapshots from parquet/IPC metadata, turning source assumptions into
+  verified facts without check-time IO.

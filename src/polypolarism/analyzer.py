@@ -5328,9 +5328,14 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     # Generate detailed error
                     for col_name, expected_col_spec in expected_type.columns.items():
                         if col_name not in arg_type.columns:
-                            self.errors.append(
-                                f"Argument '{param_name}' is missing column '{col_name}'"
-                            )
+                            # Mirror _is_frame_subtype: only PROVABLE
+                            # absence (closed frame / negative knowledge)
+                            # is reportable — an open frame's unpinned
+                            # column may exist among the extras.
+                            if expected_col_spec.required and arg_type.lacks(col_name):
+                                self.errors.append(
+                                    f"Argument '{param_name}' is missing column '{col_name}'"
+                                )
                         else:
                             actual_col_dtype = arg_type.columns[col_name].dtype
                             expected_col_dtype = expected_col_spec.dtype
@@ -5773,6 +5778,11 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 code, msg = _missing_column_diag(input_frame, name)
                 self.errors.append(tag(code, msg))
                 return None
+            # Backward narrowing (ADR-0006 amendment): the assumption
+            # "this select succeeded" pins the column INTO the open frame
+            # — object identity carries the positive knowledge to every
+            # later statement reading the same frame.
+            input_frame.columns[name] = ColumnSpec(dtype=Unknown())
             result_columns[output_name or name] = Unknown()
             return output_name or name
         code, msg = _missing_column_diag(input_frame, name)
@@ -6345,8 +6355,15 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             # unknowable, so the whole literal is uninferable.
             return None
 
-        if not node.args or not isinstance(node.args[0], ast.Dict):
-            return None
+        if not node.args:
+            # ``pl.DataFrame()`` is the provably EMPTY frame — closed
+            # (ADR-0006 amendment: referencing any column is a proof).
+            return FrameType({}, is_lazy=lazy)
+        if not isinstance(node.args[0], ast.Dict):
+            # ``pl.DataFrame(some_var)`` provably builds SOME frame — an
+            # OPEN one (ADR-0006 amendment; untracked lost all downstream
+            # checking).
+            return FrameType({}, rest=RowVar("DataFrame"), is_lazy=lazy)
         data = node.args[0]
         for key_node, val_node in zip(data.keys, data.values, strict=False):
             if key_node is None:
@@ -6950,6 +6967,7 @@ def analyze_function(
     errors: list[str] = []
     warnings: list[str] = []
     has_df_annotation = False
+    bare_return_head: str | None = None
     unresolved_schemas: list[str] = []
 
     # Schema names already flagged PLY041 (issue #69): a schema whose
@@ -7020,11 +7038,14 @@ def analyze_function(
             if schema_name is not None:
                 has_df_annotation = True
                 unresolved_schemas.append(schema_name)
-            elif bare_frame_annotation(func_node.returns) is not None:
-                # A bare frame return opts the function in but makes no
-                # schema claim — nothing to check against the inferred
-                # return (ADR-0006; the eager/lazy bit is future work).
-                has_df_annotation = True
+            else:
+                bare_return_head = bare_frame_annotation(func_node.returns)
+                if bare_return_head is not None:
+                    # A bare frame return opts the function in. It makes
+                    # no SCHEMA claim (no could-not-infer error), but the
+                    # eager/lazy bit is a real contract (ADR-0006
+                    # amendment) — checked after body analysis below.
+                    has_df_annotation = True
 
     # If no DataFrame annotations found, skip this function
     if not has_df_annotation:
@@ -7069,6 +7090,27 @@ def analyze_function(
     )
     for stmt in func_node.body:
         body_analyzer.visit(stmt)
+
+    # Bare frame return annotations check ONLY the eager/lazy bit
+    # (ADR-0006 amendment): returning a LazyFrame where ``->
+    # pl.DataFrame`` is declared (or vice versa) is a real bug; an
+    # uninferable body stays silent — no schema was claimed.
+    if bare_return_head is not None and body_analyzer.return_type is not None:
+        expected_lazy = bare_return_head == "LazyFrame"
+        if body_analyzer.return_type.is_lazy != expected_lazy:
+            actual_kind = "LazyFrame" if body_analyzer.return_type.is_lazy else "DataFrame"
+            fix = (
+                ".collect() before returning"
+                if body_analyzer.return_type.is_lazy
+                else ".lazy() before returning"
+            )
+            body_analyzer.errors.append(
+                tag(
+                    PLY032,
+                    f"Return type annotated bare pl.{bare_return_head} but inferred "
+                    f"{actual_kind}[...]; {fix}.",
+                )
+            )
 
     return FunctionAnalysis(
         name=func_node.name,

@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- ADR-0006 future-work items closed: (1) **backward narrowing** — an
+  assumption lookup on an open frame pins the column into the frame, so
+  later statements can use the positive knowledge (a strict-parameter
+  call after `df.filter(pl.col("region") ...)` now proves the `region`
+  extra); (2) **`pl.DataFrame(non_literal)` binds open** instead of
+  untracked (the no-args constructor is the provably empty closed
+  frame, making `pl.DataFrame().select("a")` a PLY001 proof);
+  (3) **bare `-> pl.DataFrame` / `-> pl.LazyFrame` return annotations
+  check the eager/lazy bit** (PLY032 on the wrong side) while still
+  making no schema claim — uninferable bodies stay silent.
+
 - Open structs (backlog C-9): a bare `pl.Struct` annotation (and
   unreadable `pl.Struct(...)` constructions) now parses to an OPEN
   `Struct` — "some struct, fields unknown" — instead of `Unknown`.
