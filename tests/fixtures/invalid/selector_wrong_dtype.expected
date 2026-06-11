@@ -1,0 +1,4 @@
+numeric_only_wrong_dtype: FAIL
+  error: Column 'price' has type Float64, but declared type is Utf8
+numeric_only_missing_column: FAIL
+  error: Missing column 'name' of type Utf8
