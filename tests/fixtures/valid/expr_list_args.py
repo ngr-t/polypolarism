@@ -45,7 +45,11 @@ def struct_strings(df: DataFrame[In]) -> DataFrame[StructOut]:
 
 @pa.check_types
 def struct_mixed(df: DataFrame[In]) -> DataFrame[StructOut]:
-    return df.select(s=pl.struct("a", [pl.col("b")])).unnest("s")
+    # Mixed *element* kinds inside one list: a bare column name next to an
+    # expression. (Mixing a list with further positional args, e.g.
+    # ``pl.struct("a", [pl.col("b")])``, raises TypeError at runtime on
+    # polars 1.41.2 — the list is parsed as a nested literal.)
+    return df.select(s=pl.struct(["a", pl.col("b")])).unnest("s")
 
 
 @pa.check_types
