@@ -118,8 +118,20 @@ Rules with both sides present (valid twin -> invalid twin):
 | null_count UInt32 mapping (issue #74) | `null_count_schema` | `null_count_wrong_dtype` |
 | to_dummies data-dependent schema (issue #74) | (annotation path shared with pivot) | `warning/to_dummies_unannotated` (PLW005, a warning, not an error) |
 
+| absent-tracking edge cases (#78) | `absent_rename_swap` (simultaneous swap), `absent_reintroduce_join` | `absent_rename_chain` (sequential renames accumulate), `absent_join_no_reintroduce` |
+| concat time-unit unification (#66) | `concat_time_unit_same` | `concat_time_unit_mixing` |
+| object-API `strict="filter"` mode (#88) | `object_api_strict_filter` (extras accepted at input) | `object_api_strict_filter_gone` (removed column is a PLY001 proof) |
+| `str.to_datetime` time_unit= / `%::z` (#66) | `str_to_datetime_time_unit` | `str_to_datetime_time_unit_wrong` |
+| bitwise NOT unsigned widths (#72) | `not_bitwise_unsigned_width` | `not_unsigned_declared_i64` |
+| bare-return laziness, eager direction (ADR-0006) | `adr0006_amendment_flows` (`matching_laziness`) | `bare_return_eager_into_lazy` |
+
 Intentionally unpaired:
 
+- `valid/backward_narrowing_scoped` — pins that backward-narrowed pins
+  do NOT leak across variables and are cleared by rebinding (the
+  false-positive guards for the ADR-0006 future-work feature). The
+  functions pin the *absence* of narrowing; there is no
+  wrong-declaration twin to write.
 - `valid/unknown_dtype_tracking` — pins the leniency design itself (Unknown
   columns stay registered). Its golden carries the `via:` notes that make
   the leniency visible; an invalid twin is impossible by construction.

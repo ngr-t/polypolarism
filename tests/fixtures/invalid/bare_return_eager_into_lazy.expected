@@ -1,0 +1,2 @@
+eager_returned_as_bare_lazyframe: FAIL
+  error: [PLY032] Return type annotated bare pl.LazyFrame but inferred DataFrame[...]; .lazy() before returning.

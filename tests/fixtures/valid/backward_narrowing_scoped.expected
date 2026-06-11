@@ -1,0 +1,2 @@
+narrowing_does_not_cross_variables: OK
+narrowing_cleared_by_rebinding: OK

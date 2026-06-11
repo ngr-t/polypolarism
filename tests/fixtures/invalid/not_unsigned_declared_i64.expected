@@ -1,0 +1,2 @@
+invert_declared_i64: FAIL
+  error: [PLY040] Column 'x' has type UInt8, but declared type is Int64
