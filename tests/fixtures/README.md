@@ -77,7 +77,7 @@ Rules with both sides present (valid twin -> invalid twin):
 | join coalesce / cross | `join_coalesce_cross` | `join_coalesce_cross_wrong` |
 | semi/anti joins | `semi_anti_gather` | `semi_anti_schema_change` |
 | group_by/agg | `groupby_agg_basic`, `m2_new_aggs` | `agg_type_error`, `groupby_nonexistent_col` |
-| str/dt/list namespaces | `m3_*_namespace` | `namespace_wrong_dtype`, `m3_str_method_missing_column` |
+| str/dt/list namespaces | `m3_*_namespace` | `namespace_wrong_dtype`, `m3_str_method_missing_column`, `str_to_decimal_wrong_scale` |
 | bin / cat namespaces | `bin_namespace`, `cat_namespace` | `bin_on_int`, `cat_on_int` |
 | Array vs List | `array_dtype` | `arr_list_mismatch` |
 | explode / concat / unpivot | `m4_*` | `m4_explode_non_list`, `m4_concat_mismatch`, `unpivot_incompatible_values` |

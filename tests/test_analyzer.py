@@ -1596,7 +1596,9 @@ class TestM3StrNamespace:
             # Issue #19 — parse helpers
             ('pl.col("name").str.to_integer()', Int64()),
             ('pl.col("name").str.to_integer(base=10)', Int64()),
-            ('pl.col("name").str.to_decimal()', Decimal(38, 0)),
+            # Issue #61 — to_decimal reads the literal scale: Decimal(38, scale)
+            ('pl.col("name").str.to_decimal(scale=0)', Decimal(38, 0)),
+            ('pl.col("name").str.to_decimal(scale=2)', Decimal(38, 2)),
             ('pl.col("name").str.to_time()', Time()),
         ],
     )
@@ -1616,6 +1618,58 @@ class TestM3StrNamespace:
         ft = results[0].inferred_return_type
         assert ft is not None
         assert ft.columns["out"].dtype == expected_type, expr
+
+    @pytest.mark.parametrize(
+        "expr",
+        [
+            # ``scale`` is keyword-only AND required on polars 1.41 — both
+            # forms raise TypeError at runtime before any frame exists.
+            'pl.col("name").str.to_decimal()',
+            'pl.col("name").str.to_decimal(2)',
+            # A non-literal scale is unknowable — never claim a fixed scale
+            # (the issue #61 false positive).
+            'pl.col("name").str.to_decimal(scale=s)',
+        ],
+    )
+    # upgrade trigger: flag the crashing missing/positional-scale forms
+    @pytest.mark.imprecision
+    def test_str_to_decimal_unreadable_scale_degrades_to_unknown(self, expr: str):
+        """Issue #61 — no literal ``scale=`` keyword -> Unknown, silently."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + f"""
+            class S(pa.DataFrameModel):
+                name: str
+
+            s = 2
+
+            def f(data: DataFrame[S]):
+                return data.select(({expr}).alias("out"))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["out"].dtype == Unknown()
+
+    def test_str_to_decimal_wraps_nullable_receiver(self):
+        """Issue #61 — the parsed Decimal keeps the receiver's nullability."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                name: str = pa.Field(nullable=True)
+
+            def f(data: DataFrame[S]):
+                return data.select(pl.col("name").str.to_decimal(scale=2).alias("out"))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["out"].dtype == Nullable(Decimal(38, 2))
 
     def test_str_to_integer_wraps_nullable_receiver(self):
         """Issue #19 — a Nullable receiver wraps the parse result in Nullable."""

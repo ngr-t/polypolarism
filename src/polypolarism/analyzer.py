@@ -18,6 +18,7 @@ from polypolarism.compat.polars_api import (
     BIN_NAMESPACE_RETURN,
     CAT_NAMESPACE_RETURN,
     CONTAINER_AGG_METHODS,
+    DECIMAL_DEFAULT,
     DT_NAMESPACE_PRESERVING,
     DT_NAMESPACE_RETURN,
     DTYPE_NAME_MAP,
@@ -1168,6 +1169,31 @@ def _str_to_datetime_dtype(call_node: ast.Call | None) -> DataType:
     if "%:z" in fmt or "%#z" in fmt:
         return Unknown()
     return Datetime()
+
+
+def _str_to_decimal_dtype(call_node: ast.Call | None) -> DataType:
+    """Result dtype of ``str.to_decimal(...)`` (issue #61).
+
+    Probed (polars 1.41.2): ``scale`` is keyword-only and required on the
+    expression namespace — ``to_decimal(scale=N)`` yields ``Decimal(38, N)``
+    (precision is polars' default 38). A positional or missing scale raises
+    TypeError before any frame exists, and a non-literal scale is
+    unknowable — all of those degrade to Unknown rather than claiming a
+    fixed scale (the issue #61 false positive was a hardcoded
+    ``Decimal(38, 0)``).
+    """
+    if call_node is not None:
+        for kw in call_node.keywords:
+            if kw.arg == "scale":
+                v = kw.value
+                if (
+                    isinstance(v, ast.Constant)
+                    and isinstance(v.value, int)
+                    and not isinstance(v.value, bool)
+                ):
+                    return Decimal(DECIMAL_DEFAULT.precision, v.value)
+                return Unknown()
+    return Unknown()
 
 
 def _str_list_or_tuple(node: ast.expr) -> list[str] | None:
@@ -2420,6 +2446,11 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 # the tz, a format literal containing ``%z`` is probed to
                 # yield Datetime[UTC]. Unknowable arguments -> Unknown.
                 result = _str_to_datetime_dtype(call_node)
+            elif method == "to_decimal":
+                # The scale comes from the (required, keyword-only)
+                # ``scale=`` argument (issue #61) — Decimal(38, scale) for
+                # an int literal, Unknown otherwise.
+                result = _str_to_decimal_dtype(call_node)
             else:
                 result = self._STR_RETURN.get(method)
         elif namespace == "dt":
