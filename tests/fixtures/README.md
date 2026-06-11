@@ -96,6 +96,7 @@ Rules with both sides present (valid twin -> invalid twin):
 | sort/unique/over/drop_nulls keys | `m5_window_and_rolling`, `m1_drop_nulls_and_row_index` | `sort_missing_column`, `unique_missing_subset`, `over_missing_column`, `drop_nulls_subset_not_found`, `with_row_index_collision` |
 | window/rolling/over dtypes | `m5_window_and_rolling` | `window_rolling_wrong_dtype` |
 | rolling nullability | `m5_window_and_rolling` | `rolling_nullability_nonnull` |
+| numeric-only elementwise (cum/rolling/round families) | `numeric_elementwise` | `cum_sum_on_string`, `round_on_string` |
 | group_by_dynamic / join_asof | `m5_time_groupby_and_asof` | `time_groupby_asof_wrong` |
 
 Intentionally unpaired:
