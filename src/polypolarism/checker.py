@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from polypolarism.analyzer import FunctionAnalysis, analyze_source
-from polypolarism.types import NUMERIC_DTYPES, DataType, Datetime, List, Nullable, Unknown
+from polypolarism.types import NUMERIC_DTYPES, Array, DataType, Datetime, List, Nullable, Unknown
 
 
 class TypeMismatch:
@@ -124,9 +124,13 @@ def _is_subtype(inferred: DataType, declared: DataType) -> bool:
     inferred_base = _get_base_type(inferred)
     declared_base = _get_base_type(declared)
 
-    # List containers: compare element types with the same rules so the
-    # Unknown leniency reaches nested dtypes.
+    # List / Array containers: compare element types with the same rules so
+    # the Unknown leniency reaches nested dtypes. Array vs List falls
+    # through to False — probed (issue #53): pandera rejects a List column
+    # where ``pl.Array(...)`` is declared and vice versa.
     if isinstance(inferred_base, List) and isinstance(declared_base, List):
+        return _is_subtype(inferred_base.inner, declared_base.inner)
+    if isinstance(inferred_base, Array) and isinstance(declared_base, Array):
         return _is_subtype(inferred_base.inner, declared_base.inner)
 
     # Non-nullable is subtype of nullable with same base type
@@ -155,6 +159,15 @@ def _is_coercible_difference(inferred: DataType, declared: DataType) -> bool:
     declared_base = _get_base_type(declared)
     if isinstance(inferred_base, Datetime) and isinstance(declared_base, Datetime):
         return True
+    # Container differences involving an Array side are coercible (issue
+    # #53). Probed: pandera coerce casts List -> declared Array (valid
+    # whenever the widths line up — value-dependent, so flagging would be
+    # a false positive) and Array -> declared List (always valid); every
+    # probed polars cast between list-like containers is structurally
+    # permissive (even Array(Date) -> List(Duration)). List-vs-List
+    # differences keep the pre-existing behavior (not coercible).
+    if isinstance(inferred_base, (List, Array)) and isinstance(declared_base, (List, Array)):
+        return isinstance(inferred_base, Array) or isinstance(declared_base, Array)
     return type(inferred_base) in NUMERIC_DTYPES and type(declared_base) in NUMERIC_DTYPES
 
 

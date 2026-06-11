@@ -1373,10 +1373,14 @@ def _is_column_subtype(actual: DataType, expected: DataType) -> bool:
     if isinstance(actual, Nullable) and not isinstance(expected, Nullable):
         return False
 
-    # List containers: compare element types with the same rules so the
-    # Unknown leniency reaches nested dtypes (e.g. List[Unknown] from an
-    # un-inferable ``list.eval`` body vs a declared List[T]).
+    # List / Array containers: compare element types with the same rules so
+    # the Unknown leniency reaches nested dtypes (e.g. List[Unknown] from
+    # an un-inferable ``list.eval`` body vs a declared List[T]). Array vs
+    # List falls through to False — probed (issue #53): the containers are
+    # not mutually substitutable.
     if isinstance(actual_base, ListT) and isinstance(expected_base, ListT):
+        return _is_column_subtype(actual_base.inner, expected_base.inner)
+    if isinstance(actual_base, Array) and isinstance(expected_base, Array):
         return _is_column_subtype(actual_base.inner, expected_base.inner)
 
     # Non-nullable is subtype of nullable with same base

@@ -12,6 +12,7 @@ from polypolarism.checker import (
     check_source,
 )
 from polypolarism.types import (
+    Array,
     Float64,
     FrameType,
     Int64,
@@ -315,6 +316,117 @@ class TestUnknownCompatibility:
             )
         )
         assert result.passed is False
+
+
+class TestArrayContainerChecking:
+    """Issue #53: Array recurses like List, and Array vs List is NOT
+    substitutable (probed: pandera validation rejects a List column where
+    ``pl.Array(...)`` is declared and vice versa — without coerce)."""
+
+    def _analysis(self, declared: FrameType, inferred: FrameType) -> FunctionAnalysis:
+        return FunctionAnalysis(
+            name="f",
+            lineno=1,
+            end_lineno=1,
+            input_types={},
+            declared_return_type=declared,
+            inferred_return_type=inferred,
+            errors=[],
+        )
+
+    def test_array_of_unknown_passes_declared_array_of_int(self):
+        result = check_function(
+            self._analysis(
+                declared=FrameType({"a": Array(Int64())}),
+                inferred=FrameType({"a": Array(Unknown())}),
+            )
+        )
+        assert result.passed is True
+
+    def test_declared_array_of_unknown_passes_inferred_array_of_utf8(self):
+        result = check_function(
+            self._analysis(
+                declared=FrameType({"a": Array(Unknown())}),
+                inferred=FrameType({"a": Array(Utf8())}),
+            )
+        )
+        assert result.passed is True
+
+    def test_array_inner_mismatch_fails(self):
+        result = check_function(
+            self._analysis(
+                declared=FrameType({"a": Array(Utf8())}),
+                inferred=FrameType({"a": Array(Int64())}),
+            )
+        )
+        assert result.passed is False
+
+    def test_inferred_list_fails_declared_array(self):
+        result = check_function(
+            self._analysis(
+                declared=FrameType({"a": Array(Int64())}),
+                inferred=FrameType({"a": ListType(Int64())}),
+            )
+        )
+        assert result.passed is False
+
+    def test_inferred_array_fails_declared_list(self):
+        result = check_function(
+            self._analysis(
+                declared=FrameType({"a": ListType(Int64())}),
+                inferred=FrameType({"a": Array(Int64())}),
+            )
+        )
+        assert result.passed is False
+
+    def test_nullable_array_cannot_fill_non_nullable_slot(self):
+        result = check_function(
+            self._analysis(
+                declared=FrameType({"a": Array(Int64())}),
+                inferred=FrameType({"a": Nullable(Array(Int64()))}),
+            )
+        )
+        assert result.passed is False
+
+    def test_array_can_fill_nullable_array_slot(self):
+        result = check_function(
+            self._analysis(
+                declared=FrameType({"a": Nullable(Array(Int64()))}),
+                inferred=FrameType({"a": Array(Int64())}),
+            )
+        )
+        assert result.passed is True
+
+
+class TestArrayCoercibleDifference:
+    """Probed (pandera + polars 1.41.2): under ``Config.coerce`` pandera
+    casts a List column into a declared ``pl.Array(...)`` (succeeds when
+    widths line up — value-dependent) and an Array column into a declared
+    ``pl.List(...)`` (always valid). Every probed polars cast between
+    list-like containers is structurally permissive, so any difference
+    involving an Array container is treated as coercible — flagging would
+    manufacture false positives."""
+
+    def test_list_vs_declared_array_is_coercible(self):
+        assert _is_coercible_difference(ListType(Int64()), Array(Int64())) is True
+
+    def test_array_vs_declared_list_is_coercible(self):
+        assert _is_coercible_difference(Array(Int64()), ListType(Int64())) is True
+
+    def test_array_vs_array_inner_difference_is_coercible(self):
+        assert _is_coercible_difference(Array(Int64()), Array(Utf8())) is True
+
+    def test_list_vs_list_difference_is_not_affected(self):
+        # List-vs-List coercion stays out of the new rule (unprobed).
+        assert _is_coercible_difference(ListType(Int64()), ListType(Utf8())) is False
+
+    def test_array_vs_scalar_is_not_coercible(self):
+        assert _is_coercible_difference(Array(Int64()), Int64()) is False
+        assert _is_coercible_difference(Int64(), Array(Int64())) is False
+
+    def test_nullable_array_vs_non_nullable_list_is_not_coercible(self):
+        # Coercion does not remove nulls.
+        assert _is_coercible_difference(Nullable(Array(Int64())), ListType(Int64())) is False
 
 
 class TestOpenFrameChecking:
