@@ -22,6 +22,7 @@ PLY013 = "PLY013"  # cast between structurally incompatible dtypes
 PLY014 = "PLY014"  # unique: subset column not found
 PLY015 = "PLY015"  # duplicate output column name in select/with_columns
 PLY016 = "PLY016"  # numeric-only operation applied to a non-numeric column
+PLY017 = "PLY017"  # list literal mixed with other positional expression arguments
 
 # Join
 PLY010 = "PLY010"  # join key error (missing or dtype mismatch)

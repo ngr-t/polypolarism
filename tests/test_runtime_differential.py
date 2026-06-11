@@ -151,12 +151,18 @@ def _value_overrides() -> dict[str, dict[str, pl.Series]]:
             "label": pl.Series([f"l{i}" for i in range(6)]),
         },
         # str.to_integer/to_time/to_decimal parse column *contents*; generic
-        # "s0" strings are not parseable (and price is declared Decimal(38, 0),
-        # so integer-valued strings keep to_decimal(scale=0) lossless).
+        # "s0" strings are not parseable (and price is parsed at scale=0 AND
+        # scale=2, so integer-valued strings keep both casts lossless).
         "valid/m3_str_namespace.py": {
             "qty": pl.Series(["1", "2", "3"]),
             "price": pl.Series(["10", "25", "37"]),
             "opens_at": pl.Series(["01:00:00", "02:30:00", "03:45:00"]),
+        },
+        # to_decimal parses column *contents* too; parseable strings keep the
+        # runtime failure on the intended dtype mismatch (Decimal(38, 2) vs
+        # the declared Decimal(38, 0)), not on an unparseable "s0".
+        "invalid/str_to_decimal_wrong_scale.py": {
+            "price": pl.Series(["10.50", "20.25", "30.75"]),
         },
         # `items: pl.List(pl.Struct)` leaves the struct fields unknown, but the
         # body unnests and the declared output requires a `qty` field.

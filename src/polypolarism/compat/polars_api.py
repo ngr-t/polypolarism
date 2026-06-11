@@ -356,13 +356,18 @@ STR_NAMESPACE_RETURN: dict[str, DataType] = {
     "count_matches": UInt32(),
     # Splitting
     "split": ListT(Utf8()),
-    # Parsing into temporal types
+    # Parsing into temporal types. ``to_datetime`` is argument-dependent
+    # (tz from ``time_zone=`` / ``%z`` format, issue #50) and dispatched
+    # via ``analyzer._str_to_datetime_dtype`` before this table is
+    # consulted; the entry documents the no-tz-argument default.
     "to_date": Date(),
     "to_datetime": Datetime(),
     "to_time": Time(),
-    # Parsing into numeric types (issue #19)
+    # Parsing into numeric types (issue #19). ``to_decimal`` is absent:
+    # its scale comes from the required ``scale=`` argument
+    # (``analyzer._str_to_decimal_dtype``, issue #61) — a fixed entry here
+    # was exactly the #61 false positive.
     "to_integer": Int64(),
-    "to_decimal": DECIMAL_DEFAULT,
 }
 
 

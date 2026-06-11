@@ -1715,7 +1715,9 @@ class TestM3StrNamespace:
             # Issue #19 — parse helpers
             ('pl.col("name").str.to_integer()', Int64()),
             ('pl.col("name").str.to_integer(base=10)', Int64()),
-            ('pl.col("name").str.to_decimal()', Decimal(38, 0)),
+            # Issue #61 — to_decimal reads the literal scale: Decimal(38, scale)
+            ('pl.col("name").str.to_decimal(scale=0)', Decimal(38, 0)),
+            ('pl.col("name").str.to_decimal(scale=2)', Decimal(38, 2)),
             ('pl.col("name").str.to_time()', Time()),
         ],
     )
@@ -1735,6 +1737,58 @@ class TestM3StrNamespace:
         ft = results[0].inferred_return_type
         assert ft is not None
         assert ft.columns["out"].dtype == expected_type, expr
+
+    @pytest.mark.parametrize(
+        "expr",
+        [
+            # ``scale`` is keyword-only AND required on polars 1.41 — both
+            # forms raise TypeError at runtime before any frame exists.
+            'pl.col("name").str.to_decimal()',
+            'pl.col("name").str.to_decimal(2)',
+            # A non-literal scale is unknowable — never claim a fixed scale
+            # (the issue #61 false positive).
+            'pl.col("name").str.to_decimal(scale=s)',
+        ],
+    )
+    # upgrade trigger: flag the crashing missing/positional-scale forms
+    @pytest.mark.imprecision
+    def test_str_to_decimal_unreadable_scale_degrades_to_unknown(self, expr: str):
+        """Issue #61 — no literal ``scale=`` keyword -> Unknown, silently."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + f"""
+            class S(pa.DataFrameModel):
+                name: str
+
+            s = 2
+
+            def f(data: DataFrame[S]):
+                return data.select(({expr}).alias("out"))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["out"].dtype == Unknown()
+
+    def test_str_to_decimal_wraps_nullable_receiver(self):
+        """Issue #61 — the parsed Decimal keeps the receiver's nullability."""
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            class S(pa.DataFrameModel):
+                name: str = pa.Field(nullable=True)
+
+            def f(data: DataFrame[S]):
+                return data.select(pl.col("name").str.to_decimal(scale=2).alias("out"))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["out"].dtype == Nullable(Decimal(38, 2))
 
     def test_str_to_integer_wraps_nullable_receiver(self):
         """Issue #19 — a Nullable receiver wraps the parse result in Nullable."""
@@ -3208,9 +3262,11 @@ class TestExprListArgs:
         assert ft.columns["a"].dtype == Int64()
         assert ft.columns["b"].dtype == Int64()
 
-    def test_struct_mixed_varargs_and_list(self):
-        from polypolarism.types import Struct
-
+    def test_struct_mixed_varargs_and_list_flags_ply017(self):
+        # Issue #59: mixing a list literal with further positional args does
+        # NOT flatten — polars raises TypeError ("Nested object types") at
+        # runtime, so the pre-#59 flatten-as-varargs typing was a false
+        # negative. The mix is flagged and the output degrades to Unknown.
         source = textwrap.dedent(
             PANDERA_HEADER
             + """
@@ -3223,10 +3279,11 @@ class TestExprListArgs:
         """
         )
         results = analyze_source(source)
-        assert results[0].has_errors is False, results[0].errors
+        assert results[0].has_errors is True
+        assert any("PLY017" in e and "struct" in e for e in results[0].errors)
         ft = results[0].inferred_return_type
         assert ft is not None
-        assert ft.columns["ab"].dtype == Struct({"a": Int64(), "b": Float64()})
+        assert ft.columns["ab"].dtype == Unknown()
 
     def test_struct_unknown_string_column_ply001(self):
         source = textwrap.dedent(
@@ -3315,6 +3372,79 @@ class TestExprListArgs:
         results = analyze_source(source)
         assert results[0].has_errors is True
         assert any("PLY001" in e and "nope" in e for e in results[0].errors)
+
+
+class TestMixedListArgsPLY017:
+    """Issue #59: a list/tuple literal mixed with further positional args.
+
+    Probed (polars 1.41.2) for EVERY multi-expression helper (pl.struct,
+    pl.coalesce, pl.concat_str, pl.format, pl.concat_list, pl.*_horizontal):
+    a mixed call either raises at runtime (TypeError "Nested object types"
+    for expression-bearing lists; SchemaError / InvalidOperationError for
+    string-only lists in coalesce / concat_str / horizontal) or silently
+    misparses the list as a nested *literal* column (string-only lists in
+    struct / concat_list) — never the flatten polypolarism assumed. The mix
+    is flagged PLY017 and the output degrades to Unknown.
+    """
+
+    _SCHEMA = """
+            class S(pa.DataFrameModel):
+                a: int
+                b: int
+    """
+
+    @pytest.mark.parametrize(
+        "expr",
+        [
+            "pl.struct('a', [pl.col('b')])",  # the issue #59 repro
+            "pl.struct([pl.col('a')], pl.col('b'))",
+            "pl.struct([pl.col('a')], [pl.col('b')])",  # two lists crash too
+            "pl.struct(('a',), pl.col('b'))",  # tuple-of-strings misparses
+            "pl.coalesce(pl.col('a'), [pl.col('b')])",
+            "pl.coalesce(['a'], 'b')",
+            "pl.concat_str([pl.col('a')], pl.col('b'))",
+            "pl.format('{}', [pl.col('a')])",
+            "pl.concat_list(['a'], 'b')",
+            "pl.sum_horizontal([pl.col('a')], pl.col('b'))",
+            "pl.min_horizontal(['a'], 'b')",
+            "pl.max_horizontal(pl.col('a'), ['b'])",
+            "pl.mean_horizontal([pl.col('a')], pl.col('b'))",
+        ],
+    )
+    def test_mixed_list_args_flag_ply017_and_degrade_to_unknown(self, expr: str) -> None:
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + self._SCHEMA
+            + f"""
+            def f(data: DataFrame[S]):
+                return data.select(out=({expr}))
+        """
+        )
+        results = analyze_source(source)
+        assert any("PLY017" in e for e in results[0].errors), results[0].errors
+        assert len(results[0].errors) == 1, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["out"].dtype == Unknown()
+
+    def test_single_list_with_keyword_fields_is_not_mixed(self) -> None:
+        # Probed: ``pl.struct(["a"], x=pl.col("b"))`` is fine at runtime —
+        # keyword args name extra fields; only positional mixes misparse.
+        from polypolarism.types import Struct
+
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + self._SCHEMA
+            + """
+            def f(data: DataFrame[S]):
+                return data.select(out=pl.struct(["a"], x=pl.col("b")))
+        """
+        )
+        results = analyze_source(source)
+        assert results[0].has_errors is False, results[0].errors
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["out"].dtype == Struct({"a": Int64(), "x": Int64()})
 
 
 class TestConcatListAndHorizontal:

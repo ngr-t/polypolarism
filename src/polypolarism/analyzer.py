@@ -7,6 +7,7 @@ import copy
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 from polypolarism.compat.polars_api import (
     AGG_SHORTHAND_NAMES,
@@ -17,6 +18,7 @@ from polypolarism.compat.polars_api import (
     BIN_NAMESPACE_RETURN,
     CAT_NAMESPACE_RETURN,
     CONTAINER_AGG_METHODS,
+    DECIMAL_DEFAULT,
     DT_NAMESPACE_PRESERVING,
     DT_NAMESPACE_RETURN,
     DTYPE_NAME_MAP,
@@ -56,6 +58,7 @@ from polypolarism.diagnostics import (
     PLY014,
     PLY015,
     PLY016,
+    PLY017,
     PLY020,
     PLY021,
     PLY022,
@@ -726,12 +729,14 @@ def _cast_category(dtype: DataType) -> str | None:
 
     Unlike ``_cmp_category`` this splits int/float (``Categorical -> int``
     is allowed via the physical repr while ``Categorical -> float`` is
-    rejected) and adds List / Struct.
+    rejected) and adds Decimal / List / Struct.
     """
     if isinstance(dtype, (Float16, Float32, Float64)):
         return "float"
     if type(dtype) in NUMERIC_DTYPES:
         return "int"
+    if isinstance(dtype, Decimal):
+        return "decimal"
     if isinstance(dtype, Utf8):
         return "str"
     if isinstance(dtype, Boolean):
@@ -833,21 +838,75 @@ _CAST_INVALID_PAIRS: frozenset[tuple[str, str]] = frozenset(
 )
 
 
-def _cast_invalid(source_inner: DataType, target_inner: DataType) -> bool:
-    """True when polars provably rejects the cast even with ``strict=False``.
+# Directional (source_category, target_category) pairs whose cast is
+# probed VALUE-INDEPENDENT: it succeeds for every value of the source
+# dtype, so pandera ``Config.coerce`` can never fail on it (issue #58).
+# Probed against pandera coerce + polars strict cast (1.41.2) with
+# adversarial values (extreme ints/dates, NaN/inf, non-ASCII, invalid
+# UTF-8 bytes):
+#
+# - formatting into String — but NOT ``dur -> str`` (probed
+#   InvalidOperationError, see _CAST_INVALID_PAIRS) and NOT
+#   ``Binary -> str`` (depends on the bytes being valid UTF-8);
+# - bool <-> numeric (0/1 out, "!= 0" in — NaN/inf included);
+# - date -> datetime (midnight), datetime -> date (truncation),
+#   datetime -> time (extraction), time -> dur (since midnight);
+# - any string is a valid Categorical category; Enum categories are
+#   strings;
+# - datetime -> datetime tz changes (issue #50; time_unit is not modeled).
+#
+# Deliberately absent: numeric -> numeric (narrowing overflows are
+# value-dependent — pandera coerce of Float64(-1e308) into Float32 is a
+# probed SchemaError; the blanket numeric tolerance lives in
+# ``checker._is_coercible_difference`` as legacy policy), Enum targets
+# (category membership), Decimal targets (precision overflow), and every
+# unprobed cell.
+_CAST_ALWAYS_PAIRS: frozenset[tuple[str, str]] = frozenset(
+    {
+        (s, "str")
+        for s in ("int", "float", "bool", "date", "datetime", "time", "cat", "enum", "decimal")
+    }
+    | {("bool", "int"), ("bool", "float"), ("int", "bool"), ("float", "bool")}
+    | {("date", "datetime"), ("datetime", "date"), ("datetime", "time"), ("time", "dur")}
+    | {("str", "cat"), ("enum", "cat")}
+    | {("datetime", "datetime")}
+)
 
-    ``list -> list`` and ``array -> array`` recurse on the element dtypes
-    (``List(Date) -> List(Duration)`` and ``Array(Date) -> Array(Duration)``
-    fail in both modes); an Unknown element on either side stays silent.
-    ``array -> list`` is probed-OK for every probed element pair (even
-    ``Array(Date) -> List(Duration)``) and ``list -> array`` only fails
-    when the list lengths don't match the width (value-dependent) — both
-    stay silent (issue #53).
+
+# Three-way cast classification (issues #34 / #58):
+# - "never":  polars provably rejects the cast even with ``strict=False``
+#             (structural — the PLY013 trigger);
+# - "always": the cast is probed value-independent (the coerce-tolerance
+#             trigger);
+# - "value-dependent": everything in between, plus every cell outside the
+#             probed category set — neither flagged nor tolerated.
+CastVerdict = Literal["always", "value-dependent", "never"]
+
+
+def _cast_verdict(source_inner: DataType, target_inner: DataType) -> CastVerdict:
+    """Classify ``source.cast(target)`` — see ``CastVerdict``.
+
+    Equal dtypes are trivially "always" (Unknown excluded: claiming
+    anything about it would break gradual typing). ``list -> list`` and
+    ``array -> array`` recurse on the element dtypes — a "never" element
+    pair makes the container cast "never" (``List(Date) ->
+    List(Duration)`` fails in both strict modes), an "always" element pair
+    makes ``list -> list`` "always" (probed: pandera coerce casts
+    elements), but ``array -> array`` stays "value-dependent" (the widths
+    are not modeled). ``array -> list`` is probed-OK for every probed
+    element pair and ``list -> array`` only fails when the list lengths
+    don't match the width — both value-dependent territory here; the
+    issue-#53 coerce leniency for Array-sided pairs is policy in
+    ``checker._is_coercible_difference``, not a verdict.
     """
+    if isinstance(source_inner, Unknown) or isinstance(target_inner, Unknown):
+        return "value-dependent"
+    if source_inner == target_inner:
+        return "always"
     scat = _cast_category(source_inner)
     tcat = _cast_category(target_inner)
     if scat is None or tcat is None:
-        return False
+        return "value-dependent"
     if (scat == "list" and tcat == "list") or (scat == "array" and tcat == "array"):
         assert isinstance(source_inner, (ListT, Array)) and isinstance(target_inner, (ListT, Array))
         source_elem = source_inner.inner
@@ -856,10 +915,24 @@ def _cast_invalid(source_inner: DataType, target_inner: DataType) -> bool:
             source_elem = source_elem.inner
         if isinstance(target_elem, Nullable):
             target_elem = target_elem.inner
-        return _cast_invalid(source_elem, target_elem)
+        elem_verdict = _cast_verdict(source_elem, target_elem)
+        if elem_verdict == "never":
+            return "never"
+        if elem_verdict == "always" and scat == "list":
+            return "always"
+        return "value-dependent"
     if {scat, tcat} == {"list", "array"}:
-        return False
-    return (scat, tcat) in _CAST_INVALID_PAIRS
+        return "value-dependent"
+    if (scat, tcat) in _CAST_INVALID_PAIRS:
+        return "never"
+    if (scat, tcat) in _CAST_ALWAYS_PAIRS:
+        return "always"
+    return "value-dependent"
+
+
+def _cast_invalid(source_inner: DataType, target_inner: DataType) -> bool:
+    """True when polars provably rejects the cast even with ``strict=False``."""
+    return _cast_verdict(source_inner, target_inner) == "never"
 
 
 # ``Expr.diff`` on an unsigned-int receiver widens to the signed dtype of
@@ -1152,6 +1225,31 @@ def _str_to_datetime_dtype(call_node: ast.Call | None) -> DataType:
     return Datetime()
 
 
+def _str_to_decimal_dtype(call_node: ast.Call | None) -> DataType:
+    """Result dtype of ``str.to_decimal(...)`` (issue #61).
+
+    Probed (polars 1.41.2): ``scale`` is keyword-only and required on the
+    expression namespace — ``to_decimal(scale=N)`` yields ``Decimal(38, N)``
+    (precision is polars' default 38). A positional or missing scale raises
+    TypeError before any frame exists, and a non-literal scale is
+    unknowable — all of those degrade to Unknown rather than claiming a
+    fixed scale (the issue #61 false positive was a hardcoded
+    ``Decimal(38, 0)``).
+    """
+    if call_node is not None:
+        for kw in call_node.keywords:
+            if kw.arg == "scale":
+                v = kw.value
+                if (
+                    isinstance(v, ast.Constant)
+                    and isinstance(v.value, int)
+                    and not isinstance(v.value, bool)
+                ):
+                    return Decimal(DECIMAL_DEFAULT.precision, v.value)
+                return Unknown()
+    return Unknown()
+
+
 def _str_list_or_tuple(node: ast.expr) -> list[str] | None:
     if isinstance(node, (ast.List, ast.Tuple)):
         out: list[str] = []
@@ -1172,7 +1270,9 @@ def _flatten_expr_args(args: list[ast.expr]) -> list[ast.expr]:
     list of expressions: ``pl.struct(pl.col("a"), pl.col("b"))`` ≡
     ``pl.struct([pl.col("a"), pl.col("b")])``. Expanding top-level
     ``ast.List`` / ``ast.Tuple`` args lets the caller analyze both forms
-    (and mixed forms) uniformly (issue #16).
+    uniformly (issue #16). MIXED forms (a list/tuple literal next to other
+    positional args) never reach this helper — they are flagged PLY017 by
+    ``_mixed_list_args`` first (issue #59).
     """
     out: list[ast.expr] = []
     for arg in args:
@@ -1181,6 +1281,39 @@ def _flatten_expr_args(args: list[ast.expr]) -> list[ast.expr]:
         else:
             out.append(arg)
     return out
+
+
+# The ``pl.*`` helpers that accept either varargs or one list of
+# expressions — exactly the issue-#16 flatten consumers handled in
+# ``_analyze_pl_func``. ``pl.format`` takes a template string first but is
+# probed to crash the same way when a list literal follows it.
+_MULTI_EXPR_HELPERS: frozenset[str] = frozenset(
+    {
+        "struct",
+        "coalesce",
+        "concat_str",
+        "format",
+        "concat_list",
+        "sum_horizontal",
+        "min_horizontal",
+        "max_horizontal",
+        "mean_horizontal",
+    }
+)
+
+
+def _mixed_list_args(args: list[ast.expr]) -> bool:
+    """True when a list/tuple literal is mixed with other positional args.
+
+    Probed (polars 1.41.2; issue #59) for every multi-expression helper:
+    the mix is never flattened at runtime — an expression-bearing list
+    raises TypeError ("Nested object types"); a string-only list either
+    raises (coalesce / concat_str / horizontal: supertype failure) or
+    misparses as a nested *literal* column (struct / concat_list). A single
+    list/tuple argument (with or without keyword args) is the supported
+    sequence form and stays exempt.
+    """
+    return len(args) > 1 and any(isinstance(arg, (ast.List, ast.Tuple)) for arg in args)
 
 
 # polars.selectors return-type predicates by selector name.
@@ -2164,6 +2297,21 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         if name == "element" and not node.args and self.element_dtype is not None:
             return None, self.element_dtype
 
+        # A list/tuple literal mixed with further positional args does NOT
+        # flatten at runtime (issue #59) — flag it and degrade to Unknown
+        # instead of typing the flatten that never happens.
+        if name in _MULTI_EXPR_HELPERS and _mixed_list_args(node.args):
+            self.errors.append(
+                tag(
+                    PLY017,
+                    f"pl.{name}: a list literal mixed with other positional "
+                    f"arguments is not flattened — polars raises TypeError "
+                    f"(or misparses the list as a nested literal) at runtime; "
+                    f"pass either varargs or one single list",
+                )
+            )
+            return None, Unknown()
+
         if name == "concat_str" or name == "format":
             for arg in _flatten_expr_args(node.args):
                 self._validate_subexpr(arg)
@@ -2392,6 +2540,11 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 # the tz, a format literal containing ``%z`` is probed to
                 # yield Datetime[UTC]. Unknowable arguments -> Unknown.
                 result = _str_to_datetime_dtype(call_node)
+            elif method == "to_decimal":
+                # The scale comes from the (required, keyword-only)
+                # ``scale=`` argument (issue #61) — Decimal(38, scale) for
+                # an int literal, Unknown otherwise.
+                result = _str_to_decimal_dtype(call_node)
             else:
                 result = self._STR_RETURN.get(method)
         elif namespace == "dt":

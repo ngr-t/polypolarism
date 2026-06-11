@@ -6,8 +6,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-from polypolarism.analyzer import FunctionAnalysis, analyze_source
-from polypolarism.types import NUMERIC_DTYPES, Array, DataType, Datetime, List, Nullable, Unknown
+from polypolarism.analyzer import FunctionAnalysis, _cast_verdict, analyze_source
+from polypolarism.types import NUMERIC_DTYPES, Array, DataType, List, Nullable, Unknown
 
 
 class TypeMismatch:
@@ -179,12 +179,27 @@ def _is_subtype(inferred: DataType, declared: DataType) -> bool:
 def _is_coercible_difference(inferred: DataType, declared: DataType) -> bool:
     """True when Pandera ``coerce=True`` would resolve this dtype difference.
 
-    Coercion casts values between numeric dtypes, so both bases must be
-    numeric — non-numeric mismatches (e.g. Utf8 vs Int64) still error
-    under coerce. Datetime-vs-Datetime tz differences are also coercible
-    (probed: pandera ``coerce=True`` casts tz-naive into a tz-aware schema
-    and vice versa; issue #50). It does not remove nulls: a ``Nullable``
-    inferred side can only coerce into a ``Nullable`` declared side.
+    Direction-aware (issue #58): coerce casts the INFERRED dtype into the
+    DECLARED dtype, so the difference is tolerated when that cast is
+    probed value-independent (``analyzer._cast_verdict`` == "always" —
+    e.g. anything-formattable -> String, bool <-> numeric, Datetime tz
+    changes). Value-DEPENDENT casts (Utf8 -> Int64, Enum targets, ...)
+    stay errors — the boundary pin is
+    ``tests/fixtures/invalid/coerce_limits.py``.
+
+    Two deliberate policy exceptions on top of the verdict:
+
+    - numeric -> numeric is always tolerated, including value-dependent
+      narrowing (pre-#58 behavior, kept by mandate);
+    - container differences involving an Array side are tolerated (issue
+      #53): pandera coerce casts List -> declared Array (valid whenever
+      the widths line up — value-dependent, so flagging would be a false
+      positive) and Array -> declared List (always valid). List-vs-List
+      differences recurse on the element dtypes instead (probed:
+      coerce casts elements; element nullability is preserved).
+
+    Coercion does not remove nulls: a ``Nullable`` inferred side can only
+    coerce into a ``Nullable`` declared side.
 
     Reused by ``analyzer._is_frame_subtype`` for the function-argument
     position (``pa.check_types`` coerces input frames too).
@@ -193,18 +208,13 @@ def _is_coercible_difference(inferred: DataType, declared: DataType) -> bool:
         return False
     inferred_base = _get_base_type(inferred)
     declared_base = _get_base_type(declared)
-    if isinstance(inferred_base, Datetime) and isinstance(declared_base, Datetime):
-        return True
-    # Container differences involving an Array side are coercible (issue
-    # #53). Probed: pandera coerce casts List -> declared Array (valid
-    # whenever the widths line up — value-dependent, so flagging would be
-    # a false positive) and Array -> declared List (always valid); every
-    # probed polars cast between list-like containers is structurally
-    # permissive (even Array(Date) -> List(Duration)). List-vs-List
-    # differences keep the pre-existing behavior (not coercible).
     if isinstance(inferred_base, (List, Array)) and isinstance(declared_base, (List, Array)):
-        return isinstance(inferred_base, Array) or isinstance(declared_base, Array)
-    return type(inferred_base) in NUMERIC_DTYPES and type(declared_base) in NUMERIC_DTYPES
+        if isinstance(inferred_base, Array) or isinstance(declared_base, Array):
+            return True
+        return _is_coercible_difference(inferred_base.inner, declared_base.inner)
+    if type(inferred_base) in NUMERIC_DTYPES and type(declared_base) in NUMERIC_DTYPES:
+        return True
+    return _cast_verdict(inferred_base, declared_base) == "always"
 
 
 def check_function(analysis: FunctionAnalysis) -> CheckResult:
