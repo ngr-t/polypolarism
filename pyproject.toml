@@ -44,6 +44,11 @@ dev = [
 requires = ["uv_build>=0.9.21,<0.10.0"]
 build-backend = "uv_build"
 
+[tool.pytest.ini_options]
+markers = [
+    "imprecision: test pins current inference imprecision (Unknown fallback / leniency); when the construct gains precise inference, UPGRADE the assertion instead of weakening the feature",
+]
+
 [tool.ruff]
 target-version = "py311"
 line-length = 100

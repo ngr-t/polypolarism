@@ -4443,6 +4443,8 @@ class TestOpenFrameMethodCalls:
     def _open_frame(self) -> FrameType:
         return FrameType({"id": Int64()}, rest=RowVar("r"))
 
+    # upgrade trigger: open frames gain row-var bounds (provably-absent columns)
+    @pytest.mark.imprecision
     def test_drop_missing_column_on_open_frame_no_error(self):
         analyzer = _run_body(self._open_frame(), "out = df.drop('ghost')")
         assert analyzer.errors == []
@@ -4452,11 +4454,15 @@ class TestOpenFrameMethodCalls:
         analyzer = _run_body(FrameType({"id": Int64()}), "out = df.drop('ghost')")
         assert any("ghost" in e for e in analyzer.errors)
 
+    # upgrade trigger: open frames gain row-var bounds (provably-absent columns)
+    @pytest.mark.imprecision
     def test_explode_missing_column_on_open_frame_becomes_unknown(self):
         analyzer = _run_body(self._open_frame(), "out = df.explode('items')")
         assert analyzer.errors == []
         assert analyzer.var_types["out"].columns["items"].dtype == Unknown()
 
+    # upgrade trigger: open frames gain row-var bounds (provably-absent columns)
+    @pytest.mark.imprecision
     def test_unnest_missing_column_on_open_frame_no_error(self):
         analyzer = _run_body(self._open_frame(), "out = df.unnest('s')")
         assert analyzer.errors == []
@@ -4464,11 +4470,15 @@ class TestOpenFrameMethodCalls:
         assert out.rest is not None
         assert "s" not in out.columns
 
+    # upgrade trigger: open frames gain row-var bounds (provably-absent columns)
+    @pytest.mark.imprecision
     def test_select_col_expr_missing_on_open_frame_registers_unknown(self):
         analyzer = _run_body(self._open_frame(), "out = df.select(pl.col('ghost'))")
         assert analyzer.errors == []
         assert analyzer.var_types["out"].columns["ghost"].dtype == Unknown()
 
+    # upgrade trigger: open frames gain row-var bounds (provably-absent columns)
+    @pytest.mark.imprecision
     def test_select_plural_col_missing_on_open_frame_registers_unknown(self):
         analyzer = _run_body(self._open_frame(), "out = df.select(pl.col('a', 'b'))")
         assert analyzer.errors == []
@@ -4476,6 +4486,8 @@ class TestOpenFrameMethodCalls:
         assert out.columns["a"].dtype == Unknown()
         assert out.columns["b"].dtype == Unknown()
 
+    # upgrade trigger: open frames gain row-var bounds (provably-absent columns)
+    @pytest.mark.imprecision
     def test_with_columns_plural_col_missing_on_open_frame_no_error(self):
         analyzer = _run_body(self._open_frame(), "out = df.with_columns(pl.col('a', 'b'))")
         assert analyzer.errors == []
@@ -4542,6 +4554,8 @@ class TestSelectStringColumns:
         assert results[0].errors == []
         assert results[0].inferred_return_type == FrameType({"a": Int64(), "b": Float64()})
 
+    # upgrade trigger: open frames gain row-var bounds (provably-absent columns)
+    @pytest.mark.imprecision
     def test_select_string_on_open_frame_registers_unknown(self):
         frame = FrameType({"id": Int64()}, rest=RowVar("r"))
         analyzer = _run_body(frame, 'out = df.select("ghost")')
@@ -4569,6 +4583,8 @@ class TestSelectStringColumns:
         analyzer = _run_body(frame, 'out = df.select(x="ghost")')
         assert any("ghost" in e for e in analyzer.errors)
 
+    # upgrade trigger: open frames gain row-var bounds (provably-absent columns)
+    @pytest.mark.imprecision
     def test_select_kwarg_string_missing_on_open_frame_registers_unknown(self):
         frame = FrameType({"a": Int64()}, rest=RowVar("r"))
         analyzer = _run_body(frame, 'out = df.select(x="ghost")')
@@ -4593,6 +4609,8 @@ class TestSelectStringColumns:
         results = analyze_source(self._source('with_columns("ghost")'))
         assert any("ghost" in str(e) for e in results[0].errors)
 
+    # upgrade trigger: open frames gain row-var bounds (provably-absent columns)
+    @pytest.mark.imprecision
     def test_with_columns_string_missing_on_open_frame_no_error(self):
         frame = FrameType({"id": Int64()}, rest=RowVar("r"))
         analyzer = _run_body(frame, 'out = df.with_columns("ghost")')
@@ -4646,6 +4664,8 @@ class TestUnknownColumnRegistration:
         assert inferred.columns["a"].dtype == Int64()
         assert inferred.columns["b"].dtype == Int64()
 
+    # upgrade trigger: interpolate() gains a return-dtype inference rule
+    @pytest.mark.imprecision
     def test_uninferable_chain_alias_survives_in_select(self):
         source = self.HEADER + textwrap.dedent(
             """
@@ -4659,6 +4679,8 @@ class TestUnknownColumnRegistration:
         assert inferred is not None
         assert inferred.columns["x"].dtype == Unknown()
 
+    # upgrade trigger: interpolate() gains a return-dtype inference rule
+    @pytest.mark.imprecision
     def test_uninferable_chain_keeps_receiver_name_in_with_columns(self):
         source = self.HEADER + textwrap.dedent(
             """
@@ -4698,6 +4720,8 @@ class TestUnknownColumnRegistration:
         assert inferred is not None
         assert inferred.columns["ym"].dtype == Utf8()
 
+    # upgrade trigger: interpolate() gains a return-dtype inference rule
+    @pytest.mark.imprecision
     def test_unknown_column_usable_as_group_by_key(self):
         # ``interpolate`` is not in the inference tables, so the kwarg
         # column registers as Unknown and stays usable as a group_by key.
@@ -5591,16 +5615,22 @@ class TestArithmeticIncompatibleDtypes:
 
     # -- silent fallback: not fully understood => no error ---------------------
 
+    # upgrade trigger: Unknown operand becomes inferable upstream
+    @pytest.mark.imprecision
     def test_unknown_operand_is_silent(self):
         analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('u') + pl.col('s'))")
         assert analyzer.errors == []
         assert analyzer.var_types["out"].columns["r"].dtype == Unknown()
 
+    # upgrade trigger: unresolved call expressions gain inference
+    @pytest.mark.imprecision
     def test_unresolved_operand_is_silent(self):
         analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('s') + helper())")
         assert analyzer.errors == []
         assert analyzer.var_types["out"].columns["r"].dtype == Utf8()
 
+    # upgrade trigger: List operands get probed PLY009 cells in the arithmetic table
+    @pytest.mark.imprecision
     def test_list_operand_is_silent(self):
         frame = FrameType({"xs": ListT(Int64()), "i": Int64()})
         analyzer = _run_body(frame, "out = df.select(r=pl.col('xs') + pl.col('i'))")
@@ -5845,15 +5875,21 @@ class TestDecimalArithmetic:
 
     # -- silent fallback for unprobed partners ---------------------------------
 
+    # upgrade trigger: Unknown operand becomes inferable upstream
+    @pytest.mark.imprecision
     def test_unknown_partner_is_silent(self):
         analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('d') + pl.col('u'))")
         assert analyzer.errors == []
 
+    # upgrade trigger: Decimal x Struct gets a probed cell in the arithmetic table
+    @pytest.mark.imprecision
     def test_struct_partner_is_silent(self):
         frame = FrameType({"d": Decimal(10, 2), "st": Struct({"a": Int64()})})
         analyzer = _run_body(frame, "out = df.select(r=pl.col('d') + pl.col('st'))")
         assert analyzer.errors == []
 
+    # upgrade trigger: unresolved call expressions gain inference
+    @pytest.mark.imprecision
     def test_unresolved_partner_is_silent(self):
         analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('d') + helper())")
         assert analyzer.errors == []
@@ -6422,6 +6458,8 @@ class TestPlAllExcludeSelectors:
     def test_pl_exclude_non_literal_arg_is_not_resolved(self):
         assert self._resolve("pl.exclude(some_var)", self._frame()) is None
 
+    # upgrade trigger: selector expansion becomes row-var-aware on open frames
+    @pytest.mark.imprecision
     def test_pl_all_on_open_frame_returns_known_columns(self):
         frame = FrameType({"id": Int64()}, rest=RowVar("r"))
         assert self._resolve("pl.all()", frame) == ["id"]
@@ -6989,6 +7027,8 @@ class TestFilterPredicateDtype:
         results = analyze_source(source)
         assert results[0].errors == []
 
+    # upgrade trigger: open frames gain row-var bounds (provably-absent columns)
+    @pytest.mark.imprecision
     def test_open_frame_bare_string_predicate_not_flagged(self):
         frame = FrameType({"id": Int64()}, rest=RowVar("r"))
         analyzer = _run_body(frame, 'out = df.filter("ghost")')
@@ -7140,6 +7180,8 @@ class TestSortKeyValidation:
         results = self._analyze('df.sort("a", descending=True, nulls_last=True)')
         assert results[0].errors == []
 
+    # upgrade trigger: open frames gain row-var bounds (provably-absent columns)
+    @pytest.mark.imprecision
     def test_open_frame_missing_key_not_flagged(self):
         frame = FrameType({"id": Int64()}, rest=RowVar("r"))
         analyzer = _run_body(frame, 'out = df.sort("ghost")')
@@ -7312,6 +7354,8 @@ class TestNamespaceReceiverDtype:
         results = analyze_source(source)
         assert any("PLY012" in e for e in results[0].errors), results[0].errors
 
+    # upgrade trigger: open frames gain row-var bounds (provably-absent columns)
+    @pytest.mark.imprecision
     def test_open_frame_unknown_receiver_not_flagged(self):
         """A column missing on an open frame resolves to Unknown — exempt."""
         frame = FrameType({"id": Int64()}, rest=RowVar("r"))
@@ -7321,6 +7365,8 @@ class TestNamespaceReceiverDtype:
         )
         assert analyzer.errors == []
 
+    # upgrade trigger: unrecognised namespace methods gain a table entry or a warning
+    @pytest.mark.imprecision
     def test_unknown_method_on_valid_receiver_still_falls_through(self):
         """An unrecognised namespace method on a valid receiver stays silent
         and registers the output as Unknown (pre-existing behaviour)."""
@@ -7710,6 +7756,8 @@ class TestOverKeyValidation:
         results = analyze_source(source)
         assert results[0].errors == [], results[0].errors
 
+    # upgrade trigger: open frames gain row-var bounds (provably-absent columns)
+    @pytest.mark.imprecision
     def test_open_frame_missing_key_not_flagged(self):
         frame = FrameType({"id": Int64()}, rest=RowVar("r"))
         analyzer = _run_body(frame, 'out = df.select(pl.col("id").sum().over("ghost"))')
@@ -8069,6 +8117,8 @@ class TestComparisonIncompatibleDtypes:
             "pl.col('s') == None",
         ],
     )
+    # upgrade trigger: these operand kinds get probed cells in the comparison table
+    @pytest.mark.imprecision
     def test_not_fully_understood_pair_is_silent(self, expr: str) -> None:
         analyzer = _run_body(self._frame(), f"out = df.select(m={expr})")
         assert analyzer.errors == [], analyzer.errors
@@ -8196,6 +8246,8 @@ class TestIsInIncompatibleDtypes:
             "pl.col('i').is_in()",  # no args
         ],
     )
+    # upgrade trigger: these argument kinds get probed cells in the is_in table
+    @pytest.mark.imprecision
     def test_not_fully_understood_is_silent(self, expr: str) -> None:
         analyzer = _run_body(self._frame(), f"out = df.select(m={expr})")
         assert analyzer.errors == [], analyzer.errors
@@ -8354,6 +8406,8 @@ class TestCastImpossibleDtypes:
             "pl.col('li').cast(unknown_target)",  # unresolvable target
         ],
     )
+    # upgrade trigger: these source/target kinds get probed cells in the cast table
+    @pytest.mark.imprecision
     def test_unknown_source_or_target_is_silent(self, expr: str) -> None:
         from polypolarism.types import ColumnSpec
 
@@ -8399,6 +8453,8 @@ class TestCastImpossibleFrameLevel:
         assert analyzer.errors == [], analyzer.errors
         assert analyzer.var_types["out"].columns["w"].dtype == Utf8()
 
+    # upgrade trigger: Unknown source becomes inferable upstream
+    @pytest.mark.imprecision
     def test_frame_cast_unknown_source_is_silent(self):
         analyzer = _run_body(self._frame(), "out = df.cast({'u': pl.Int64})")
         assert analyzer.errors == [], analyzer.errors
@@ -8883,6 +8939,8 @@ class TestShiftFillValue:
         ft = self._infer('df.select(pl.col("a").shift(1, fill_value=pl.col("xs").first()))')
         assert ft.columns["a"].dtype == Int64()
 
+    # upgrade trigger: the fill expression kind gains inference (e.g. interpolate)
+    @pytest.mark.imprecision
     def test_unresolved_fill_keeps_receiver_dtype(self):
         # The fill expression is not modelled — fall back to the receiver
         # dtype (slots are filled with *something*, so no Nullable wrap).
@@ -8989,6 +9047,8 @@ class TestUniqueSubsetValidation:
         )
         assert results[0].errors == []
 
+    # upgrade trigger: open frames gain row-var bounds (provably-absent columns)
+    @pytest.mark.imprecision
     def test_open_frame_missing_subset_not_flagged(self):
         frame = FrameType({"id": Int64()}, rest=RowVar("r"))
         analyzer = _run_body(frame, 'out = df.unique(subset=["ghost"])')
@@ -9711,6 +9771,8 @@ class TestTzAwareDtypeOutputs:
         assert analyzer.errors == [], analyzer.errors
         assert analyzer.var_types["out"].columns["r"].dtype == Nullable(Datetime(tz="UTC"))
 
+    # upgrade trigger: .dt.replace_time_zone on non-Datetime receivers gets probed
+    @pytest.mark.imprecision
     def test_non_datetime_receiver_keeps_legacy_preserving(self) -> None:
         # ``.dt.replace_time_zone`` on a Date column is outside the probed
         # surface — the legacy dtype-preserving fallback stays (silent).
