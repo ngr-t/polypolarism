@@ -17,6 +17,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failing statement and explains how the project root is detected,
   instead of suggesting an import the user already wrote.
 
+- Column-not-found diagnostics (PLY001–PLY005, PLY007, group_by keys
+  and aggregation columns) now name the schema the frame came from —
+  `Column 'qty' not found in frame from schema 'Forecast'` — so with
+  several schemas in one function the violated contract is identifiable
+  (user request). The provenance label follows the same propagation as
+  the checked-island mark and is dropped by shape-determining calls;
+  frames without schema provenance keep the old wording.
+
 - Class methods report class-qualified names (`Pipeline.process`)
   everywhere a function is named — text output, JSON diagnostics, and
   the `functions` hover summaries. Bare names rendered two classes'

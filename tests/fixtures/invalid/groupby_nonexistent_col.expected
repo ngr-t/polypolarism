@@ -1,3 +1,3 @@
 bad_groupby: FAIL
-  error: [PLY011] Group by key column 'category' not found in DataFrame
+  error: [PLY011] Group by key column 'category' not found in frame from schema 'SalesSchema'
   error: [PLY040] Could not infer return type

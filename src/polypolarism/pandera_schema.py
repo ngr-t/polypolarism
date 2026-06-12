@@ -81,18 +81,20 @@ class Schema:
         if self.unresolved:
             # Issue #90: columns unknowable — a fully open assumption
             # frame (validate still narrows; PLW011 carries the degrade).
-            return FrameType({}, rest=RowVar(self.name), coerce=self.coerce)
+            return FrameType({}, rest=RowVar(self.name), coerce=self.coerce, schema_name=self.name)
         if self.strict or self.filters_extras:
             return FrameType(
                 columns=dict(self.columns),
                 strict=self.strict,
                 coerce=self.coerce,
+                schema_name=self.name,
             )
         return FrameType(
             columns=dict(self.columns),
             strict=self.strict,
             coerce=self.coerce,
             nonstrict_schema=self.name,
+            schema_name=self.name,
         )
 
     def validate_result_frame(self) -> FrameType:

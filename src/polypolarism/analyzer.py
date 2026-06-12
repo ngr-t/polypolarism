@@ -1154,7 +1154,10 @@ def _missing_column_diag(frame: FrameType, name: str) -> tuple[str, str]:
             f"does not promise it. Declare the column on the schema, or "
             f"take a bare pl.DataFrame parameter for row-polymorphic helpers"
         )
-    return PLY001, f"Column '{name}' not found. Available columns: {list(frame.columns.keys())}"
+    return PLY001, (
+        f"Column '{name}' not found{frame.origin_note()}. "
+        f"Available columns: {list(frame.columns.keys())}"
+    )
 
 
 def _call_result_frame(declared: FrameType | None, source_name: str) -> FrameType | None:
@@ -6049,6 +6052,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             # (re)introduced clear their absence marks (issue #78).
             absent=input_frame.absent,
             nonstrict_schema=input_frame.nonstrict_schema,
+            schema_name=input_frame.schema_name,
         )
 
     # -- frame methods --------------------------------------------------
@@ -6085,7 +6089,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         for name in targets:
             if name not in result_columns:
                 if input_frame.rest is None:
-                    self.errors.append(tag(PLY002, f"drop: column '{name}' not found"))
+                    self.errors.append(
+                        tag(PLY002, f"drop: column '{name}' not found{input_frame.origin_note()}")
+                    )
                 elif name in input_frame.absent:
                     # Negative knowledge (issue #78): the column was
                     # already removed — polars drop (strict by default)
@@ -6112,6 +6118,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             rest=input_frame.rest,
             absent=absent,
             nonstrict_schema=input_frame.nonstrict_schema,
+            schema_name=input_frame.schema_name,
         )
 
     def _infer_rename_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
@@ -6151,7 +6158,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     # pin the target name.
                     result_columns.setdefault(new, ColumnSpec(dtype=Unknown()))
                     continue
-                self.errors.append(tag(PLY003, f"rename: column '{old}' not found"))
+                self.errors.append(
+                    tag(PLY003, f"rename: column '{old}' not found{input_frame.origin_note()}")
+                )
         # Issue #78: a renamed-away old name is provably absent afterwards
         # — unless some other entry renames INTO it (a swap). Rename
         # targets are provably present, clearing any stale marks.
@@ -6165,6 +6174,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             rest=input_frame.rest,
             absent=absent,
             nonstrict_schema=input_frame.nonstrict_schema,
+            schema_name=input_frame.schema_name,
         )
 
     def _infer_cast_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
@@ -6203,7 +6213,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     # dtype is now exactly the target.
                     result_columns[col] = ColumnSpec(dtype=target)
                     continue
-                self.errors.append(tag(PLY004, f"cast: column '{col}' not found"))
+                self.errors.append(
+                    tag(PLY004, f"cast: column '{col}' not found{input_frame.origin_note()}")
+                )
                 continue
             source_inner = spec.dtype.inner if isinstance(spec.dtype, Nullable) else spec.dtype
             if _cast_invalid(source_inner, target):
@@ -6229,6 +6241,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             rest=input_frame.rest,
             absent=input_frame.absent,
             nonstrict_schema=input_frame.nonstrict_schema,
+            schema_name=input_frame.schema_name,
         )
 
     def _infer_drop_nulls_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
@@ -6253,7 +6266,12 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         for col_name, spec in input_frame.columns.items():
             if col_name in targets:
                 if col_name not in input_frame.columns and subset is not None:
-                    self.errors.append(tag(PLY005, f"drop_nulls: column '{col_name}' not found"))
+                    self.errors.append(
+                        tag(
+                            PLY005,
+                            f"drop_nulls: column '{col_name}' not found{input_frame.origin_note()}",
+                        )
+                    )
                 inner = spec.dtype.inner if isinstance(spec.dtype, Nullable) else spec.dtype
                 result_columns[col_name] = ColumnSpec(dtype=inner, required=spec.required)
             else:
@@ -6263,13 +6281,18 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             # unknown extras (ADR-0006) — not provably absent, stay silent.
             for s in subset:
                 if s not in input_frame.columns:
-                    self.errors.append(tag(PLY005, f"drop_nulls: column '{s}' not found"))
+                    self.errors.append(
+                        tag(
+                            PLY005, f"drop_nulls: column '{s}' not found{input_frame.origin_note()}"
+                        )
+                    )
         return FrameType(
             columns=result_columns,
             strict=input_frame.strict,
             rest=input_frame.rest,
             absent=input_frame.absent,
             nonstrict_schema=input_frame.nonstrict_schema,
+            schema_name=input_frame.schema_name,
         )
 
     def _collect_concat_frames(self, list_node: ast.expr) -> list[FrameType] | None:
@@ -6462,6 +6485,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             rest=input_frame.rest,
             absent=input_frame.absent,
             nonstrict_schema=input_frame.nonstrict_schema,
+            schema_name=input_frame.schema_name,
         )
 
     def _infer_unpivot_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
@@ -6846,7 +6870,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 continue
             for name in names:
                 if name not in input_frame.columns and input_frame.rest is None:
-                    self.errors.append(tag(PLY007, f"sort: column '{name}' not found"))
+                    self.errors.append(
+                        tag(PLY007, f"sort: column '{name}' not found{input_frame.origin_note()}")
+                    )
         self.errors.extend(expr_analyzer.errors)
         return input_frame
 
@@ -6906,6 +6932,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             rest=input_frame.rest,
             absent=input_frame.absent,
             nonstrict_schema=input_frame.nonstrict_schema,
+            schema_name=input_frame.schema_name,
         )
 
 

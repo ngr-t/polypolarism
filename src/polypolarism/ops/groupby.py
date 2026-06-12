@@ -490,7 +490,10 @@ def infer_groupby_result(
             if is_open:
                 result_columns[key] = Unknown()
                 continue
-            raise GroupByTypeError(f"Group by key column '{key}' not found in DataFrame")
+            raise GroupByTypeError(
+                f"Group by key column '{key}' not found"
+                f"{input_frame.origin_note() or ' in DataFrame'}"
+            )
         key_type = input_frame.get_column_type(key)
         assert key_type is not None  # We just checked has_column
         result_columns[key] = key_type
@@ -507,7 +510,10 @@ def infer_groupby_result(
         col_type: DataType | None
         if not input_frame.has_column(col_name):
             if not is_open:
-                raise GroupByTypeError(f"Aggregation column '{col_name}' not found in DataFrame")
+                raise GroupByTypeError(
+                    f"Aggregation column '{col_name}' not found"
+                    f"{input_frame.origin_note() or ' in DataFrame'}"
+                )
             col_type = Unknown()
         else:
             col_type = input_frame.get_column_type(col_name)

@@ -14759,3 +14759,71 @@ class TestMethodQualifiedNames:
     def test_module_level_function_name_stays_bare(self):
         analyses = analyze_source(self.SOURCE)
         assert any(a.name == "process" and not a.has_errors for a in analyses)
+
+
+class TestSchemaContextInMessages:
+    """Column-not-found diagnostics name the schema the frame came from
+    (user request 2026-06-12): with several schemas in play, a bare
+    "Column 'x' not found" does not say which contract was violated."""
+
+    def _analyze(self, body: str):
+        source = textwrap.dedent(
+            """
+            import pandera.polars as pa
+            import polars as pl
+            from pandera.typing.polars import DataFrame
+
+
+            class Sales(pa.DataFrameModel):
+                sku: str
+                qty: int
+
+                class Config:
+                    strict = True
+            """
+        ) + textwrap.dedent(body)
+        return analyze_source(source)
+
+    def test_ply001_names_schema_on_parameter_frame(self):
+        analyses = self._analyze(
+            """
+            def f(df: DataFrame[Sales]) -> DataFrame[Sales]:
+                return df.select(pl.col("missing"))
+            """
+        )
+        (a,) = analyses
+        assert any("PLY001" in e and "in frame from schema 'Sales'" in e for e in a.errors), (
+            a.errors
+        )
+
+    def test_context_survives_column_ops(self):
+        analyses = self._analyze(
+            """
+            def f(df: DataFrame[Sales]) -> pl.DataFrame:
+                return df.drop("qty").select(pl.col("zzz"))
+            """
+        )
+        (a,) = analyses
+        assert any("in frame from schema 'Sales'" in e for e in a.errors), a.errors
+
+    def test_groupby_key_error_names_schema(self):
+        analyses = self._analyze(
+            """
+            def f(df: DataFrame[Sales]) -> pl.DataFrame:
+                return df.group_by("region").agg(pl.col("qty").sum())
+            """
+        )
+        (a,) = analyses
+        assert any("region" in e and "schema 'Sales'" in e for e in a.errors), a.errors
+
+    def test_unlabeled_frame_keeps_plain_message(self):
+        analyses = self._analyze(
+            """
+            def f() -> pl.DataFrame:
+                return pl.DataFrame({"a": [1]}).select(pl.col("missing"))
+            """
+        )
+        (a,) = analyses
+        assert any("Column 'missing' not found" in e and "schema" not in e for e in a.errors), (
+            a.errors
+        )

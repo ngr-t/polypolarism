@@ -1,3 +1,3 @@
 Pipeline.process: FAIL
-  error: [PLY001] Column 'missing' not found. Available columns: ['id']
+  error: [PLY001] Column 'missing' not found in frame from schema 'S'. Available columns: ['id']
 Other.process: OK

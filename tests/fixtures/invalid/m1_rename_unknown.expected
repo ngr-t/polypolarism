@@ -1,2 +1,2 @@
 f: FAIL
-  error: [PLY003] rename: column 'nope' not found
+  error: [PLY003] rename: column 'nope' not found in frame from schema 'S'

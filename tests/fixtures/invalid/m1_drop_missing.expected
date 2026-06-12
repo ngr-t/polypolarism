@@ -1,2 +1,2 @@
 f: FAIL
-  error: [PLY002] drop: column 'missing' not found
+  error: [PLY002] drop: column 'missing' not found in frame from schema 'S'

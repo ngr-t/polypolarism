@@ -146,7 +146,7 @@ def infer_col(column_name: str, frame: FrameType) -> DataType:
             )
         available = list(frame.columns.keys())
         raise ColumnNotFoundError(
-            f"Column '{column_name}' not found. Available columns: {available}"
+            f"Column '{column_name}' not found{frame.origin_note()}. Available columns: {available}"
         )
     return dtype
 

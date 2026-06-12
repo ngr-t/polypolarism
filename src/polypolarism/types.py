@@ -621,6 +621,13 @@ class FrameType:
     coerce: bool
     absent: frozenset[str]
     nonstrict_schema: str | None
+    # Diagnostic provenance only (no semantic effect, excluded from
+    # ``__eq__``): the pandera schema this frame was bound from, kept
+    # through the same column-ops that keep ``nonstrict_schema`` so
+    # column-not-found messages can name the violated contract
+    # ("... in frame from schema 'Sales'"). Unlike ``nonstrict_schema``
+    # it is set for strict bindings too.
+    schema_name: str | None
 
     def __init__(
         self,
@@ -631,6 +638,7 @@ class FrameType:
         coerce: bool = False,
         absent: frozenset[str] | set[str] | None = None,
         nonstrict_schema: str | None = None,
+        schema_name: str | None = None,
     ) -> None:
         normalized: dict[str, ColumnSpec] = {}
         if columns:
@@ -650,12 +658,20 @@ class FrameType:
         self.is_lazy = is_lazy
         self.coerce = coerce
         self.nonstrict_schema = nonstrict_schema
+        self.schema_name = schema_name
         # A pinned column trumps a stale absence mark; absence is only
         # meaningful while the frame is open.
         if absent and rest is not None:
             self.absent = frozenset(absent) - normalized.keys()
         else:
             self.absent = frozenset()
+
+    def origin_note(self) -> str:
+        """Diagnostic suffix naming this frame's schema provenance —
+        ``" in frame from schema 'Sales'"`` — or ``""`` when unknown."""
+        if self.schema_name is None:
+            return ""
+        return f" in frame from schema '{self.schema_name}'"
 
     def lacks(self, name: str) -> bool:
         """True when ``name`` is PROVABLY not a column of this frame:
