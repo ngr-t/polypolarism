@@ -778,3 +778,128 @@ class TestObjectApiCrossModule:
         assert schema is not None
         assert set(schema.columns) == {"order_id"}
         assert schema.strict is True
+
+
+class TestProjectRootDiscovery:
+    """Layout coverage for the resolver's upward walk (user report
+    2026-06-12): a dotted ``from module1.module2 import (...)`` failed
+    to resolve in every tree whose root had no packaging marker —
+    ``.git``-only repos — and in the ``src/`` layout even with one."""
+
+    APP = """
+    import polars as pl
+    from pandera.typing.polars import DataFrame
+    from module1.module2 import (
+        InputSchema,
+    )
+
+
+    def f(df: DataFrame[InputSchema]) -> DataFrame[InputSchema]:
+        return df.select(pl.col("id"))
+    """
+
+    SCHEMA = """
+    import pandera.polars as pa
+
+
+    class InputSchema(pa.DataFrameModel):
+        id: int
+    """
+
+    def _package(self, base: Path) -> None:
+        pkg = base / "module1"
+        pkg.mkdir(parents=True)
+        _write(pkg / "__init__.py", "")
+        _write(pkg / "module2.py", self.SCHEMA)
+
+    def _assert_resolves(self, app: Path) -> None:
+        results = check_file(app)
+        assert len(results) == 1
+        assert results[0].passed, results[0].errors
+        assert not results[0].warnings, results[0].warnings
+
+    def test_git_dir_marks_root_file_inside_package(self, tmp_path: Path):
+        (tmp_path / ".git").mkdir()
+        self._package(tmp_path)
+        _write(tmp_path / "module1" / "app.py", self.APP)
+        self._assert_resolves(tmp_path / "module1" / "app.py")
+
+    def test_git_dir_marks_root_sibling_scripts_dir(self, tmp_path: Path):
+        (tmp_path / ".git").mkdir()
+        self._package(tmp_path)
+        (tmp_path / "scripts").mkdir()
+        _write(tmp_path / "scripts" / "app.py", self.APP)
+        self._assert_resolves(tmp_path / "scripts" / "app.py")
+
+    def test_src_layout_resolves_through_src_dir(self, tmp_path: Path):
+        _project_marker(tmp_path)
+        self._package(tmp_path / "src")
+        (tmp_path / "scripts").mkdir()
+        _write(tmp_path / "scripts" / "app.py", self.APP)
+        self._assert_resolves(tmp_path / "scripts" / "app.py")
+
+    def test_markerless_tree_falls_back_to_cwd(self, tmp_path: Path, monkeypatch):
+        self._package(tmp_path)
+        (tmp_path / "scripts").mkdir()
+        _write(tmp_path / "scripts" / "app.py", self.APP)
+        monkeypatch.chdir(tmp_path)
+        self._assert_resolves(tmp_path / "scripts" / "app.py")
+
+    def test_cwd_fallback_requires_file_under_cwd(self, tmp_path: Path, monkeypatch):
+        """The cwd fallback must not fire for files outside the
+        invocation tree — resolution stays bounded."""
+        self._package(tmp_path / "elsewhere")
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        _write(outside / "app.py", self.APP)
+        monkeypatch.chdir(tmp_path / "elsewhere")
+        results = check_file(outside / "app.py")
+        assert len(results) == 1
+        assert any("PLW006" in str(w) for w in results[0].warnings)
+
+
+class TestUnresolvedImportDiagnostic:
+    """When the schema name WAS imported but the module didn't resolve,
+    PLW006 must say that instead of suggesting an import the user
+    already wrote (user report 2026-06-12)."""
+
+    def test_plw006_names_the_unresolved_import(self, tmp_path: Path):
+        _project_marker(tmp_path)
+        _write(
+            tmp_path / "app.py",
+            """
+            import polars as pl
+            from pandera.typing.polars import DataFrame
+            from module1.module2 import (
+                InputSchema,
+            )
+
+
+            def f(df: DataFrame[InputSchema]) -> DataFrame[InputSchema]:
+                return df
+            """,
+        )
+        results = check_file(tmp_path / "app.py")
+        assert len(results) == 1
+        joined = "\n".join(str(w) for w in results[0].warnings)
+        assert "PLW006" in joined
+        assert "`from module1.module2 import InputSchema`" in joined
+        assert "did not resolve" in joined
+        # The generic "import it" suggestion would be confusing here.
+        assert "import it from a project-local module" not in joined
+
+    def test_generic_hint_kept_when_name_never_imported(self, tmp_path: Path):
+        _project_marker(tmp_path)
+        _write(
+            tmp_path / "app.py",
+            """
+            from pandera.typing.polars import DataFrame
+
+
+            def f(df: DataFrame[Ghost]) -> DataFrame[Ghost]:
+                return df
+            """,
+        )
+        results = check_file(tmp_path / "app.py")
+        joined = "\n".join(str(w) for w in results[0].warnings)
+        assert "import it from a project-local module" in joined

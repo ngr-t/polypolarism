@@ -7066,6 +7066,17 @@ def analyze_function(
                 f"'{attr}'. Stdlib/third-party imports aren't followed, "
                 f"and nested classes aren't supported."
             )
+        elif name in schema_registry.failed_imports:
+            # The import exists — saying "import it" would be confusing.
+            # Name the unresolved statement and how roots are detected.
+            hint = (
+                f"schema '{name}' referenced in annotation but not found: "
+                f"`{schema_registry.failed_imports[name]}` did not resolve to a "
+                f"project-local file. The project root is detected via "
+                f"pyproject.toml/setup.py/setup.cfg or a .git directory "
+                f"(`src/` layout supported); stdlib/third-party imports "
+                f"aren't followed."
+            )
         else:
             hint = (
                 f"schema '{name}' referenced in annotation but not found. "

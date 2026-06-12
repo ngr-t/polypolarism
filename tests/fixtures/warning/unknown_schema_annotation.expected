@@ -1,2 +1,2 @@
 passthrough: WARN
-  warning: [PLW006] schema 'ExternalSchema' referenced in annotation but not found. Define it in this module, or import it from a project-local module via `from <module> import ExternalSchema`. Stdlib/third-party imports aren't followed.
+  warning: [PLW006] schema 'ExternalSchema' referenced in annotation but not found: `from some_external_package import ExternalSchema` did not resolve to a project-local file. The project root is detected via pyproject.toml/setup.py/setup.cfg or a .git directory (`src/` layout supported); stdlib/third-party imports aren't followed.

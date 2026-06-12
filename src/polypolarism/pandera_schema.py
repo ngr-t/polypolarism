@@ -120,6 +120,11 @@ class SchemaRegistry:
     """Registry of parsed Pandera schemas keyed by class name."""
 
     schemas: dict[str, Schema] = field(default_factory=dict)
+    # Names bound by a from-import whose module did NOT resolve to a
+    # project-local file, mapped to the import spelling ("pkg.mod",
+    # ".sibling"). Lets PLW006 say the import was seen but unresolved
+    # instead of suggesting an import the user already wrote.
+    failed_imports: dict[str, str] = field(default_factory=dict)
 
     def get(self, name: str) -> Schema | None:
         return self.schemas.get(name)
@@ -654,19 +659,29 @@ def _apply_config(schema: Schema, config_node: ast.ClassDef) -> None:
 
 
 _PROJECT_MARKERS = ("pyproject.toml", "setup.py", "setup.cfg")
+_PROJECT_MARKER_DIRS = (".git",)
 
 
 def _project_root(start: Path) -> Path | None:
-    """Nearest ancestor of ``start`` containing a project marker file.
+    """Nearest ancestor of ``start`` containing a project marker.
+
+    Markers are the packaging files (``pyproject.toml`` & co.) or a
+    ``.git`` directory — most real repos have only the latter, and
+    without any marker dotted imports like ``from pkg.mod import X``
+    could never resolve from inside ``pkg`` (user report 2026-06-12).
 
     Returns ``None`` if no marker is found on the way up to the
     filesystem root. The marker bounds how far the import resolver may
     walk upward — without one we conservatively only consider the file's
-    own directory so we don't reach into unrelated trees.
+    own directory (plus the cwd fallback) so we don't reach into
+    unrelated trees.
     """
     for ancestor in [start, *start.parents]:
         for marker in _PROJECT_MARKERS:
             if (ancestor / marker).is_file():
+                return ancestor
+        for marker_dir in _PROJECT_MARKER_DIRS:
+            if (ancestor / marker_dir).is_dir():
                 return ancestor
     return None
 
@@ -718,10 +733,30 @@ def _resolve_module_path(module: str | None, current_file: Path, level: int = 0)
             # so we don't accidentally import from unrelated trees.
             break
 
+    # The src layout keeps importable packages one level below the
+    # project root; try each base's `src/` after the base itself.
     for base in bases:
-        resolved = _try_module_at(base, parts)
-        if resolved is not None:
-            return resolved
+        for candidate in (base, base / "src"):
+            resolved = _try_module_at(candidate, parts)
+            if resolved is not None:
+                return resolved
+
+    if root is None:
+        # Marker-less tree: fall back to the invocation directory when
+        # the analyzed file lives under it (the common "run from the
+        # project root" case). Files outside the cwd stay bounded to
+        # their own directory.
+        cwd: Path | None = None
+        try:
+            cwd = Path.cwd()
+            file_in_cwd = current_file.resolve().is_relative_to(cwd)
+        except OSError:
+            file_in_cwd = False
+        if cwd is not None and file_in_cwd:
+            for candidate in (cwd, cwd / "src"):
+                resolved = _try_module_at(candidate, parts)
+                if resolved is not None:
+                    return resolved
     return None
 
 
@@ -750,6 +785,14 @@ def _merge_imports(
             continue
         resolved = _resolve_module_path(node.module, current_file, node.level)
         if resolved is None:
+            module_spelled = "." * node.level + (node.module or "")
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                stmt = f"from {module_spelled} import {alias.name}"
+                if alias.asname is not None:
+                    stmt += f" as {alias.asname}"
+                registry.failed_imports.setdefault(alias.asname or alias.name, stmt)
             continue
         try:
             real = resolved.resolve()

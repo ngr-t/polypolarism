@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Cross-file schema imports now resolve in `.git`-rooted projects
+  without packaging markers and in the `src/` layout, with a cwd
+  fallback for marker-less trees (user report: `from module1.module2
+  import (Schema,)` hit PLW006 although the module existed). When an
+  import is seen but still cannot be resolved, PLW006 now names the
+  failing statement and explains how the project root is detected,
+  instead of suggesting an import the user already wrote.
+
 ### Added
 
 - Text output groups results under a header line naming each checked

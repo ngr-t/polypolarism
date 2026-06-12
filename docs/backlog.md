@@ -164,6 +164,19 @@ Status legend: `[ ]` open / `[x]` done / `[-]` deliberately deferred.
      plus validate-narrowing cover the gap. Revival conditions recorded
      in the ADR.
 
+- [ ] **C-13: import/annotation recognition gaps** (found while
+  isolating the 2026-06-12 dotted-import report; both reproduce):
+  1. Imports nested under `if TYPE_CHECKING:` are not followed —
+     `_merge_imports` / `_merge_module_imports` only scan `tree.body`,
+     so the canonical annotation-only schema import hits PLW006.
+     Static-analysis convention is to treat `TYPE_CHECKING` as True.
+  2. String annotations (`def f(df: "DataFrame[S]")`) are not parsed —
+     the function is **silently skipped** (no functions found), which
+     combines badly with (1) since TYPE_CHECKING imports force quoted
+     annotations on Python < 3.12 without `from __future__ import
+     annotations`. Parse `ast.Constant(str)` annotations via
+     `ast.parse(..., mode="eval")` at the detection sites.
+
 ## D. Tooling / distribution
 
 - [x] **D-11: VS Code extension feature gaps** — done 2026-06-12:
