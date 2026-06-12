@@ -14710,3 +14710,52 @@ class TestBareReturnLaziness:
 
         results = check_source(source)
         assert results[0].passed, results[0].errors
+
+
+class TestMethodQualifiedNames:
+    """Methods report class-qualified names (user report 2026-06-12):
+    bare names made `Pipeline.process` and `Other.process` print as the
+    same `process`, and the flat name->line table misattributed the
+    failing one's line number to the other class's method."""
+
+    SOURCE = textwrap.dedent(
+        """
+        import pandera.polars as pa
+        import polars as pl
+        from pandera.typing.polars import DataFrame
+
+
+        class S(pa.DataFrameModel):
+            id: int
+
+
+        class Pipeline:
+            def process(self, df: DataFrame[S]) -> DataFrame[S]:
+                return df.with_columns(pl.col("missing") * 2)
+
+
+        class Other:
+            def process(self, df: DataFrame[S]) -> DataFrame[S]:
+                return df
+
+
+        def process(df: DataFrame[S]) -> DataFrame[S]:
+            return df
+        """
+    )
+
+    def test_methods_get_class_qualified_names(self):
+        analyses = analyze_source(self.SOURCE)
+        names = {a.name for a in analyses}
+        assert names == {"Pipeline.process", "Other.process", "process"}
+
+    def test_qualified_names_keep_distinct_line_numbers(self):
+        analyses = analyze_source(self.SOURCE)
+        by_name = {a.name: a for a in analyses}
+        assert by_name["Pipeline.process"].lineno < by_name["Other.process"].lineno
+        assert by_name["Pipeline.process"].has_errors
+        assert not by_name["Other.process"].has_errors
+
+    def test_module_level_function_name_stays_bare(self):
+        analyses = analyze_source(self.SOURCE)
+        assert any(a.name == "process" and not a.has_errors for a in analyses)

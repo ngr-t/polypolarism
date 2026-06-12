@@ -1,0 +1,3 @@
+Pipeline.process: FAIL
+  error: [PLY001] Column 'missing' not found. Available columns: ['id']
+Other.process: OK

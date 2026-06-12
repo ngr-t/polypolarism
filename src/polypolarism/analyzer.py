@@ -7123,8 +7123,16 @@ def analyze_function(
                 )
             )
 
+    # Methods report class-qualified names so two classes' same-named
+    # methods stay distinguishable in output and in the name->line
+    # tables. Call-resolution registries keep the bare name.
+    qualified_name = (
+        f"{current_class_name}.{func_node.name}"
+        if current_class_name is not None
+        else func_node.name
+    )
     return FunctionAnalysis(
-        name=func_node.name,
+        name=qualified_name,
         lineno=func_node.lineno,
         end_lineno=func_node.end_lineno or func_node.lineno,
         input_types=input_types,

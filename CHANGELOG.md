@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failing statement and explains how the project root is detected,
   instead of suggesting an import the user already wrote.
 
+- Class methods report class-qualified names (`Pipeline.process`)
+  everywhere a function is named — text output, JSON diagnostics, and
+  the `functions` hover summaries. Bare names rendered two classes'
+  same-named methods identically and pointed the failing one's line
+  number at the wrong class (user report).
+
 ### Added
 
 - Text output groups results under a header line naming each checked

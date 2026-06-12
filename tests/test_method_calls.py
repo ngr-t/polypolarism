@@ -195,7 +195,7 @@ class TestMismatchStillDetected:
         )
         # Loader._load and Loader.run should both be checked. _load passes,
         # run fails with a column/schema mismatch.
-        run_result = next(r for r in results if r.function_name == "run")
+        run_result = next(r for r in results if r.function_name == "Loader.run")
         assert not run_result.passed
 
     def test_nonstrict_inner_schema_passes_with_leniency(self):
@@ -214,7 +214,7 @@ class TestMismatchStillDetected:
                     return self._load()
             """
         )
-        run_result = next(r for r in results if r.function_name == "run")
+        run_result = next(r for r in results if r.function_name == "Loader.run")
         assert run_result.passed
         assert any("not provably absent" in note for note in run_result.leniency), (
             run_result.leniency
