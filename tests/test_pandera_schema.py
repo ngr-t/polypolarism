@@ -621,8 +621,9 @@ class TestObjectApiSchemas:
             s = pa.DataFrameSchema({"a": pa.Column(int)})
             """
         )
-        ft = registry.get("s").to_frame_type()
-        assert ft.nonstrict_schema == "s"
+        schema = registry.get("s")
+        assert schema is not None
+        assert schema.to_frame_type().nonstrict_schema == "s"
 
     def test_parametrized_dtypes_match_class_form(self):
         registry = _collect(
@@ -639,7 +640,9 @@ class TestObjectApiSchemas:
             )
             """
         )
-        cols = registry.get("s").columns
+        schema = registry.get("s")
+        assert schema is not None
+        cols = schema.columns
         assert cols["t"].dtype == Datetime(tz="UTC", unit="ms")
         # Probed: pandera resolves the bare class through its engine
         # default (28, 0) in Column dtype position too.
@@ -671,6 +674,7 @@ class TestObjectApiSchemas:
             """
         )
         schema = registry.get("s")
+        assert schema is not None
         assert isinstance(schema.columns["a"].dtype, Unknown)
         assert "a" in schema.definition_warnings
 
@@ -701,7 +705,9 @@ class TestObjectApiConstruction:
             s = pa.DataFrameSchema({c: pa.Column(pl.Float64) for c in ["x", "y", "z"]})
             """
         )
-        cols = registry.get("s").columns
+        schema = registry.get("s")
+        assert schema is not None
+        cols = schema.columns
         assert set(cols) == {"x", "y", "z"}
         assert all(spec.dtype == Float64() for spec in cols.values())
 
@@ -716,8 +722,9 @@ class TestObjectApiConstruction:
             s = pa.DataFrameSchema({c: pa.Column(int) for c in METRICS})
             """
         )
-        cols = registry.get("s").columns
-        assert set(cols) == {"clicks", "views"}
+        schema = registry.get("s")
+        assert schema is not None
+        assert set(schema.columns) == {"clicks", "views"}
 
     def test_comprehension_value_referencing_loopvar_degrades(self):
         registry = _collect(
@@ -744,7 +751,9 @@ class TestObjectApiConstruction:
             s = pa.DataFrameSchema({**COMMON, "price": pa.Column(pl.Float64)})
             """
         )
-        cols = registry.get("s").columns
+        schema = registry.get("s")
+        assert schema is not None
+        cols = schema.columns
         assert set(cols) == {"id", "price"}
         assert cols["id"].dtype == Int64()
 
@@ -775,6 +784,7 @@ class TestObjectApiConstruction:
         )
         base = registry.get("base")
         wide = registry.get("wide")
+        assert base is not None and wide is not None
         assert set(base.columns) == {"a"}  # immutable derivation
         assert set(wide.columns) == {"a", "b"}
         assert wide.strict is True and wide.coerce is True
@@ -789,6 +799,7 @@ class TestObjectApiConstruction:
             """
         )
         narrow = registry.get("narrow")
+        assert narrow is not None
         assert set(narrow.columns) == {"b"}
 
 
