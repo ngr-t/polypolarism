@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Text output groups results under a header line naming each checked
+  file, so multi-file / directory runs show which file every function
+  came from; files without annotated functions are listed with an
+  explicit note. This also fixes line numbers when two files define a
+  same-named function (the flat merge let the last file win for both).
+
 - `--format json` now carries a `functions` array: per-function schema
   summaries (source span, parameter frames, declared/inferred return
   frames with rendered dtypes, openness/strict/lazy markers) so editor

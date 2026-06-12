@@ -119,6 +119,48 @@ def check_directory(dir_path: Path) -> list[CheckResult]:
     return results
 
 
+def _format_result_block(result: CheckResult, function_lines: dict[str, int]) -> list[str]:
+    """Render one function's status line plus its errors/warnings."""
+    lines: list[str] = []
+    if result.passed and result.warnings:
+        status = "\033[33mWARN\033[0m"
+    elif result.passed:
+        status = "\033[32mOK\033[0m"
+    else:
+        status = "\033[31mFAIL\033[0m"
+
+    lineno = function_lines.get(result.function_name)
+    if lineno is not None:
+        lines.append(f"  {result.function_name} (line {lineno}): {status}")
+    else:
+        lines.append(f"  {result.function_name}: {status}")
+
+    if not result.passed:
+        for error in result.errors:
+            lines.append(f"    - {error}")
+        diff_block = _format_schema_diff(result.errors)
+        if diff_block:
+            lines.extend(diff_block)
+    for warning in result.warnings:
+        lines.append(f"    \033[33m! {warning}\033[0m")
+    return lines
+
+
+def _format_summary(results: list[CheckResult]) -> str:
+    """Aggregate pass/fail/warning counts into the closing summary line."""
+    passed_count = sum(1 for r in results if r.passed)
+    failed_count = len(results) - passed_count
+    warn_count = sum(1 for r in results if r.warnings)
+
+    if failed_count == 0:
+        summary = f"\033[32mAll {passed_count} function(s) passed.\033[0m"
+    else:
+        summary = f"\033[31m{failed_count} function(s) failed, {passed_count} passed.\033[0m"
+    if warn_count:
+        summary += f" \033[33m({warn_count} with warnings)\033[0m"
+    return summary
+
+
 def format_results(
     results: list[CheckResult],
     verbose: bool = False,
@@ -132,45 +174,36 @@ def format_results(
         return "No functions with DataFrame[Schema] annotations found.\n"
 
     lines: list[str] = []
-    passed_count = sum(1 for r in results if r.passed)
-    failed_count = len(results) - passed_count
-    warn_count = sum(1 for r in results if r.warnings)
-
     for result in results:
-        if result.passed and result.warnings:
-            status = "\033[33mWARN\033[0m"
-        elif result.passed:
-            status = "\033[32mOK\033[0m"
-        else:
-            status = "\033[31mFAIL\033[0m"
-
-        lineno = function_lines.get(result.function_name)
-        if lineno is not None:
-            lines.append(f"  {result.function_name} (line {lineno}): {status}")
-        else:
-            lines.append(f"  {result.function_name}: {status}")
-
-        if not result.passed:
-            for error in result.errors:
-                lines.append(f"    - {error}")
-            diff_block = _format_schema_diff(result.errors)
-            if diff_block:
-                lines.extend(diff_block)
-        for warning in result.warnings:
-            lines.append(f"    \033[33m! {warning}\033[0m")
-
+        lines.extend(_format_result_block(result, function_lines))
     lines.append("")
-    if failed_count == 0:
-        summary = f"\033[32mAll {passed_count} function(s) passed.\033[0m"
-        if warn_count:
-            summary += f" \033[33m({warn_count} with warnings)\033[0m"
-        lines.append(summary)
-    else:
-        summary = f"\033[31m{failed_count} function(s) failed, {passed_count} passed.\033[0m"
-        if warn_count:
-            summary += f" \033[33m({warn_count} with warnings)\033[0m"
-        lines.append(summary)
+    lines.append(_format_summary(results))
+    return "\n".join(lines)
 
+
+def format_results_files(groups: list[FileResults], verbose: bool = False) -> str:
+    """Format check results grouped per file, each under its path header.
+
+    Every checked file is listed — files without annotated functions get
+    an explicit note — so multi-file runs show exactly what was targeted
+    and which file each function came from. Line numbers come from each
+    group's own table, so same-named functions in different files cannot
+    shadow each other.
+    """
+    lines: list[str] = []
+    for group in groups:
+        lines.append(group.file_path)
+        if not group.results:
+            lines.append("  (no functions with DataFrame[Schema] annotations)")
+        for result in group.results:
+            lines.extend(_format_result_block(result, group.function_lines))
+        lines.append("")
+
+    all_results = [r for g in groups for r in g.results]
+    if not all_results:
+        lines.append("No functions with DataFrame[Schema] annotations found.")
+    else:
+        lines.append(_format_summary(all_results))
     return "\n".join(lines)
 
 
@@ -338,11 +371,7 @@ def main(args: list[str] | None = None) -> int:
         elif path.is_dir():
             file_groups.extend(_expand_directory_groups(path))
 
-    all_results: list[CheckResult] = []
-    all_function_lines: dict[str, int] = {}
-    for group in file_groups:
-        all_results.extend(group.results)
-        all_function_lines.update(group.function_lines)
+    all_results: list[CheckResult] = [r for g in file_groups for r in g.results]
 
     if parsed.format == "json":
         if len(file_groups) == 1:
@@ -357,9 +386,7 @@ def main(args: list[str] | None = None) -> int:
         else:
             output = format_json_files(file_groups)
     else:
-        output = format_results(
-            all_results, verbose=parsed.verbose, function_lines=all_function_lines
-        )
+        output = format_results_files(file_groups, verbose=parsed.verbose)
         if parsed.no_color:
             import re
 

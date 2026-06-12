@@ -289,6 +289,85 @@ class TestSchemaDiffBlock:
         assert "extra" in output
 
 
+_ANNOTATED_TEMPLATE = """
+import pandera.polars as pa
+from pandera.typing.polars import DataFrame
+
+class IdSchema(pa.DataFrameModel):
+    id: int
+
+def {name}(data: DataFrame[IdSchema]) -> DataFrame[IdSchema]:
+    return data
+"""
+
+
+class TestFileAttribution:
+    """Text output names the file each result group came from, so
+    multi-file runs are attributable (user report 2026-06-12)."""
+
+    def _run_main(self, monkeypatch, capsys, *argv: str) -> str:
+        monkeypatch.setattr(sys, "argv", ["polypolarism", "--no-color", *argv])
+        main()
+        return capsys.readouterr().out
+
+    def test_multi_file_run_groups_under_file_headers(self, tmp_path, monkeypatch, capsys):
+        (tmp_path / "alpha.py").write_text(_ANNOTATED_TEMPLATE.format(name="f_alpha"))
+        (tmp_path / "beta.py").write_text(_ANNOTATED_TEMPLATE.format(name="f_beta"))
+
+        output = self._run_main(monkeypatch, capsys, str(tmp_path))
+
+        alpha_header = output.index(str(tmp_path / "alpha.py"))
+        beta_header = output.index(str(tmp_path / "beta.py"))
+        # Each function is listed after its own file's header and before
+        # the next file's header.
+        assert alpha_header < output.index("f_alpha") < beta_header
+        assert beta_header < output.index("f_beta")
+
+    def test_same_function_name_keeps_per_file_line_numbers(self, tmp_path, monkeypatch, capsys):
+        """Two files defining the same function name must each report
+        their own line number (the flat dict merge used to let the last
+        file win for both)."""
+        (tmp_path / "one.py").write_text(_ANNOTATED_TEMPLATE.format(name="process"))
+        # Same function name, shifted down by extra leading lines.
+        (tmp_path / "two.py").write_text("\n\n\n\n" + _ANNOTATED_TEMPLATE.format(name="process"))
+
+        output = self._run_main(monkeypatch, capsys, str(tmp_path))
+
+        one_part = output[output.index(str(tmp_path / "one.py")) :]
+        two_part = output[output.index(str(tmp_path / "two.py")) :]
+        assert "process (line 8):" in one_part
+        assert "process (line 12):" in two_part
+
+    def test_single_file_run_shows_file_header(self, tmp_path, monkeypatch, capsys):
+        target = tmp_path / "solo.py"
+        target.write_text(_ANNOTATED_TEMPLATE.format(name="f_solo"))
+
+        output = self._run_main(monkeypatch, capsys, str(target))
+
+        assert str(target) in output
+        assert "f_solo (line 8): OK" in output
+
+    def test_unannotated_file_is_still_listed(self, tmp_path, monkeypatch, capsys):
+        """A checked file with no annotated functions appears with a note,
+        so the user can tell it was targeted."""
+        (tmp_path / "annotated.py").write_text(_ANNOTATED_TEMPLATE.format(name="f_ann"))
+        (tmp_path / "plain.py").write_text("x = 1\n")
+
+        output = self._run_main(monkeypatch, capsys, str(tmp_path))
+
+        assert str(tmp_path / "plain.py") in output
+        plain_part = output[output.index(str(tmp_path / "plain.py")) :]
+        assert "no functions with DataFrame[Schema] annotations" in plain_part
+
+    def test_summary_stays_aggregated_across_files(self, tmp_path, monkeypatch, capsys):
+        (tmp_path / "alpha.py").write_text(_ANNOTATED_TEMPLATE.format(name="f_alpha"))
+        (tmp_path / "beta.py").write_text(_ANNOTATED_TEMPLATE.format(name="f_beta"))
+
+        output = self._run_main(monkeypatch, capsys, str(tmp_path))
+
+        assert "All 2 function(s) passed." in output
+
+
 class TestMainExitCode:
     """Test CLI exit codes."""
 
