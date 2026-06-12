@@ -166,16 +166,22 @@ Status legend: `[ ]` open / `[x]` done / `[-]` deliberately deferred.
 
 ## D. Tooling / distribution
 
-- [ ] **D-11: VS Code extension feature gaps** (vscode-polypolarism,
-  v0.1.0 preview) — QuickFix / hover / rename not implemented; bundled
-  install path broken (works only with `importStrategy:
-  "fromEnvironment"`). 2026-06-11 catch-up sync done (LSP `code` +
-  README-anchor links, multi-file attribution, parse-failure tolerance,
-  real LSP e2e test). Remaining infra note: `npm test`'s
-  `@vscode/test-electron` runner (`out/test/runTest.js`) was never
-  instantiated from the template — a VS Code-side integration harness
-  needs building before extension-host behavior is testable headlessly;
-  E2E coverage currently lives at the pygls LSP layer.
+- [x] **D-11: VS Code extension feature gaps** — done 2026-06-12:
+  schema hover shipped (per-parameter / declared / inferred frames from
+  the `functions` array `--format json` emits since 73c13a6); bundled
+  install fixed (`nox -s setup` vendors polypolarism from GitHub main —
+  hash-pinned requirements.txt can't carry a VCS dep — verified in the
+  rebuilt vsix); `@vscode/test-electron` harness instantiated (`npm
+  test` green: download VS Code, install ms-python.python, smoke
+  suite); toolchains refreshed superseding 8 stale dependabot PRs
+  (closed); LSP e2e suite extended with a hover test (sample now pins
+  PLY042 after the checked-island re-bundle).
+  - [ ] **D-11b (follow-up): QuickFix / rename** — blocked on core:
+    diagnostics report function-body line spans, not expression-level
+    column positions. QuickFix ("declare column on schema", "switch to
+    bare param") and rename-aware narrowing need per-expression ranges
+    in the JSON output first; design that core change before extension
+    work resumes.
 - [ ] **D-12: PyPI publication** — `publish.yml` is complete (build +
   Trusted Publishing via OIDC, `pypi` environment, v-tag or manual
   dispatch). The remaining steps are owner actions, not code:
