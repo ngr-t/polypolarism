@@ -191,13 +191,15 @@ def collect_schemas_with_imports(tree: ast.Module, file_path: Path) -> SchemaReg
     imported_trees: list[ast.Module] = []
     _merge_imports(tree, file_path, registry, visited, imported_trees)
     _merge_module_imports(tree, file_path, registry)
-    _collect_inherited_subclasses(tree, imported_trees, registry, own_names)
+    aliases = _collect_name_aliases(tree)
+    _collect_inherited_subclasses(tree, imported_trees, registry, own_names, aliases)
     return registry
 
 
 def collect_schemas(tree: ast.Module) -> SchemaRegistry:
     """Walk a module AST and return the set of Pandera schemas defined at top level."""
     registry = SchemaRegistry()
+    aliases = _collect_name_aliases(tree)
 
     candidate_names: set[str] = set()
     candidates: dict[str, ast.ClassDef] = {}
@@ -209,14 +211,14 @@ def collect_schemas(tree: ast.Module) -> SchemaRegistry:
         changed = False
         for node in tree.body:
             if isinstance(node, ast.ClassDef) and node.name not in candidate_names:
-                if _looks_like_schema(node, candidate_names):
+                if _looks_like_schema(node, candidate_names, aliases):
                     candidates[node.name] = node
                     candidate_names.add(node.name)
                     changed = True
 
-    sorted_names = _topo_sort(candidates)
+    sorted_names = _topo_sort(candidates, aliases)
     for name in sorted_names:
-        registry.schemas[name] = _parse_schema(candidates[name], registry)
+        registry.schemas[name] = _parse_schema(candidates[name], registry, aliases)
 
     _collect_object_schemas(tree, registry)
     _scan_frame_aliases(tree, registry)
@@ -592,10 +594,63 @@ def _parse_object_schema_value(
     return None
 
 
-def _looks_like_schema(node: ast.ClassDef, known_schemas: set[str]) -> bool:
-    """Return True if any base of ``node`` is DataFrameModel or a known schema."""
+def _collect_name_aliases(tree: ast.Module) -> dict[str, str]:
+    """Collect top-level name → original-name aliases from the module AST.
+
+    Covers two patterns that rename pandera base classes or user schemas
+    (issue #98):
+
+    - ``from pandera.polars import DataFrameModel as DFM``
+      (from-import alias) → ``{"DFM": "DataFrameModel"}``
+    - ``DFM = pa.DataFrameModel``  (attribute RHS) → ``{"DFM": "DataFrameModel"}``
+    - ``BAlias = B``               (name RHS)      → ``{"BAlias": "B"}``
+
+    Only top-level ``ast.Assign`` with a single target ``Name`` node are
+    followed — subscript or multi-target assignments are ignored.
+    """
+    aliases: dict[str, str] = {}
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.asname is not None:
+                    aliases[alias.asname] = alias.name
+        elif isinstance(node, ast.Assign):
+            if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+                lhs = node.targets[0].id
+                rhs = node.value
+                if isinstance(rhs, ast.Name):
+                    aliases[lhs] = rhs.id
+                elif isinstance(rhs, ast.Attribute):
+                    aliases[lhs] = rhs.attr
+    return aliases
+
+
+def _resolve_name(name: str, aliases: dict[str, str]) -> str:
+    """Follow an alias chain to its canonical name, stopping at cycles."""
+    seen: set[str] = set()
+    while name in aliases and name not in seen:
+        seen.add(name)
+        name = aliases[name]
+    return name
+
+
+def _looks_like_schema(
+    node: ast.ClassDef,
+    known_schemas: set[str],
+    aliases: dict[str, str] | None = None,
+) -> bool:
+    """Return True if any base of ``node`` is DataFrameModel or a known schema.
+
+    ``aliases`` maps import-as and assignment aliases to their canonical names
+    so ``class K(DFM)`` is recognised when ``DFM = pa.DataFrameModel`` or
+    ``from … import DataFrameModel as DFM`` (issue #98).
+    """
+    _aliases = aliases or {}
     for base in node.bases:
         if isinstance(base, ast.Name):
+            resolved = _resolve_name(base.id, _aliases)
+            if resolved in _BASE_NAMES or resolved in known_schemas:
+                return True
             if base.id in _BASE_NAMES or base.id in known_schemas:
                 return True
         elif isinstance(base, ast.Attribute):
@@ -604,14 +659,24 @@ def _looks_like_schema(node: ast.ClassDef, known_schemas: set[str]) -> bool:
     return False
 
 
-def _parse_schema(node: ast.ClassDef, registry: SchemaRegistry) -> Schema:
+def _parse_schema(
+    node: ast.ClassDef,
+    registry: SchemaRegistry,
+    aliases: dict[str, str] | None = None,
+) -> Schema:
     """Parse a single ClassDef into a Schema, merging parent fields."""
+    _aliases = aliases or {}
     schema = Schema(name=node.name)
 
     parent_names: list[str] = []
     for base in node.bases:
-        if isinstance(base, ast.Name) and base.id in registry.schemas:
-            parent_names.append(base.id)
+        if isinstance(base, ast.Name):
+            # Resolve alias first; fall back to bare name.
+            resolved = _resolve_name(base.id, _aliases)
+            parent_key = resolved if resolved in registry.schemas else base.id
+            if parent_key in registry.schemas:
+                parent_names.append(parent_key)
+            continue
         elif isinstance(base, ast.Attribute):
             # Module-qualified base ``class Users(mod.WithId)`` — resolved
             # through the dotted keys ``import mod`` registers (issues
@@ -947,13 +1012,24 @@ def _dotted_base_name(node: ast.expr) -> str | None:
     return ".".join(reversed(parts))
 
 
-def _bases_resolve(node: ast.ClassDef, registry: SchemaRegistry) -> bool:
+def _bases_resolve(
+    node: ast.ClassDef,
+    registry: SchemaRegistry,
+    aliases: dict[str, str] | None = None,
+) -> bool:
     """True when any base marks ``node`` as a schema against the MERGED
     registry: ``DataFrameModel``/``SchemaModel`` (bare or attribute tail),
-    a registered schema name, or a dotted module-qualified schema key."""
+    a registered schema name, or a dotted module-qualified schema key.
+
+    ``aliases`` lets alias names resolve to their canonical names (issue #98).
+    """
+    _aliases = aliases or {}
     for base in node.bases:
         if isinstance(base, ast.Name):
-            if base.id in _BASE_NAMES or base.id in registry.schemas:
+            resolved = _resolve_name(base.id, _aliases)
+            if resolved in _BASE_NAMES or base.id in _BASE_NAMES:
+                return True
+            if resolved in registry.schemas or base.id in registry.schemas:
                 return True
         elif isinstance(base, ast.Attribute):
             if base.attr in _BASE_NAMES:
@@ -969,6 +1045,7 @@ def _collect_inherited_subclasses(
     imported_trees: list[ast.Module],
     registry: SchemaRegistry,
     own_names: set[str],
+    aliases: dict[str, str] | None = None,
 ) -> None:
     """Second pass for cross-file inheritance (issue #76).
 
@@ -984,35 +1061,44 @@ def _collect_inherited_subclasses(
     (``own_names`` tracks what the analyzed module itself has defined);
     classes from imported trees never overwrite existing entries.
     """
+    _aliases = aliases or {}
     changed = True
     while changed:
         changed = False
         for node in main_tree.body:
             if not isinstance(node, ast.ClassDef) or node.name in own_names:
                 continue
-            if not _bases_resolve(node, registry):
+            if not _bases_resolve(node, registry, _aliases):
                 continue
-            registry.schemas[node.name] = _parse_schema(node, registry)
+            registry.schemas[node.name] = _parse_schema(node, registry, _aliases)
             own_names.add(node.name)
             changed = True
         for sub_tree in imported_trees:
+            sub_aliases = _collect_name_aliases(sub_tree)
             for node in sub_tree.body:
                 if not isinstance(node, ast.ClassDef) or node.name in registry.schemas:
                     continue
-                if not _bases_resolve(node, registry):
+                if not _bases_resolve(node, registry, sub_aliases):
                     continue
-                registry.schemas[node.name] = _parse_schema(node, registry)
+                registry.schemas[node.name] = _parse_schema(node, registry, sub_aliases)
                 changed = True
 
 
-def _topo_sort(candidates: dict[str, ast.ClassDef]) -> list[str]:
+def _topo_sort(
+    candidates: dict[str, ast.ClassDef],
+    aliases: dict[str, str] | None = None,
+) -> list[str]:
     """Topological sort by base class dependencies (parents first)."""
+    _aliases = aliases or {}
     deps: dict[str, list[str]] = {}
     for name, node in candidates.items():
         parents: list[str] = []
         for base in node.bases:
-            if isinstance(base, ast.Name) and base.id in candidates:
-                parents.append(base.id)
+            if isinstance(base, ast.Name):
+                resolved = _resolve_name(base.id, _aliases)
+                parent = resolved if resolved in candidates else base.id
+                if parent in candidates:
+                    parents.append(parent)
         deps[name] = parents
 
     visited: set[str] = set()
