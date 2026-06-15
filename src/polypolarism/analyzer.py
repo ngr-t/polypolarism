@@ -4398,6 +4398,11 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         self.module_consts: dict[str, str | list[str] | int] = module_consts or {}
         # Track variable -> FrameType mapping
         self.var_types: dict[str, FrameType] = dict(input_types)
+        # Per-variable list of all possible FrameTypes from if/else branches
+        # (issue #95). Populated by visit_If when branches diverge; cleared on
+        # unconditional reassignment. _collect_return_frames expands these so
+        # the checker validates every branch path, not just the intersection.
+        self.var_alt_types: dict[str, list[FrameType]] = {}
         # Track variable -> FrameList element type (for partition_by results
         # and any other op that yields a list of frames).
         self.var_lists: dict[str, FrameType] = {}
@@ -4461,20 +4466,26 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         # differently in if vs else get their types intersected at the
         # merge point (issue #95). Narrowing is disabled inside branches.
         saved_var_types = dict(self.var_types)
+        saved_var_alt_types = dict(self.var_alt_types)
         prev_narrowing = self._narrowing_enabled
         self._narrowing_enabled = False
         try:
             for stmt in node.body:
                 self.visit(stmt)
             if_var_types = dict(self.var_types)
+            if_var_alt_types = dict(self.var_alt_types)
 
             self.var_types = dict(saved_var_types)
+            self.var_alt_types = dict(saved_var_alt_types)
             for stmt in node.orelse:
                 self.visit(stmt)
             else_var_types = dict(self.var_types)
+            else_var_alt_types = dict(self.var_alt_types)
 
-            # Merge: intersect types for variables changed in BOTH branches.
+            # Merge: intersect primary types; collect all branch possibilities
+            # into var_alt_types so _collect_return_frames can check every path.
             merged: dict[str, FrameType] = {}
+            merged_alts: dict[str, list[FrameType]] = dict(saved_var_alt_types)
             for var in set(if_var_types) | set(else_var_types):
                 it = if_var_types.get(var)
                 et = else_var_types.get(var)
@@ -4482,17 +4493,51 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 if it is not None and et is not None:
                     if_changed = it != pt
                     else_changed = et != pt
-                    if if_changed and else_changed:
-                        merged[var] = it if it == et else _intersect_frame_types(it, et)
-                    elif if_changed:
-                        merged[var] = it
+                    if if_changed or else_changed:
+                        # All distinct types this var can take from each branch.
+                        if_possible = if_var_alt_types.get(var) or [it]
+                        else_possible = else_var_alt_types.get(var) or [et]
+                        if if_changed and else_changed:
+                            all_possible = if_possible + [
+                                t for t in else_possible if t not in if_possible
+                            ]
+                            if len(all_possible) > 1:
+                                merged_alts[var] = all_possible
+                            merged[var] = it if it == et else _intersect_frame_types(it, et)
+                        elif if_changed:
+                            # No-else (or else unchanged) path keeps pre-if type.
+                            if pt is not None:
+                                all_possible = if_possible + [
+                                    t for t in [pt] if t not in if_possible
+                                ]
+                                if len(all_possible) > 1:
+                                    merged_alts[var] = all_possible
+                            elif len(if_possible) > 1:
+                                merged_alts[var] = if_possible
+                            merged[var] = it
+                        else:
+                            # Only else changed; if/no-if path keeps pre-if type.
+                            if pt is not None:
+                                all_possible = else_possible + [
+                                    t for t in [pt] if t not in else_possible
+                                ]
+                                if len(all_possible) > 1:
+                                    merged_alts[var] = all_possible
+                            elif len(else_possible) > 1:
+                                merged_alts[var] = else_possible
+                            merged[var] = et
                     else:
-                        merged[var] = et
+                        merged[var] = it
                 elif it is not None:
                     merged[var] = it
+                    if var in if_var_alt_types:
+                        merged_alts[var] = if_var_alt_types[var]
                 elif et is not None:
                     merged[var] = et
+                    if var in else_var_alt_types:
+                        merged_alts[var] = else_var_alt_types[var]
             self.var_types = merged
+            self.var_alt_types = merged_alts
         finally:
             self._narrowing_enabled = prev_narrowing
 
@@ -4505,6 +4550,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             elem = self._resolve_frame_list_element(node.iter)
             if elem is not None:
                 self.var_types[node.target.id] = elem
+                self.var_alt_types.pop(node.target.id, None)
         self._visit_with_narrowing_disabled(node)
 
     def visit_AsyncFor(self, node: ast.AsyncFor) -> None:
@@ -4547,12 +4593,16 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
 
     def _collect_return_frames(self, node: ast.expr) -> list[FrameType | None]:
         """All frames a return expression can yield. A conditional
-        expression (``A if cond else B``) contributes both arms; any
-        other expression contributes its single inferred frame (or
-        ``None`` when it cannot be inferred)."""
+        expression (``A if cond else B``) contributes both arms; a name
+        that was assigned different types in if/else branches contributes
+        all branch possibilities; any other expression contributes its
+        single inferred frame (or ``None`` when it cannot be inferred)."""
         node = _unwrap_cast(node)
         if isinstance(node, ast.IfExp):
             return self._collect_return_frames(node.body) + self._collect_return_frames(node.orelse)
+        # Expand all branch possibilities so the checker validates each path.
+        if isinstance(node, ast.Name) and node.id in self.var_alt_types:
+            return list(self.var_alt_types[node.id])
         return [self._infer_expr_type(node)]
 
     def visit_Expr(self, node: ast.Expr) -> None:
@@ -4584,6 +4634,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             # Preserve laziness from the variable being narrowed.
             schema_ft.is_lazy = self.var_types[arg.id].is_lazy
             self.var_types[arg.id] = schema_ft
+            self.var_alt_types.pop(arg.id, None)
 
     def visit_Assign(self, node: ast.Assign) -> None:
         """Handle variable assignments."""
@@ -4592,6 +4643,8 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             # Any reassignment invalidates a previously recorded constant;
             # it is re-recorded below if the new RHS is again a literal.
             self.var_consts.pop(var_name, None)
+            # Reassignment supersedes branch alternatives recorded by visit_If.
+            self.var_alt_types.pop(var_name, None)
             # ``parts = df.partition_by("k")`` — bind to FrameList element type.
             list_elem = self._infer_frame_list(node.value)
             if list_elem is not None:
@@ -4735,6 +4788,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             # Any reassignment invalidates a previously recorded constant;
             # it is re-recorded below if the new RHS is again a literal.
             self.var_consts.pop(var_name, None)
+            self.var_alt_types.pop(var_name, None)
             # Try to get type from a Pandera DataFrame[Schema] annotation
             frame_type, _ = _resolve_declared_type(node.annotation, self.schema_registry)
             if frame_type is not None:

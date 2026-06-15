@@ -40,3 +40,20 @@ def else_branch_wrong(df: DataFrame[KV], flag: bool) -> DataFrame[KVa]:
     else:
         x = df.filter(pl.col("v") > 0)  # {k,v} — missing a
     return x
+
+
+def if_strict_extra(df: DataFrame[KV], flag: bool = True) -> DataFrame[KVa]:
+    """Both branches add a column not in strict KVa — each path has an extra."""
+    if flag:  # noqa: SIM108
+        x = df.with_columns(a=pl.col("v") * 2, b=pl.col("v"))  # {k,v,a,b}
+    else:
+        x = df.with_columns(a=pl.col("v") + 1, c=pl.col("v"))  # {k,v,a,c}
+    return x
+
+
+def if_only_missing(df: DataFrame[KV], flag: bool) -> DataFrame[KVa]:
+    """if-only: column 'a' is added in the if-branch but absent on the no-else path."""
+    x = df.filter(pl.col("v") > 0)  # {k,v}
+    if flag:
+        x = df.with_columns(a=pl.col("v"))  # {k,v,a}
+    return x
