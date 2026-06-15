@@ -589,6 +589,7 @@ Warning codes:
 | `PLW010` | detected polars / pandera version is below the supported floor (see [Supported versions](#supported-versions)) |
 | `PLW011` | a schema field annotation polypolarism cannot translate — the column registers as `Unknown` dtype instead of silently vanishing (pandera raises TypeError at first use if the annotation genuinely doesn't resolve) |
 | `PLW012` | a grouped `std`/`var`/`sum` on a Date/Datetime/Time column is probed to yield an unconditionally all-null column (the same reduction raises in a plain select) — accepted, but probably not what you meant |
+| `PLW013` | `typing.cast(DataFrame[Schema], x)` is **not** honored as a schema assertion — polypolarism infers `x`'s real schema and checks that (a lying cast fails at runtime under `@pa.check_types` too). The note flags an inert cast over a known schema (suggesting `# type: ignore[PLY040]` to suppress a mismatch) or an unverified assumption over an open/unknown source |
 
 JSON output (`--format json`) emits warnings as `severity: "warning"`
 diagnostics so editors and CI can route them separately from errors.
