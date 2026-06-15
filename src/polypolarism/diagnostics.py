@@ -79,6 +79,8 @@ PLW011 = "PLW011"  # schema field annotation unrecognized; column degrades to Un
 
 PLW012 = "PLW012"  # grouped aggregation provably yields an all-null column (probed; probably a bug) (#91)
 
+PLW013 = "PLW013"  # typing.cast(DataFrame[Schema], ...) is not honored as a schema assertion (#102)
+
 
 _TYPE_IGNORE = re.compile(r"#\s*type:\s*ignore(?:\[([^\]]*)\])?")
 

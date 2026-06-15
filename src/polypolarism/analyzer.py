@@ -57,6 +57,7 @@ from polypolarism.diagnostics import (
     PLW008,
     PLW011,
     PLW012,
+    PLW013,
     PLY001,
     PLY002,
     PLY003,
@@ -4646,7 +4647,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         checker validates all of them against the declared type."""
         if node.value is None:
             return
-        for frame in self._collect_return_frames(node.value):
+        frames = self._collect_return_frames(node.value)
+        self._note_frame_cast(node.value, frames)
+        for frame in frames:
             if frame is None:
                 continue
             self.return_type = frame
@@ -4660,6 +4663,55 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                         result=frame.render(),
                     )
                 )
+
+    def _note_frame_cast(self, raw_value: ast.expr, inner_types: list[FrameType | None]) -> None:
+        """Emit PLW013 when ``typing.cast(DataFrame[Schema], value)`` is used
+        in a return / assignment position (issue #102).
+
+        polypolarism does NOT honor the cast as a schema assertion: it infers
+        ``value``'s real schema and checks THAT (sound — ``@pa.check_types``
+        validates the actual frame at runtime regardless of the cast, so a
+        lying cast fails at runtime too). The note makes that visible; users
+        coming from mypy (where ``cast`` silences the checker) otherwise
+        wonder why the cast had no effect. ``inner_types`` is the
+        already-inferred type(s) of the cast argument — passed in so this does
+        not re-infer (which would duplicate any diagnostics on ``value``).
+        """
+        if not (
+            isinstance(raw_value, ast.Call)
+            and _is_cast_func(raw_value.func)
+            and len(raw_value.args) >= 2
+        ):
+            return
+        schema_name = frame_annotation_schema_name(
+            raw_value.args[0], self.schema_registry.frame_aliases
+        )
+        if schema_name is None:
+            return
+        # (b) when the cast argument's real schema is unknown/open — the
+        # assertion is accepted but not verifiable; (a) when it is a concrete
+        # closed frame — the cast is inert, the real schema is what's checked.
+        unverified = not inner_types or any(t is None or t.rest is not None for t in inner_types)
+        if unverified:
+            self.warnings.append(
+                tag(
+                    PLW013,
+                    f"typing.cast to frame schema '{schema_name}' over an "
+                    f"unknown/open frame was accepted as an UNVERIFIED assumption: "
+                    f"polypolarism does not honor cast as a schema assertion and "
+                    f"cannot check the source frame's columns.",
+                )
+            )
+        else:
+            self.warnings.append(
+                tag(
+                    PLW013,
+                    f"typing.cast to frame schema '{schema_name}' is not honored as "
+                    f"a schema assertion; polypolarism checks the cast argument's "
+                    f"actual inferred schema instead. Use # type: ignore[PLY040] to "
+                    f"suppress a resulting mismatch if the cast is intentional.",
+                )
+            )
 
     def _collect_return_frames(self, node: ast.expr) -> list[FrameType | None]:
         """All frames a return expression can yield. A conditional
@@ -4724,6 +4776,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 self.generic_visit(node)
                 return
             inferred = self._infer_expr_type(node.value)
+            self._note_frame_cast(node.value, [inferred])
             if inferred:
                 self.var_types[var_name] = inferred
                 self.var_lists.pop(var_name, None)
