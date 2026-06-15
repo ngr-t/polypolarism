@@ -4323,6 +4323,26 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         return None
 
 
+def _intersect_frame_types(a: FrameType, b: FrameType) -> FrameType:
+    """Column-level intersection for if/else merge points (issue #95).
+
+    Retains only columns present in BOTH frames with identical ColumnSpecs.
+    This gives the pessimistic (safe) merged type: the caller can only rely
+    on columns that exist regardless of which branch executed.
+    """
+    cols: dict[str, ColumnSpec] = {
+        col: spec for col, spec in a.columns.items() if b.columns.get(col) == spec
+    }
+    return FrameType(
+        cols,
+        strict=a.strict or b.strict,
+        rest=a.rest if a.rest == b.rest else None,
+        is_lazy=a.is_lazy,
+        coerce=a.coerce and b.coerce,
+        absent=a.absent | b.absent,
+    )
+
+
 class FunctionBodyAnalyzer(ast.NodeVisitor):
     """Analyze a function body to track DataFrame types."""
 
@@ -4431,7 +4451,44 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             self._narrowing_enabled = prev
 
     def visit_If(self, node: ast.If) -> None:
-        self._visit_with_narrowing_disabled(node)
+        # Fork: visit each branch independently so variables assigned
+        # differently in if vs else get their types intersected at the
+        # merge point (issue #95). Narrowing is disabled inside branches.
+        saved_var_types = dict(self.var_types)
+        prev_narrowing = self._narrowing_enabled
+        self._narrowing_enabled = False
+        try:
+            for stmt in node.body:
+                self.visit(stmt)
+            if_var_types = dict(self.var_types)
+
+            self.var_types = dict(saved_var_types)
+            for stmt in node.orelse:
+                self.visit(stmt)
+            else_var_types = dict(self.var_types)
+
+            # Merge: intersect types for variables changed in BOTH branches.
+            merged: dict[str, FrameType] = {}
+            for var in set(if_var_types) | set(else_var_types):
+                it = if_var_types.get(var)
+                et = else_var_types.get(var)
+                pt = saved_var_types.get(var)
+                if it is not None and et is not None:
+                    if_changed = it != pt
+                    else_changed = et != pt
+                    if if_changed and else_changed:
+                        merged[var] = it if it == et else _intersect_frame_types(it, et)
+                    elif if_changed:
+                        merged[var] = it
+                    else:
+                        merged[var] = et
+                elif it is not None:
+                    merged[var] = it
+                elif et is not None:
+                    merged[var] = et
+            self.var_types = merged
+        finally:
+            self._narrowing_enabled = prev_narrowing
 
     def visit_For(self, node: ast.For) -> None:
         # ``for part in df.partition_by(...):`` / ``for part in parts:`` —

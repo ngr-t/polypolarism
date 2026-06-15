@@ -1,0 +1,4 @@
+if_branch_wrong: FAIL
+  error: [PLY040] Missing column 'a' of type Float64
+else_branch_wrong: FAIL
+  error: [PLY040] Missing column 'a' of type Float64

@@ -153,6 +153,16 @@ SKIP: dict[str, str] = {
     "invalid/ternary_diverging_arms.py::ternary_diverge": (
         "non-frame bool parameter 'flag' has no default; branch-dependent error is static-only"
     ),
+    # -- issue #95: branch divergence fixtures have a non-frame bool parameter.
+    "invalid/if_branch_diverge.py::if_branch_wrong": (
+        "non-frame bool parameter 'flag' has no default; branch-dependent error is static-only"
+    ),
+    "invalid/if_branch_diverge.py::else_branch_wrong": (
+        "non-frame bool parameter 'flag' has no default; branch-dependent error is static-only"
+    ),
+    "valid/if_branch_converge.py::both_branches_ok": (
+        "non-frame bool parameter 'flag' has no default; branch-dependent behavior is static-only"
+    ),
 }
 
 
