@@ -13,6 +13,7 @@ import contextlib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from polypolarism.compat.pandera_api import FRAME_ANNOTATION_HEADS as _FRAME_NAMES
 from polypolarism.compat.pandera_api import (
     OBJECT_COLUMN_CALLABLE_NAME,
     OBJECT_SCHEMA_CALLABLE_NAME,
@@ -127,6 +128,11 @@ class SchemaRegistry:
     # ".sibling"). Lets PLW006 say the import was seen but unresolved
     # instead of suggesting an import the user already wrote.
     failed_imports: dict[str, str] = field(default_factory=dict)
+    # ``from pandera.typing.polars import DataFrame as DF`` style aliases:
+    # maps alias name → canonical wrapper name ("DataFrame" or "LazyFrame").
+    # Populated by ``_scan_frame_aliases`` so the annotation parser can
+    # resolve alias-annotated parameters and return types (issue #96).
+    frame_aliases: dict[str, str] = field(default_factory=dict)
 
     def get(self, name: str) -> Schema | None:
         return self.schemas.get(name)
@@ -213,6 +219,7 @@ def collect_schemas(tree: ast.Module) -> SchemaRegistry:
         registry.schemas[name] = _parse_schema(candidates[name], registry)
 
     _collect_object_schemas(tree, registry)
+    _scan_frame_aliases(tree, registry)
 
     return registry
 
@@ -411,6 +418,27 @@ def _unresolved_object_schema(
         unresolved=True,
         definition_warnings={"<derivation>": detail},
     )
+
+
+def _scan_frame_aliases(tree: ast.Module, registry: SchemaRegistry) -> None:
+    """Record ``from X import DataFrame as DF``-style wrapper aliases.
+
+    When the user writes ``from pandera.typing.polars import DataFrame as DF``
+    and annotates parameters / return types with ``DF[Schema]``, polypolarism
+    would otherwise not recognise the wrapper name.  This maps each alias to
+    its canonical name (``"DataFrame"`` or ``"LazyFrame"``) so the annotation
+    parser can resolve it (issue #96).
+
+    Only top-level ``from``-imports of the file under analysis are scanned;
+    aliases in imported modules do not propagate (consistent with Python
+    semantics).
+    """
+    for node in tree.body:
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        for alias in node.names:
+            if alias.asname is not None and alias.name in _FRAME_NAMES:
+                registry.frame_aliases[alias.asname] = alias.name
 
 
 def _collect_object_schemas(tree: ast.Module, registry: SchemaRegistry) -> None:

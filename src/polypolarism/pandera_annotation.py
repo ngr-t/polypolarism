@@ -14,7 +14,10 @@ from polypolarism.pandera_schema import SchemaRegistry
 from polypolarism.types import FrameType
 
 
-def frame_annotation_schema_name(annotation: ast.expr) -> str | None:
+def frame_annotation_schema_name(
+    annotation: ast.expr,
+    frame_aliases: dict[str, str] | None = None,
+) -> str | None:
     """Return the schema name from a ``DataFrame[X]`` / ``LazyFrame[X]`` shape.
 
     Returns the name ``X`` — bare (``Schema``) or dotted
@@ -23,10 +26,14 @@ def frame_annotation_schema_name(annotation: ast.expr) -> str | None:
     as Pandera-backed even when import resolution failed (so we can warn
     instead of silently treating the file as empty).
     Returns ``None`` for annotations not in this shape.
+
+    ``frame_aliases`` maps alias names (e.g. ``DF``) to canonical wrapper
+    names (``"DataFrame"``/``"LazyFrame"``) so ``DF[Schema]`` is recognised
+    the same as ``DataFrame[Schema]`` (issue #96).
     """
     if not isinstance(annotation, ast.Subscript):
         return None
-    if _dataframe_head_name(annotation.value) is None:
+    if _dataframe_head_name(annotation.value, frame_aliases) is None:
         return None
     return _extract_schema_name(annotation.slice)
 
@@ -45,6 +52,9 @@ def extract_dataframe_annotation(
       looked up under the flat dotted key the registry records for
       ``import mod`` (see ``pandera_schema._merge_module_imports``)
     - Forward refs as string constants: ``DataFrame["Schema"]``
+    - Alias forms: ``DF[Schema]`` when ``from pandera.typing.polars import
+      DataFrame as DF`` is in scope (via ``registry.frame_aliases``,
+      issue #96).
 
     The returned FrameType has ``is_lazy=True`` for ``LazyFrame[...]``
     annotations and ``is_lazy=False`` for ``DataFrame[...]``.
@@ -55,7 +65,7 @@ def extract_dataframe_annotation(
     if not isinstance(annotation, ast.Subscript):
         return None
 
-    head_name = _dataframe_head_name(annotation.value)
+    head_name = _dataframe_head_name(annotation.value, registry.frame_aliases)
     if head_name is None:
         return None
 
@@ -100,11 +110,24 @@ def bare_frame_annotation(annotation: ast.expr) -> str | None:
     return None
 
 
-def _dataframe_head_name(node: ast.expr) -> str | None:
+def _dataframe_head_name(
+    node: ast.expr,
+    frame_aliases: dict[str, str] | None = None,
+) -> str | None:
     """Return ``"DataFrame"`` / ``"LazyFrame"`` when ``node`` is one of those
-    (bare or qualified, e.g. ``pa.DataFrame``); ``None`` otherwise."""
-    if isinstance(node, ast.Name) and node.id in _HEAD_NAMES:
-        return node.id
+    (bare or qualified, e.g. ``pa.DataFrame``); ``None`` otherwise.
+
+    ``frame_aliases`` maps alias names (e.g. ``DF``) to canonical wrapper
+    names so ``DF[Schema]`` is recognised the same as ``DataFrame[Schema]``
+    (issue #96). Returns the CANONICAL name, not the alias.
+    """
+    if isinstance(node, ast.Name):
+        if node.id in _HEAD_NAMES:
+            return node.id
+        if frame_aliases:
+            canonical = frame_aliases.get(node.id)
+            if canonical is not None:
+                return canonical
     if isinstance(node, ast.Attribute) and node.attr in _HEAD_NAMES:
         return node.attr
     return None

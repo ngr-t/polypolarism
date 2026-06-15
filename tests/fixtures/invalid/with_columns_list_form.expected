@@ -1,0 +1,2 @@
+fn_listform_extra: FAIL
+  error: [PLY040] Extra column 'a' of type Float64 not in declared return type

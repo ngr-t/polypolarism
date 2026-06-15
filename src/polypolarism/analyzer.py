@@ -4675,7 +4675,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             # Try to get type from a Pandera DataFrame[Schema] annotation
             frame_type, _ = _resolve_declared_type(node.annotation, self.schema_registry)
             if frame_type is not None:
-                annotated_schema = frame_annotation_schema_name(node.annotation)
+                annotated_schema = frame_annotation_schema_name(
+                    node.annotation, self.schema_registry.frame_aliases
+                )
                 if annotated_schema is not None:
                     self._note_schema_use(annotated_schema)
                 self.var_types[var_name] = frame_type
@@ -6052,7 +6054,16 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         # exists at runtime under SOME name — opens the result frame.
         has_opaque_outputs = False
 
-        for arg in node.args:
+        # Expand ``with_columns([e1, e2])`` list-as-single-arg so it is treated
+        # the same as the varargs form ``with_columns(e1, e2)`` (issue #97).
+        flat_args: list[ast.expr] = []
+        for _raw in node.args:
+            if isinstance(_raw, ast.List):
+                flat_args.extend(_raw.elts)
+            else:
+                flat_args.append(_raw)
+
+        for arg in flat_args:
             sel = _resolve_selector(arg, input_frame)
             if sel is not None:
                 # cs.* selectors in with_columns are a no-op type-wise (re-include
@@ -7107,8 +7118,10 @@ def analyze_function(
     broken_schemas_reported: set[str] = set()
     degraded_schemas_reported: set[str] = set()
 
+    _frame_aliases = schema_registry.frame_aliases
+
     def _note_schema_reference(annotation: ast.expr) -> None:
-        schema_name = frame_annotation_schema_name(annotation)
+        schema_name = frame_annotation_schema_name(annotation, _frame_aliases)
         if schema_name is None:
             return
         if schema_name not in broken_schemas_reported:
@@ -7134,7 +7147,7 @@ def analyze_function(
                 elif parse_error:
                     errors.append(f"Parameter '{arg.arg}': {parse_error}")
             else:
-                schema_name = frame_annotation_schema_name(arg.annotation)
+                schema_name = frame_annotation_schema_name(arg.annotation, _frame_aliases)
                 if schema_name is not None:
                     has_df_annotation = True
                     unresolved_schemas.append(schema_name)
@@ -7162,7 +7175,7 @@ def analyze_function(
             if parse_error:
                 errors.append(f"Return type: {parse_error}")
         else:
-            schema_name = frame_annotation_schema_name(func_node.returns)
+            schema_name = frame_annotation_schema_name(func_node.returns, _frame_aliases)
             if schema_name is not None:
                 has_df_annotation = True
                 unresolved_schemas.append(schema_name)

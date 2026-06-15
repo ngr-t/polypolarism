@@ -31,8 +31,4 @@ class KVa(pa.DataFrameModel):
 
 @pa.check_types
 def ternary_diverge(df: DataFrame[KV], flag: bool) -> DataFrame[KVa]:
-    return (
-        df.with_columns(a=pl.col("v") * 2)
-        if flag
-        else df.with_columns(b=pl.col("v"))
-    )
+    return df.with_columns(a=pl.col("v") * 2) if flag else df.with_columns(b=pl.col("v"))
