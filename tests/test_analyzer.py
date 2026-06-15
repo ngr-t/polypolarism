@@ -8304,9 +8304,10 @@ class TestFrameLiteralInference:
         ft = self._infer('pl.DataFrame({"a": [None, None]})')
         assert ft == FrameType({"a": Null()})
 
-    def test_empty_list_is_unknown(self):
+    def test_empty_list_is_null(self):
+        # polars: pl.DataFrame({"a": []}).schema == {a: Null} (issue #101)
         ft = self._infer('pl.DataFrame({"a": []})')
-        assert ft == FrameType({"a": Unknown()})
+        assert ft == FrameType({"a": Null()})
 
     def test_mixed_numeric_list_unifies(self):
         ft = self._infer('pl.DataFrame({"a": [1, 2.5]})')

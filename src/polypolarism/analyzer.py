@@ -317,11 +317,11 @@ def _resolve_schema_dtype(node: ast.expr) -> DataType:
 def _unify_literal_values(values: list[object]) -> DataType:
     """Fold ``infer_lit`` over python literal values with ``unify_types``.
 
-    ``[1, None]`` → ``Nullable[Int64]``; empty, non-literal or
-    non-unifiable values → ``Unknown``.
+    Empty list → ``Null`` (polars' deterministic type for ``[]``; issue #101).
+    Non-literal or non-unifiable values → ``Unknown``.
     """
     if not values:
-        return Unknown()
+        return Null()
     unified: DataType | None = None
     for value in values:
         if value is not None and not isinstance(value, (bool, int, float, str, bytes)):
