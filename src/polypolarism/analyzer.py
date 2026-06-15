@@ -4317,15 +4317,34 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         return receiver_name, None
 
     def _extract_lit_type(self, node: ast.expr) -> DataType | None:
-        """Extract type from pl.lit(value) expression."""
-        if isinstance(node, ast.Call):
-            if isinstance(node.func, ast.Attribute):
-                if node.func.attr == "lit":
-                    if isinstance(node.func.value, ast.Name) and node.func.value.id == "pl":
-                        if node.args and isinstance(node.args[0], ast.Constant):
-                            value = node.args[0].value
-                            if value is None or isinstance(value, (bool, int, float, str, bytes)):
-                                return infer_lit(value)
+        """Extract type from pl.lit(value) or pl.lit(value, dtype=T) expression."""
+        if not isinstance(node, ast.Call):
+            return None
+        if not isinstance(node.func, ast.Attribute):
+            return None
+        if node.func.attr != "lit":
+            return None
+        if not (isinstance(node.func.value, ast.Name) and node.func.value.id == "pl"):
+            return None
+        # Honor explicit dtype= keyword argument (issue #100).
+        for kw in node.keywords:
+            if kw.arg == "dtype":
+                explicit = _resolve_pl_dtype(kw.value)
+                if explicit is not None:
+                    # pl.lit(None, dtype=T) produces a nullable T column.
+                    if (
+                        node.args
+                        and isinstance(node.args[0], ast.Constant)
+                        and node.args[0].value is None
+                    ):
+                        return Nullable(explicit)
+                    return explicit
+                break
+        # No dtype=: infer from the literal value.
+        if node.args and isinstance(node.args[0], ast.Constant):
+            value = node.args[0].value
+            if value is None or isinstance(value, (bool, int, float, str, bytes)):
+                return infer_lit(value)
         return None
 
 
