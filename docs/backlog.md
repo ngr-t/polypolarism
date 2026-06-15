@@ -177,6 +177,76 @@ Status legend: `[ ]` open / `[x]` done / `[-]` deliberately deferred.
      annotations`. Parse `ast.Constant(str)` annotations via
      `ast.parse(..., mode="eval")` at the detection sites.
 
+- [ ] **C-14: True row polymorphism via `Annotated`-carried row variables**
+  (user request 2026-06-15). Research-grade precision/soundness upgrade for
+  column-preserving helpers. Today an open frame's `rest` is an *anonymous*
+  marker (`RowVar` exists but is inert — its name is never unified; see
+  `_is_frame_subtype`, which consults `rest` only as an open/closed flag).
+  So a non-strict in/out helper *accepts* wide inputs and lets the caller's
+  extra columns pass downstream, but only via `Unknown` leniency: their
+  dtypes are lost (no downstream checking) and preservation is not enforced
+  (a helper that silently drops them still type-checks — a runtime
+  `ColumnNotFoundError` waiting to happen). Genuine row polymorphism gives
+  the `rest` an *identity* threaded input→output, recovering both.
+
+  **Hard constraint (non-negotiable): do not deviate from Pandera.** Pandera
+  stays the runtime authority and the de-facto surface; in practice users
+  validate with Pandera and that is enough. The row variable is a
+  *static-only* annotation that Pandera ignores at runtime. Surface:
+  `Annotated[DataFrame[InId], Row("R")]` on params / returns — the base
+  (`DataFrame[InId]`, open) is a real Pandera schema it still validates;
+  `Row("R")` is runtime-inert metadata only polypolarism reads. No standard
+  Python typing feature can express a threadable *named-field* row variable
+  (`TypeVar` gives whole-schema identity only; `Concatenate`/PEP 612 is the
+  right shape but scoped to callable params; PEP 728 `extra_items` is a
+  *uniform* rest, not a variable; Python has no intersection / mapped types
+  / record spread) — hence the `Annotated` side-channel. Accepted cost: it
+  is a polypolarism *dialect* (mypy / pyright / Pandera see a plain open
+  DataFrame); the threading is checked by polypolarism only.
+
+  Tiers, cheapest / highest-de-risk first; each independently shippable and
+  **opt-in** (no `Row(...)` ⇒ today's behavior byte-for-byte — golden
+  fixtures for unannotated code must not move):
+  1. [ ] *De-risk + decide (ADR).* Empirically confirm the hard constraint:
+     `Annotated[DataFrame[S], <marker>]` survives `@pa.check_types` /
+     `Schema.validate` untouched (Pandera must ignore the extra metadata).
+     If it chokes, the surface design changes — so this gates everything.
+     Pin it with a `tests/test_runtime_differential.py` case. Decide the
+     row-algebra scope (add / drop / rename / lacks; one vs many vars).
+     Output: ADR-00NN.
+  2. [ ] *Surface + binding, no semantics.* Ship the runtime-inert `Row`
+     marker; teach `pandera_annotation.py` / `pandera_dtype.py` to recognize
+     `Annotated[DataFrame[S], Row("R")]` and bind a FrameType whose `rest`
+     is a *named, bound* `RowVar` (vs today's anonymous open marker). Pure
+     plumbing — behavior unchanged.
+  3. [ ] *Precision (call-site instantiation).* At a call, unify the param's
+     `Row("R")` against the actual argument's extras
+     (`R := actual.columns − declared.columns`, with real dtypes) and
+     substitute into the return's `Row("R")`. Downstream reads of the
+     caller's extras keep their real dtype instead of degrading to
+     `Unknown`. Touches the analyzer call path + the open-frame column read
+     in `expr_infer`.
+  4. [ ] *Soundness (preservation check).* Skolemize `R` while checking the
+     helper body and require the inferred return to contain all of `R`; a
+     body that drops it fails with a new `PLY0xx` ("frame does not preserve
+     row variable R"). This is the part Pandera fundamentally *cannot* check
+     (the property is relative to the caller, hence static-only).
+  5. [ ] *Row algebra + relations.* `Row("R")` add / drop / rename; `lacks`
+     constraints (reuse the ADR-0006 `absent` machinery, promoted from its
+     monomorphic form); join / concat over two disjoint row vars
+     (`R1 # R2`) with static disjointness checking. Property tests for the
+     row-unification laws, mirroring the existing `_is_frame_subtype` laws
+     in `tests/test_properties.py`.
+  6. [ ] *Ergonomics / tooling.* Optional inference of `R` for untyped
+     helpers; JSON output exposes bound row vars; golden fixtures
+     (valid / invalid / warning) + docs documenting the dialect.
+
+  Invariants across all tiers: Pandera is the runtime authority and the
+  marker is runtime-inert (re-gated by a runtime-differential test each
+  tier); the feature is opt-in with zero regression for pandera-only code.
+  Honest framing: practical users stay on Pandera; this is a theoretical
+  upper bound on static precision, not a daily-driver requirement.
+
 ## D. Tooling / distribution
 
 - [x] **D-11: VS Code extension feature gaps** — done 2026-06-12:
