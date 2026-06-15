@@ -1,4 +1,4 @@
-"""Polars DataFrame static type checker based on row polymorphism.
+"""Polars DataFrame static type checker, inspired by row polymorphism.
 
 Schemas are declared with Pandera ``DataFrameModel`` classes and referenced
 via ``DataFrame[Schema]`` / ``LazyFrame[Schema]`` annotations from

@@ -8,7 +8,7 @@ Three leniency rules can let a column pass without a precise check:
 | Rule | When it applies |
 |---|---|
 | **Unknown compatibility** | a column's inferred dtype degraded to `Unknown` somewhere upstream; `Unknown` satisfies any declared dtype (and vice versa), at any nesting depth (`List[Unknown]` satisfies `List[T]`) |
-| **Open frame** | row polymorphism: after an operation that can carry extra unknown columns, a declared column that is missing from the inferred frame is "not provably absent" — skipped, not an error |
+| **Open frame** | open-record width subtyping: after an operation that can carry extra unknown columns, a declared column that is missing from the inferred frame is "not provably absent" — skipped, not an error |
 | **Coerce** | with `class Config: coerce = True`, dtype differences that pandera would cast away at validation time (e.g. `UInt32` vs `Int64`) are not errors |
 
 The main constructs whose inference intentionally degrades to `Unknown`:

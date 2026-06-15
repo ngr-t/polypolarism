@@ -2,7 +2,9 @@
 
 ## Overview
 
-Polars DataFrame static type checker based on row polymorphism.
+Polars DataFrame static type checker, inspired by row polymorphism
+(the implementation is open-record structural subtyping + gradual `Unknown`;
+genuine row variables are scaffolded but not yet active — see `RowVar`).
 
 ## Commands
 

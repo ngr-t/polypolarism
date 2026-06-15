@@ -1,6 +1,6 @@
 # polypolarism
 
-Static type checker for Polars DataFrames based on row polymorphism.
+Static type checker for Polars DataFrames, inspired by row polymorphism (open-record structural subtyping).
 
 ## Features
 

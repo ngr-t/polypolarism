@@ -1,7 +1,7 @@
 [project]
 name = "polypolarism"
 version = "0.1.0"
-description = "Polars DataFrame static type checker based on row polymorphism"
+description = "Polars DataFrame static type checker inspired by row polymorphism"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [
