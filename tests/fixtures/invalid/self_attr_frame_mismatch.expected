@@ -1,0 +1,3 @@
+Holder.__init__: OK
+Holder.wrong: FAIL
+  error: [PLY040] Missing column 'a' of type Float64

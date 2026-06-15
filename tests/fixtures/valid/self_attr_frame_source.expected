@@ -1,0 +1,9 @@
+W.__init__: OK
+W.from_attr: OK
+  via: column 'k': passed via Unknown
+  via: column 'v': passed via Unknown
+W.from_attr_chain: OK
+  via: column 'k': passed via Unknown
+  via: column 'v': passed via Unknown
+Typed.__init__: OK
+Typed.passthrough: OK

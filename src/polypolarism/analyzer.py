@@ -1966,6 +1966,10 @@ class ClassRegistry:
     """
 
     classes: dict[str, dict[str, FunctionInfo]] = field(default_factory=dict)
+    # Frame-typed instance attributes per class (issue #104): ``self.<attr>``
+    # bound in ``__init__`` from a frame-annotated parameter, so a sibling
+    # method's ``acc = self.<attr>`` resolves instead of being dropped.
+    class_attrs: dict[str, dict[str, FrameType]] = field(default_factory=dict)
 
     def register_method(self, class_name: str, info: FunctionInfo) -> None:
         self.classes.setdefault(class_name, {})[info.name] = info
@@ -1975,6 +1979,11 @@ class ClassRegistry:
         if methods is None:
             return None
         return methods.get(method_name)
+
+    def attrs_for(self, class_name: str | None) -> dict[str, FrameType]:
+        if class_name is None:
+            return {}
+        return self.class_attrs.get(class_name, {})
 
     def __contains__(self, class_name: str) -> bool:
         return class_name in self.classes
@@ -5084,6 +5093,28 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             if elem is not None:
                 return elem
 
+        # Instance attribute ``self.<attr>`` / ``cls.<attr>`` stashed as a
+        # frame in __init__ (issue #104). Resolve to a FRESH copy so
+        # downstream laziness stamping and backward-narrowing pins never
+        # mutate the shared class-attr entry.
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id in ("self", "cls")
+        ):
+            attr_ft = self.class_registry.attrs_for(self.current_class_name).get(node.attr)
+            if attr_ft is not None:
+                return FrameType(
+                    columns=dict(attr_ft.columns),
+                    strict=attr_ft.strict,
+                    rest=attr_ft.rest,
+                    is_lazy=attr_ft.is_lazy,
+                    coerce=attr_ft.coerce,
+                    absent=attr_ft.absent,
+                    nonstrict_schema=attr_ft.nonstrict_schema,
+                    schema_name=attr_ft.schema_name,
+                )
+
         # Method call chain or function call
         if isinstance(node, ast.Call):
             return self._infer_call_type(node)
@@ -7284,6 +7315,50 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         )
 
 
+def _collect_class_attr_frames(
+    init_node: ast.FunctionDef | ast.AsyncFunctionDef,
+    schema_registry: SchemaRegistry,
+) -> dict[str, FrameType]:
+    """Map ``self.<attr>`` to a FrameType from a class's ``__init__`` (issue #104).
+
+    Scans ``__init__`` for ``self.<attr> = <param>`` assignments where
+    ``<param>`` is a frame-annotated parameter (``DataFrame[Schema]`` /
+    ``LazyFrame[Schema]`` or a bare ``pl.DataFrame`` / ``pl.LazyFrame``), so a
+    sibling method's ``x = self.<attr>`` resolves to that frame type instead
+    of being dropped (leaving ``x`` at its stale prior binding). Other RHS
+    forms (computed frames, non-frame attrs) are intentionally skipped — the
+    common, checkable case is "constructor stashes an input frame".
+    """
+    # Parameter name -> frame type, mirroring the signature param rule
+    # (frame-annotated and bare ``pl.DataFrame`` / ``pl.LazyFrame``).
+    param_frames: dict[str, FrameType] = {}
+    for arg in init_node.args.args:
+        if not arg.annotation:
+            continue
+        frame_type, _ = _resolve_declared_type(arg.annotation, schema_registry)
+        if frame_type is None:
+            bare_head = bare_frame_annotation(arg.annotation)
+            if bare_head is not None:
+                frame_type = FrameType({}, rest=RowVar(arg.arg), is_lazy=bare_head == "LazyFrame")
+        if frame_type is not None:
+            param_frames[arg.arg] = frame_type
+
+    attrs: dict[str, FrameType] = {}
+    for stmt in init_node.body:
+        if not isinstance(stmt, ast.Assign) or len(stmt.targets) != 1:
+            continue
+        target = stmt.targets[0]
+        if (
+            isinstance(target, ast.Attribute)
+            and isinstance(target.value, ast.Name)
+            and target.value.id == "self"
+            and isinstance(stmt.value, ast.Name)
+            and stmt.value.id in param_frames
+        ):
+            attrs[target.attr] = param_frames[stmt.value.id]
+    return attrs
+
+
 def _extract_function_signature(
     func_node: ast.FunctionDef | ast.AsyncFunctionDef,
     schema_registry: SchemaRegistry,
@@ -7697,6 +7772,11 @@ def analyze_source(
             inferred_returns={},
         )
         class_registry.register_method(class_name, info)
+        # Frame-typed instance attributes stashed in __init__ (issue #104).
+        if func_node.name == "__init__":
+            class_registry.class_attrs[class_name] = _collect_class_attr_frames(
+                func_node, schema_registry
+            )
 
     # Pass 3: Analyze each function/method body with the registries.
     func_nodes = module_funcs + [m for _, m in class_methods]
