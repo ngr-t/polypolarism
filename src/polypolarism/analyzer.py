@@ -7372,50 +7372,99 @@ def _strip_optional_frame(node: ast.expr) -> ast.expr:
     return node
 
 
+def _resolve_attr_frame(
+    annotation: ast.expr,
+    schema_registry: SchemaRegistry,
+    name: str,
+) -> FrameType | None:
+    """Resolve a frame attribute's annotation to a FrameType (issues #104/#106/#108).
+
+    Mirrors the signature param rule: ``DataFrame[Schema]`` /
+    ``LazyFrame[Schema]`` resolve to the schema's frame; a bare
+    ``pl.DataFrame`` / ``pl.LazyFrame`` to an empty open frame; ``Optional``
+    is unwrapped first. Returns ``None`` for non-frame annotations.
+    """
+    annotation = _strip_optional_frame(annotation)
+    frame_type, _ = _resolve_declared_type(annotation, schema_registry)
+    if frame_type is None:
+        bare_head = bare_frame_annotation(annotation)
+        if bare_head is not None:
+            frame_type = FrameType({}, rest=RowVar(name), is_lazy=bare_head == "LazyFrame")
+    return frame_type
+
+
+def _is_property_method(node: ast.stmt) -> bool:
+    """True for a ``@property``-decorated method (issue #108)."""
+    if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return False
+    return any(isinstance(d, ast.Name) and d.id == "property" for d in node.decorator_list)
+
+
 def _collect_class_attr_frames(
-    init_node: ast.FunctionDef | ast.AsyncFunctionDef,
+    class_node: ast.ClassDef,
     schema_registry: SchemaRegistry,
 ) -> dict[str, FrameType]:
-    """Map ``self.<attr>`` to a FrameType from a class's ``__init__`` (issue #104).
+    """Map ``self.<attr>`` to a FrameType from a class body (issues #104/#105/#108).
 
-    Scans ``__init__`` for ``self.<attr> = <param>`` assignments where
-    ``<param>`` is a frame-annotated parameter (``DataFrame[Schema]`` /
-    ``LazyFrame[Schema]`` or a bare ``pl.DataFrame`` / ``pl.LazyFrame``,
-    including their ``Optional`` forms — issue #106), so a sibling method's
-    ``x = self.<attr>`` resolves to that frame type instead of being dropped
-    (leaving ``x`` at its stale prior binding). Other RHS forms (computed
-    frames, non-frame attrs) are intentionally skipped — the common,
-    checkable case is "constructor stashes an input frame".
+    Resolves frame-typed attributes declared as:
+
+    - ``__init__``'s ``self.<attr> = <frame-param>`` assignment (#104);
+    - a class-level / ``@dataclass`` field annotation
+      ``<attr>: DataFrame[Schema]`` (#108);
+    - a ``@property`` whose return annotation is a frame (#108).
+
+    All forms read the frame type from a ``DataFrame[Schema]`` /
+    ``LazyFrame[Schema]`` (or bare ``pl.DataFrame`` / ``pl.LazyFrame``,
+    Optional unwrapped) annotation. Other RHS forms (computed frames,
+    non-frame attrs, attributes set only via a helper method) are skipped —
+    the checkable case is "the attribute *declares* a frame type". Conflicts
+    resolve in declaration → property → ``__init__`` order (the constructor
+    assignment, the most concrete, wins).
     """
-    # Parameter name -> frame type, mirroring the signature param rule
-    # (frame-annotated and bare ``pl.DataFrame`` / ``pl.LazyFrame``), with
-    # Optional unwrapped so ``opt: pl.DataFrame | None`` still resolves.
-    param_frames: dict[str, FrameType] = {}
-    for arg in init_node.args.args:
-        if not arg.annotation:
-            continue
-        annotation = _strip_optional_frame(arg.annotation)
-        frame_type, _ = _resolve_declared_type(annotation, schema_registry)
-        if frame_type is None:
-            bare_head = bare_frame_annotation(annotation)
-            if bare_head is not None:
-                frame_type = FrameType({}, rest=RowVar(arg.arg), is_lazy=bare_head == "LazyFrame")
-        if frame_type is not None:
-            param_frames[arg.arg] = frame_type
-
     attrs: dict[str, FrameType] = {}
-    for stmt in init_node.body:
-        if not isinstance(stmt, ast.Assign) or len(stmt.targets) != 1:
-            continue
-        target = stmt.targets[0]
-        if (
-            isinstance(target, ast.Attribute)
-            and isinstance(target.value, ast.Name)
-            and target.value.id == "self"
-            and isinstance(stmt.value, ast.Name)
-            and stmt.value.id in param_frames
-        ):
-            attrs[target.attr] = param_frames[stmt.value.id]
+
+    # Class-level / @dataclass field annotations: ``src: DataFrame[KV]``.
+    for stmt in class_node.body:
+        if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+            frame_type = _resolve_attr_frame(stmt.annotation, schema_registry, stmt.target.id)
+            if frame_type is not None:
+                attrs[stmt.target.id] = frame_type
+
+    # @property methods whose return annotation is a frame.
+    for stmt in class_node.body:
+        if _is_property_method(stmt):
+            assert isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef))
+            if stmt.returns is not None:
+                frame_type = _resolve_attr_frame(stmt.returns, schema_registry, stmt.name)
+                if frame_type is not None:
+                    attrs[stmt.name] = frame_type
+
+    # __init__'s ``self.<attr> = <frame-param>`` (most concrete — wins).
+    init_node: ast.FunctionDef | ast.AsyncFunctionDef | None = None
+    for stmt in class_node.body:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)) and stmt.name == "__init__":
+            init_node = stmt
+            break
+    if init_node is not None:
+        param_frames: dict[str, FrameType] = {}
+        for arg in init_node.args.args:
+            if arg.annotation:
+                frame_type = _resolve_attr_frame(arg.annotation, schema_registry, arg.arg)
+                if frame_type is not None:
+                    param_frames[arg.arg] = frame_type
+        for stmt in init_node.body:
+            if not isinstance(stmt, ast.Assign) or len(stmt.targets) != 1:
+                continue
+            target = stmt.targets[0]
+            if (
+                isinstance(target, ast.Attribute)
+                and isinstance(target.value, ast.Name)
+                and target.value.id == "self"
+                and isinstance(stmt.value, ast.Name)
+                and stmt.value.id in param_frames
+            ):
+                attrs[target.attr] = param_frames[stmt.value.id]
+
     return attrs
 
 
@@ -7728,6 +7777,7 @@ def _collect_all_funcs(
     class_methods: list[tuple[str, ast.FunctionDef | ast.AsyncFunctionDef]],
     func_to_class: dict[int, str | None],
     class_bases: dict[str, list[str]],
+    class_nodes: dict[str, ast.ClassDef],
 ) -> None:
     """Recursively collect all function nodes from a statement list.
 
@@ -7738,7 +7788,9 @@ def _collect_all_funcs(
     Closures reset the class context to ``None`` — they are treated as
     independent module-level functions for analysis purposes (issue #99).
     ``class_bases`` records each class's local (``ast.Name``) base classes so
-    inherited instance attributes resolve along the MRO (issue #105).
+    inherited instance attributes resolve along the MRO (issue #105);
+    ``class_nodes`` records each ClassDef so its body can be scanned for
+    frame-typed attribute declarations (issue #108).
     """
     for node in stmts:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -7750,12 +7802,25 @@ def _collect_all_funcs(
                 func_to_class[id(node)] = None
             # Recurse into function body — closures lose any class context
             _collect_all_funcs(
-                node.body, None, module_funcs, class_methods, func_to_class, class_bases
+                node.body,
+                None,
+                module_funcs,
+                class_methods,
+                func_to_class,
+                class_bases,
+                class_nodes,
             )
         elif isinstance(node, ast.ClassDef):
             class_bases[node.name] = [b.id for b in node.bases if isinstance(b, ast.Name)]
+            class_nodes[node.name] = node
             _collect_all_funcs(
-                node.body, node.name, module_funcs, class_methods, func_to_class, class_bases
+                node.body,
+                node.name,
+                module_funcs,
+                class_methods,
+                func_to_class,
+                class_bases,
+                class_nodes,
             )
         else:
             # Compound statements: propagate the current class context.
@@ -7772,7 +7837,13 @@ def _collect_all_funcs(
                         child_stmts.extend(s for s in body if isinstance(s, ast.stmt))
             if child_stmts:
                 _collect_all_funcs(
-                    child_stmts, class_name, module_funcs, class_methods, func_to_class, class_bases
+                    child_stmts,
+                    class_name,
+                    module_funcs,
+                    class_methods,
+                    func_to_class,
+                    class_bases,
+                    class_nodes,
                 )
 
 
@@ -7818,7 +7889,10 @@ def analyze_source(
     class_methods: list[tuple[str, ast.FunctionDef | ast.AsyncFunctionDef]] = []
     func_to_class: dict[int, str | None] = {}
     class_bases: dict[str, list[str]] = {}
-    _collect_all_funcs(tree.body, None, module_funcs, class_methods, func_to_class, class_bases)
+    class_nodes: dict[str, ast.ClassDef] = {}
+    _collect_all_funcs(
+        tree.body, None, module_funcs, class_methods, func_to_class, class_bases, class_nodes
+    )
 
     # Pass 2: Build the function and class registries.
     registry = FunctionRegistry()
@@ -7842,11 +7916,13 @@ def analyze_source(
             inferred_returns={},
         )
         class_registry.register_method(class_name, info)
-        # Frame-typed instance attributes stashed in __init__ (issue #104).
-        if func_node.name == "__init__":
-            class_registry.class_attrs[class_name] = _collect_class_attr_frames(
-                func_node, schema_registry
-            )
+    # Frame-typed instance attributes declared anywhere in the class body
+    # (__init__ assignment, class-level / @dataclass field annotation,
+    # @property return) — issues #104/#108.
+    for class_name, class_node in class_nodes.items():
+        class_registry.class_attrs[class_name] = _collect_class_attr_frames(
+            class_node, schema_registry
+        )
 
     # Pass 3: Analyze each function/method body with the registries.
     func_nodes = module_funcs + [m for _, m in class_methods]
