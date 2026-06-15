@@ -119,6 +119,28 @@ def check_directory(dir_path: Path) -> list[CheckResult]:
     return results
 
 
+def _format_mismatch_context(
+    mismatch_frames: list[tuple[int | None, str, str]],
+) -> list[str]:
+    """Render the inferred-vs-declared frame block shown in verbose mode.
+
+    Each failing return point is listed as ``returned (line N): <render>``
+    (or just ``returned: <render>`` for single-return functions), followed
+    by ``declared: <render>`` once — the declared type is the same for all
+    return points.
+    """
+    lines: list[str] = ["    return type context:"]
+    declared_r: str = ""
+    for lineno, inferred_r, decl_r in mismatch_frames:
+        declared_r = decl_r
+        if lineno is not None:
+            lines.append(f"      returned (line {lineno}): {inferred_r}")
+        else:
+            lines.append(f"      returned: {inferred_r}")
+    lines.append(f"      declared: {declared_r}")
+    return lines
+
+
 def _format_result_block(result: CheckResult, function_lines: dict[str, int]) -> list[str]:
     """Render one function's status line plus its errors/warnings."""
     lines: list[str] = []
@@ -143,6 +165,8 @@ def _format_result_block(result: CheckResult, function_lines: dict[str, int]) ->
             lines.extend(diff_block)
     for warning in result.warnings:
         lines.append(f"    \033[33m! {warning}\033[0m")
+    if result.trace and result.mismatch_frames:
+        lines.extend(_format_mismatch_context(result.mismatch_frames))
     if result.trace:
         lines.append("    trace:")
         for step in result.trace:

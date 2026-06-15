@@ -108,6 +108,12 @@ class CheckResult:
     leniency: list[str] = field(default_factory=list)
     # Inference trace, pre-rendered (populated only under --verbose).
     trace: list[str] = field(default_factory=list)
+    # Inferred vs declared frame context for each failing return point.
+    # Each entry: (lineno_or_None, inferred_render, declared_render).
+    # ``lineno`` is None for single-return functions (no "at line N" prefix).
+    # Populated whenever there are schema-level return errors so the CLI
+    # can show the full frame shapes alongside the column-level error list.
+    mismatch_frames: list[tuple[int | None, str, str]] = field(default_factory=list)
 
     def __repr__(self) -> str:
         status = "PASSED" if self.passed else "FAILED"
@@ -385,6 +391,7 @@ def check_function(analysis: FunctionAnalysis) -> CheckResult:
     """
     errors: list[CheckError] = []
     leniency: list[str] = []
+    mismatch_frames: list[tuple[int | None, str, str]] = []
     trace = [f"L{e.lineno:<4} {e.label:<28} {e.result}" for e in analysis.trace]
 
     # Include any analysis errors
@@ -411,16 +418,24 @@ def check_function(analysis: FunctionAnalysis) -> CheckResult:
         # Validate every recorded return point (issues #94, #95).
         for lineno, inferred in analysis.return_frames:
             frame_errors, frame_leniency = _check_one_frame(declared, inferred)
-            if frame_errors and multi:
-                for e in frame_errors:
-                    errors.append(f"at line {lineno}: {e}")
-            else:
-                errors.extend(frame_errors)
+            if frame_errors:
+                mismatch_frames.append(
+                    (lineno if multi else None, inferred.render(), declared.render())
+                )
+                if multi:
+                    for e in frame_errors:
+                        errors.append(f"at line {lineno}: {e}")
+                else:
+                    errors.extend(frame_errors)
             leniency.extend(frame_leniency)
     elif analysis.inferred_return_type is None:
         errors.append(InferenceFailure("Could not infer return type"))
     else:
         frame_errors, frame_leniency = _check_one_frame(declared, analysis.inferred_return_type)
+        if frame_errors:
+            mismatch_frames.append(
+                (None, analysis.inferred_return_type.render(), declared.render())
+            )
         errors.extend(frame_errors)
         leniency.extend(frame_leniency)
 
@@ -431,6 +446,7 @@ def check_function(analysis: FunctionAnalysis) -> CheckResult:
         warnings=list(analysis.warnings),
         leniency=leniency,
         trace=trace,
+        mismatch_frames=mismatch_frames,
     )
 
 
