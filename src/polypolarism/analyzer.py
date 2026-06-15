@@ -7337,6 +7337,26 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         )
 
 
+def _strip_optional_frame(node: ast.expr) -> ast.expr:
+    """Unwrap ``Optional[T]`` / ``T | None`` to ``T`` (issue #106).
+
+    A frame attribute declared Optional still stashes a real frame on the
+    present (``is not None``) path, so we resolve it to its non-None frame
+    type. Non-Optional annotations pass through unchanged.
+    """
+    if isinstance(node, ast.Subscript) and (
+        (isinstance(node.value, ast.Name) and node.value.id == "Optional")
+        or (isinstance(node.value, ast.Attribute) and node.value.attr == "Optional")
+    ):
+        return node.slice
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+        if isinstance(node.right, ast.Constant) and node.right.value is None:
+            return node.left
+        if isinstance(node.left, ast.Constant) and node.left.value is None:
+            return node.right
+    return node
+
+
 def _collect_class_attr_frames(
     init_node: ast.FunctionDef | ast.AsyncFunctionDef,
     schema_registry: SchemaRegistry,
@@ -7345,21 +7365,24 @@ def _collect_class_attr_frames(
 
     Scans ``__init__`` for ``self.<attr> = <param>`` assignments where
     ``<param>`` is a frame-annotated parameter (``DataFrame[Schema]`` /
-    ``LazyFrame[Schema]`` or a bare ``pl.DataFrame`` / ``pl.LazyFrame``), so a
-    sibling method's ``x = self.<attr>`` resolves to that frame type instead
-    of being dropped (leaving ``x`` at its stale prior binding). Other RHS
-    forms (computed frames, non-frame attrs) are intentionally skipped — the
-    common, checkable case is "constructor stashes an input frame".
+    ``LazyFrame[Schema]`` or a bare ``pl.DataFrame`` / ``pl.LazyFrame``,
+    including their ``Optional`` forms — issue #106), so a sibling method's
+    ``x = self.<attr>`` resolves to that frame type instead of being dropped
+    (leaving ``x`` at its stale prior binding). Other RHS forms (computed
+    frames, non-frame attrs) are intentionally skipped — the common,
+    checkable case is "constructor stashes an input frame".
     """
     # Parameter name -> frame type, mirroring the signature param rule
-    # (frame-annotated and bare ``pl.DataFrame`` / ``pl.LazyFrame``).
+    # (frame-annotated and bare ``pl.DataFrame`` / ``pl.LazyFrame``), with
+    # Optional unwrapped so ``opt: pl.DataFrame | None`` still resolves.
     param_frames: dict[str, FrameType] = {}
     for arg in init_node.args.args:
         if not arg.annotation:
             continue
-        frame_type, _ = _resolve_declared_type(arg.annotation, schema_registry)
+        annotation = _strip_optional_frame(arg.annotation)
+        frame_type, _ = _resolve_declared_type(annotation, schema_registry)
         if frame_type is None:
-            bare_head = bare_frame_annotation(arg.annotation)
+            bare_head = bare_frame_annotation(annotation)
             if bare_head is not None:
                 frame_type = FrameType({}, rest=RowVar(arg.arg), is_lazy=bare_head == "LazyFrame")
         if frame_type is not None:

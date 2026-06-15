@@ -1,0 +1,4 @@
+W.optional_guarded: OK
+  via: column 'k': passed via Unknown
+  via: column 'v': passed via Unknown
+Typed.guarded_return: OK
