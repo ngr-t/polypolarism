@@ -1,0 +1,12 @@
+bug_async: FAIL
+  error: [PLY040] Missing column 'v' of type Float64
+  error: [PLY040] Missing column 'a' of type Float64
+bug_in_if: FAIL
+  error: [PLY040] Missing column 'v' of type Float64
+  error: [PLY040] Missing column 'a' of type Float64
+bug_in_with: FAIL
+  error: [PLY040] Missing column 'v' of type Float64
+  error: [PLY040] Missing column 'a' of type Float64
+bug_closure: FAIL
+  error: [PLY040] Missing column 'v' of type Float64
+  error: [PLY040] Missing column 'a' of type Float64

@@ -1876,7 +1876,7 @@ class FunctionInfo:
     """Information about a function (typed or untyped)."""
 
     name: str
-    node: ast.FunctionDef  # AST node for body analysis
+    node: ast.FunctionDef | ast.AsyncFunctionDef  # AST node for body analysis
     signature: FunctionSignature | None  # None if untyped
     inferred_returns: dict[tuple, FrameType] = field(default_factory=dict)
 
@@ -7047,7 +7047,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
 
 
 def _extract_function_signature(
-    func_node: ast.FunctionDef,
+    func_node: ast.FunctionDef | ast.AsyncFunctionDef,
     schema_registry: SchemaRegistry,
 ) -> FunctionSignature | None:
     """Extract type signature from a function definition."""
@@ -7089,7 +7089,7 @@ def _extract_function_signature(
 
 
 def analyze_function(
-    func_node: ast.FunctionDef,
+    func_node: ast.FunctionDef | ast.AsyncFunctionDef,
     registry: FunctionRegistry | None = None,
     schema_registry: SchemaRegistry | None = None,
     class_registry: ClassRegistry | None = None,
@@ -7335,6 +7335,53 @@ def _collect_module_consts(tree: ast.Module) -> dict[str, str | list[str] | int]
     return consts
 
 
+def _collect_all_funcs(
+    stmts: list[ast.stmt],
+    class_name: str | None,
+    module_funcs: list[ast.FunctionDef | ast.AsyncFunctionDef],
+    class_methods: list[tuple[str, ast.FunctionDef | ast.AsyncFunctionDef]],
+    func_to_class: dict[int, str | None],
+) -> None:
+    """Recursively collect all function nodes from a statement list.
+
+    Handles ``async def``, functions inside compound statements (``if``,
+    ``try``, ``with``, ``for``, ``while``), and closures (def inside def).
+    The class context propagates through compound statements so methods
+    defined inside an ``if`` at class body level are still tagged as methods.
+    Closures reset the class context to ``None`` — they are treated as
+    independent module-level functions for analysis purposes (issue #99).
+    """
+    for node in stmts:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if class_name is not None:
+                class_methods.append((class_name, node))
+                func_to_class[id(node)] = class_name
+            else:
+                module_funcs.append(node)
+                func_to_class[id(node)] = None
+            # Recurse into function body — closures lose any class context
+            _collect_all_funcs(node.body, None, module_funcs, class_methods, func_to_class)
+        elif isinstance(node, ast.ClassDef):
+            _collect_all_funcs(node.body, node.name, module_funcs, class_methods, func_to_class)
+        else:
+            # Compound statements: propagate the current class context.
+            # iter_child_nodes yields both stmt children and non-stmt nodes
+            # like ExceptHandler; collect stmts from each.
+            child_stmts: list[ast.stmt] = []
+            for child in ast.iter_child_nodes(node):
+                if isinstance(child, ast.stmt):
+                    child_stmts.append(child)
+                elif hasattr(child, "body"):
+                    # ExceptHandler, match_case, etc.
+                    body = getattr(child, "body", None)
+                    if isinstance(body, list):
+                        child_stmts.extend(s for s in body if isinstance(s, ast.stmt))
+            if child_stmts:
+                _collect_all_funcs(
+                    child_stmts, class_name, module_funcs, class_methods, func_to_class
+                )
+
+
 def analyze_source(
     source: str, file_path: Path | None = None, collect_trace: bool = False
 ) -> list[FunctionAnalysis]:
@@ -7371,22 +7418,12 @@ def analyze_source(
     # Module-level string(-list) constants for column-spec resolution.
     module_consts = _collect_module_consts(tree)
 
-    # Pass 1: Collect functions, separating module-level from class methods.
-    # ``func_to_class`` maps each function node's ``id()`` to the name of
-    # its enclosing class (or ``None`` for module-level), so during pass 3
-    # we know which class context to give each method analyser.
-    module_funcs: list[ast.FunctionDef] = []
-    class_methods: list[tuple[str, ast.FunctionDef]] = []
+    # Pass 1: Collect all function nodes (including async def, nested in
+    # compound statements, and closures) so none are silently skipped (issue #99).
+    module_funcs: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
+    class_methods: list[tuple[str, ast.FunctionDef | ast.AsyncFunctionDef]] = []
     func_to_class: dict[int, str | None] = {}
-    for node in tree.body:
-        if isinstance(node, ast.FunctionDef):
-            module_funcs.append(node)
-            func_to_class[id(node)] = None
-        elif isinstance(node, ast.ClassDef):
-            for stmt in node.body:
-                if isinstance(stmt, ast.FunctionDef):
-                    class_methods.append((node.name, stmt))
-                    func_to_class[id(stmt)] = node.name
+    _collect_all_funcs(tree.body, None, module_funcs, class_methods, func_to_class)
 
     # Pass 2: Build the function and class registries.
     registry = FunctionRegistry()
