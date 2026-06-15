@@ -7258,6 +7258,19 @@ def _extract_function_signature(
     # Extract return type
     if func_node.returns:
         frame_type, _ = _resolve_declared_type(func_node.returns, schema_registry)
+        if frame_type is None:
+            # Bare ``-> pl.DataFrame`` / ``-> pl.LazyFrame`` (ADR-0006, issue
+            # #103): the callee declares no schema, but its result provably
+            # IS a frame. Bind it OPEN at call sites — assumption semantics,
+            # consistent with bare parameters and non-strict returns (issue
+            # #81) — instead of dropping all downstream checking ("could not
+            # infer return type"). The callee's own body is unaffected; this
+            # only shapes what a CALLER sees from ``helper(...)``.
+            bare_head = bare_frame_annotation(func_node.returns)
+            if bare_head is not None:
+                frame_type = FrameType(
+                    {}, rest=RowVar(func_node.name), is_lazy=bare_head == "LazyFrame"
+                )
         if frame_type is not None:
             return_type = frame_type
 
