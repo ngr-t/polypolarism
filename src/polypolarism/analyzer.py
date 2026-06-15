@@ -2048,6 +2048,10 @@ class FunctionAnalysis:
     warnings: list[str] = field(default_factory=list)
     # Inference trace (empty unless analyzed with ``collect_trace=True``).
     trace: list[TraceEvent] = field(default_factory=list)
+    # Every return point as ``(lineno, frame)`` — all are checked against
+    # the declared return type (issues #94/#95). ``inferred_return_type``
+    # is the representative (last) one for display.
+    return_frames: list[tuple[int, FrameType]] = field(default_factory=list)
 
     @property
     def has_errors(self) -> bool:
@@ -4381,7 +4385,12 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         # B-5) can be resolved. Reassigning the name to anything
         # non-constant drops the entry.
         self.var_consts: dict[str, str | list[str] | int] = {}
+        # The representative inferred return (last collected) — kept for
+        # JSON summaries / hover / eager-lazy display. Every return point
+        # is also recorded in ``return_frames`` so the checker validates
+        # ALL of them (issues #94/#95), not just the last.
         self.return_type: FrameType | None = None
+        self.return_frames: list[tuple[int, FrameType]] = []
         # Bare ``Schema.validate(df)`` narrowing only fires at the function's
         # top level. We toggle this off when descending into if/for/while/try.
         self._narrowing_enabled = True
@@ -4451,18 +4460,37 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         self._visit_with_narrowing_disabled(node)
 
     def visit_Return(self, node: ast.Return) -> None:
-        """Handle return statements."""
-        if node.value:
-            self.return_type = self._infer_expr_type(node.value)
-            if self.trace is not None and self.return_type is not None:
+        """Handle return statements.
+
+        Records EVERY return point (issue #95) and expands a conditional
+        expression return into one point per arm (issue #94), so the
+        checker validates all of them against the declared type."""
+        if node.value is None:
+            return
+        for frame in self._collect_return_frames(node.value):
+            if frame is None:
+                continue
+            self.return_type = frame
+            self.return_frames.append((node.lineno, frame))
+            if self.trace is not None:
                 self.trace.append(
                     TraceEvent(
                         lineno=node.lineno,
                         col=node.col_offset,
                         label="return",
-                        result=self.return_type.render(),
+                        result=frame.render(),
                     )
                 )
+
+    def _collect_return_frames(self, node: ast.expr) -> list[FrameType | None]:
+        """All frames a return expression can yield. A conditional
+        expression (``A if cond else B``) contributes both arms; any
+        other expression contributes its single inferred frame (or
+        ``None`` when it cannot be inferred)."""
+        node = _unwrap_cast(node)
+        if isinstance(node, ast.IfExp):
+            return self._collect_return_frames(node.body) + self._collect_return_frames(node.orelse)
+        return [self._infer_expr_type(node)]
 
     def visit_Expr(self, node: ast.Expr) -> None:
         """Bare expression statement; recognise ``Schema.validate(df)`` as narrowing.
@@ -4817,6 +4845,20 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         # Method call chain or function call
         if isinstance(node, ast.Call):
             return self._infer_call_type(node)
+
+        # Conditional expression ``A if cond else B`` in a non-return
+        # position (e.g. ``x = A if c else B``): usable as a single type
+        # only when both arms agree. Divergent arms cannot be one frame,
+        # so we decline (None) rather than silently pick one — the return
+        # path handles divergence by checking each arm separately.
+        if isinstance(node, ast.IfExp):
+            body = self._infer_expr_type(node.body)
+            orelse = self._infer_expr_type(node.orelse)
+            if body is None:
+                return orelse
+            if orelse is None:
+                return body
+            return body if body == orelse else None
 
         return None
 
@@ -7239,6 +7281,7 @@ def analyze_function(
         errors=body_analyzer.errors,
         warnings=body_analyzer.warnings,
         trace=trace_events if trace_events is not None else [],
+        return_frames=body_analyzer.return_frames,
     )
 
 

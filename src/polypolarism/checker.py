@@ -13,6 +13,7 @@ from polypolarism.types import (
     Array,
     DataType,
     Enum,
+    FrameType,
     List,
     Nullable,
     Struct,
@@ -300,46 +301,16 @@ def _is_coercible_difference(inferred: DataType, declared: DataType) -> bool:
     return _cast_verdict(inferred_base, declared_base) == "always"
 
 
-def check_function(analysis: FunctionAnalysis) -> CheckResult:
-    """
-    Check a single function's declared return type against its inferred return type.
+def _check_one_frame(
+    declared: FrameType,
+    inferred: FrameType,
+) -> tuple[list[CheckError], list[str]]:
+    """Check one return frame against the declared type.
 
-    Args:
-        analysis: The function analysis result from analyzer
-
-    Returns:
-        CheckResult with pass/fail status and any errors
+    Returns ``(errors, leniency)`` for that single frame.
     """
     errors: list[CheckError] = []
-    trace = [f"L{e.lineno:<4} {e.label:<28} {e.result}" for e in analysis.trace]
-
-    # Include any analysis errors
-    for err in analysis.errors:
-        errors.append(err)
-
-    # Check if we have both declared and inferred types
-    if analysis.declared_return_type is None:
-        # No declared type to check against
-        return CheckResult(
-            function_name=analysis.name,
-            passed=len(errors) == 0,
-            errors=errors,
-            warnings=list(analysis.warnings),
-            trace=trace,
-        )
-
-    if analysis.inferred_return_type is None:
-        errors.append(InferenceFailure("Could not infer return type"))
-        return CheckResult(
-            function_name=analysis.name,
-            passed=False,
-            errors=errors,
-            warnings=list(analysis.warnings),
-            trace=trace,
-        )
-
-    declared = analysis.declared_return_type
-    inferred = analysis.inferred_return_type
+    leniency: list[str] = []
 
     # Eager/lazy mismatch on the return type.
     if declared.is_lazy != inferred.is_lazy:
@@ -355,7 +326,6 @@ def check_function(analysis: FunctionAnalysis) -> CheckResult:
     # frame (``rest`` is not None) may hold extra unknown columns, so a
     # declared column missing from it is not provably absent — no error,
     # but the skip is recorded as a leniency note.
-    leniency: list[str] = []
     for col_name, declared_spec in declared.columns.items():
         inferred_spec = inferred.columns.get(col_name)
         if inferred_spec is None:
@@ -399,6 +369,60 @@ def check_function(analysis: FunctionAnalysis) -> CheckResult:
                         f"column '{col_name}': optional extra vs strict schema "
                         f"(absent inputs pass; present ones fail at runtime)"
                     )
+
+    return errors, leniency
+
+
+def check_function(analysis: FunctionAnalysis) -> CheckResult:
+    """
+    Check a single function's declared return type against its inferred return type.
+
+    Args:
+        analysis: The function analysis result from analyzer
+
+    Returns:
+        CheckResult with pass/fail status and any errors
+    """
+    errors: list[CheckError] = []
+    leniency: list[str] = []
+    trace = [f"L{e.lineno:<4} {e.label:<28} {e.result}" for e in analysis.trace]
+
+    # Include any analysis errors
+    for err in analysis.errors:
+        errors.append(err)
+
+    # Check if we have both declared and inferred types
+    if analysis.declared_return_type is None:
+        # No declared type to check against
+        return CheckResult(
+            function_name=analysis.name,
+            passed=len(errors) == 0,
+            errors=errors,
+            warnings=list(analysis.warnings),
+            trace=trace,
+        )
+
+    declared = analysis.declared_return_type
+    # When multiple return points exist (multi-branch / ternary), prefix each
+    # error with its source line so the user can pinpoint the offending return.
+    multi = len(analysis.return_frames) > 1
+
+    if analysis.return_frames:
+        # Validate every recorded return point (issues #94, #95).
+        for lineno, inferred in analysis.return_frames:
+            frame_errors, frame_leniency = _check_one_frame(declared, inferred)
+            if frame_errors and multi:
+                for e in frame_errors:
+                    errors.append(f"at line {lineno}: {e}")
+            else:
+                errors.extend(frame_errors)
+            leniency.extend(frame_leniency)
+    elif analysis.inferred_return_type is None:
+        errors.append(InferenceFailure("Could not infer return type"))
+    else:
+        frame_errors, frame_leniency = _check_one_frame(declared, analysis.inferred_return_type)
+        errors.extend(frame_errors)
+        leniency.extend(frame_leniency)
 
     return CheckResult(
         function_name=analysis.name,

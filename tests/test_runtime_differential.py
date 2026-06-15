@@ -145,6 +145,14 @@ SKIP: dict[str, str] = {
     "invalid/dtype_annotated_arity.py::broken_schema_as_input": (
         "input schema is the PLY041 subject: to_schema raises TypeError during input synthesis"
     ),
+    # -- issues #94 / #95: the harness cannot synthesize a non-frame parameter
+    #    (``flag: bool``); the error is branch-dependent and statically flagged.
+    "invalid/early_return_wrong_schema.py::wrong_early_return": (
+        "non-frame bool parameter 'flag' has no default; branch-dependent error is static-only"
+    ),
+    "invalid/ternary_diverging_arms.py::ternary_diverge": (
+        "non-frame bool parameter 'flag' has no default; branch-dependent error is static-only"
+    ),
 }
 
 

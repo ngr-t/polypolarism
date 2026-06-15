@@ -1,0 +1,3 @@
+wrong_early_return: FAIL
+  error: at line 34: [PLY040] Missing column 'a' of type Float64
+  error: at line 34: [PLY040] Extra column 'b' of type Float64 not in declared return type
