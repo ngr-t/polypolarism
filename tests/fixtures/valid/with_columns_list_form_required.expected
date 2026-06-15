@@ -1,1 +1,3 @@
 fp_listform_required: OK
+fp_starform_required: OK
+fp_kwargs_required: OK

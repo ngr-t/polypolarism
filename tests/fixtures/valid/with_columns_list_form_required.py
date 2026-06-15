@@ -1,8 +1,10 @@
-"""with_columns([...]) list-arg form adds required columns correctly (issue #97).
+"""with_columns non-literal argument forms add columns correctly (issue #97).
 
-A FP regression: when with_columns([expr]) dropped list elements,
-adding the required 'a' column via list form caused a false-positive
-"Missing column 'a'" error.
+A FP regression: when ``with_columns`` dropped the columns produced by a
+list / starred-spread / dict-unpacking argument, adding a *required* column
+through one of those forms caused a false-positive "Missing column 'a'".
+All forms produce ``{k, v, a}`` at runtime, identical to the varargs form,
+so each must register the new column.
 """
 
 import pandera.polars as pa
@@ -32,3 +34,13 @@ class KVa(pa.DataFrameModel):
 @pa.check_types
 def fp_listform_required(df: DataFrame[KV]) -> DataFrame[KVa]:
     return df.with_columns([(pl.col("v") * 2).alias("a")])
+
+
+@pa.check_types
+def fp_starform_required(df: DataFrame[KV]) -> DataFrame[KVa]:
+    return df.with_columns(*[(pl.col("v") * 2).alias("a")])
+
+
+@pa.check_types
+def fp_kwargs_required(df: DataFrame[KV]) -> DataFrame[KVa]:
+    return df.with_columns(**{"a": pl.col("v") * 2})

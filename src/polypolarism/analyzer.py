@@ -1619,6 +1619,57 @@ def _flatten_expr_args(args: list[ast.expr]) -> list[ast.expr]:
     return out
 
 
+def _flatten_column_args(args: list[ast.expr]) -> list[ast.expr]:
+    """Flatten the positional-argument forms of ``select`` / ``with_columns``.
+
+    polars treats these as equivalent (issue #97): a flat varargs list, a
+    single list/tuple of expressions, and the unpacked spreads of either:
+
+        df.with_columns(e1, e2)        # varargs
+        df.with_columns([e1, e2])      # list literal
+        df.with_columns((e1, e2))      # tuple literal
+        df.with_columns(*[e1, e2])     # starred list
+        df.with_columns(*(e1, e2))     # starred tuple
+
+    A ``*name`` whose value is not a literal list/tuple stays as-is (the
+    sequence is uninferable; it degrades downstream rather than crashing).
+    """
+    out: list[ast.expr] = []
+    for arg in args:
+        inner = arg.value if isinstance(arg, ast.Starred) else arg
+        if isinstance(inner, (ast.List, ast.Tuple)):
+            out.extend(inner.elts)
+        else:
+            out.append(arg)
+    return out
+
+
+def _expand_dict_kwargs(keywords: list[ast.keyword]) -> list[ast.keyword]:
+    """Expand ``**{"name": expr}`` dict-unpacking into ``name=expr`` keywords.
+
+    polars treats ``with_columns(**{"a": expr})`` identically to
+    ``with_columns(a=expr)`` (issue #97). A ``**name`` whose value is not a
+    literal dict, or a dict with any non-string-constant key, is left as-is
+    (the keyword name is unknowable; it degrades downstream).
+    """
+    out: list[ast.keyword] = []
+    for kw in keywords:
+        if kw.arg is None and isinstance(kw.value, ast.Dict):
+            synthetic: list[ast.keyword] = []
+            resolvable = bool(kw.value.keys)
+            for key_node, val_node in zip(kw.value.keys, kw.value.values, strict=True):
+                if isinstance(key_node, ast.Constant) and isinstance(key_node.value, str):
+                    synthetic.append(ast.keyword(arg=key_node.value, value=val_node))
+                else:
+                    resolvable = False
+                    break
+            if resolvable:
+                out.extend(synthetic)
+                continue
+        out.append(kw)
+    return out
+
+
 # The ``pl.*`` helpers that accept either varargs or one list of
 # expressions — exactly the issue-#16 flatten consumers handled in
 # ``_analyze_pl_func``. ``pl.format`` takes a template string first but is
@@ -6064,7 +6115,10 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         # exists at runtime under SOME name — opens the result frame.
         has_opaque_outputs = False
 
-        for arg in node.args:
+        # Expand list / tuple / starred-spread positional forms so a list of
+        # expressions ``select([pl.col("a"), ...])`` is treated like the
+        # varargs form ``select(pl.col("a"), ...)`` (issue #97).
+        for arg in _flatten_column_args(node.args):
             sel = _resolve_selector(arg, input_frame)
             if sel is not None:
                 # A selector on an OPEN frame can also match unknown extra
@@ -6139,8 +6193,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     has_opaque_outputs = True
 
         # Kwarg form ``select(name=expr)`` — polars treats it as
-        # ``expr.alias("name")``. Same for ``with_columns``.
-        for kw in node.keywords:
+        # ``expr.alias("name")``. Same for ``with_columns``. ``**{"name": expr}``
+        # dict-unpacking expands to the same (issue #97).
+        for kw in _expand_dict_kwargs(node.keywords):
             if kw.arg is None:
                 continue
             # ``select(x="a")`` — a bare string in expression position is a
@@ -6190,16 +6245,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         # exists at runtime under SOME name — opens the result frame.
         has_opaque_outputs = False
 
-        # Expand ``with_columns([e1, e2])`` list-as-single-arg so it is treated
-        # the same as the varargs form ``with_columns(e1, e2)`` (issue #97).
-        flat_args: list[ast.expr] = []
-        for _raw in node.args:
-            if isinstance(_raw, ast.List):
-                flat_args.extend(_raw.elts)
-            else:
-                flat_args.append(_raw)
-
-        for arg in flat_args:
+        # Expand list / tuple / starred-spread positional forms so they are
+        # treated the same as the varargs form ``with_columns(e1, e2)`` (#97).
+        for arg in _flatten_column_args(node.args):
             sel = _resolve_selector(arg, input_frame)
             if sel is not None:
                 # cs.* selectors in with_columns are a no-op type-wise (re-include
@@ -6261,8 +6309,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     has_opaque_outputs = True
 
         # Kwarg form ``with_columns(name=expr)`` — polars treats it as
-        # ``expr.alias("name")``.
-        for kw in node.keywords:
+        # ``expr.alias("name")``. ``**{"name": expr}`` dict-unpacking expands
+        # to the same (issue #97).
+        for kw in _expand_dict_kwargs(node.keywords):
             if kw.arg is None:
                 continue
             # ``with_columns(x="a")`` — a bare string in expression position

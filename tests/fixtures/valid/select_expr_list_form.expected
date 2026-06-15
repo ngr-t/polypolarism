@@ -1,0 +1,2 @@
+select_expr_list: OK
+select_star_list: OK

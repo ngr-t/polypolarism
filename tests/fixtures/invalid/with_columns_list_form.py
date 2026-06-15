@@ -1,9 +1,10 @@
-"""with_columns([...]) list-arg form must be treated as varargs (issue #97).
+"""with_columns non-literal argument forms must be treated as varargs (issue #97).
 
-A strict schema rejects extra columns; using the list form to add a column
-must register the column — not silently drop it.  The FP case (strict
-schema expects 'a' but list-form adds it → false-positive "Missing column")
-is covered by the complementary valid fixture.
+A strict schema rejects extra columns; adding a column through a list /
+starred-spread / dict-unpacking argument must register the column — not
+silently drop it (which was a false negative: the strict violation passed).
+The complementary FP cases (a required column added through these forms) are
+in the valid fixture.
 """
 
 import pandera.polars as pa
@@ -23,3 +24,13 @@ class KV(pa.DataFrameModel):
 @pa.check_types
 def fn_listform_extra(df: DataFrame[KV]) -> DataFrame[KV]:
     return df.with_columns([(pl.col("v") * 2).alias("a")])
+
+
+@pa.check_types
+def fn_starform_extra(df: DataFrame[KV]) -> DataFrame[KV]:
+    return df.with_columns(*[(pl.col("v") * 2).alias("a")])
+
+
+@pa.check_types
+def fn_kwargs_extra(df: DataFrame[KV]) -> DataFrame[KV]:
+    return df.with_columns(**{"a": pl.col("v") * 2})
