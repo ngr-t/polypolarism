@@ -1970,6 +1970,9 @@ class ClassRegistry:
     # bound in ``__init__`` from a frame-annotated parameter, so a sibling
     # method's ``acc = self.<attr>`` resolves instead of being dropped.
     class_attrs: dict[str, dict[str, FrameType]] = field(default_factory=dict)
+    # Local (``ast.Name``) base classes per class, for MRO-walking inherited
+    # instance attributes (issue #105).
+    class_bases: dict[str, list[str]] = field(default_factory=dict)
 
     def register_method(self, class_name: str, info: FunctionInfo) -> None:
         self.classes.setdefault(class_name, {})[info.name] = info
@@ -1981,9 +1984,28 @@ class ClassRegistry:
         return methods.get(method_name)
 
     def attrs_for(self, class_name: str | None) -> dict[str, FrameType]:
+        """Frame-typed instance attributes visible to ``class_name``'s methods,
+        merged along the local base-class chain (issue #105). A subclass's own
+        ``__init__`` attribute shadows an inherited one of the same name; the
+        walk is breadth-first and cycle-safe.
+        """
         if class_name is None:
             return {}
-        return self.class_attrs.get(class_name, {})
+        order: list[str] = []
+        seen: set[str] = set()
+        queue = [class_name]
+        while queue:
+            cls = queue.pop(0)
+            if cls in seen:
+                continue
+            seen.add(cls)
+            order.append(cls)
+            queue.extend(self.class_bases.get(cls, []))
+        # Apply farthest base first so nearer (subclass) attrs win.
+        merged: dict[str, FrameType] = {}
+        for cls in reversed(order):
+            merged.update(self.class_attrs.get(cls, {}))
+        return merged
 
     def __contains__(self, class_name: str) -> bool:
         return class_name in self.classes
@@ -7667,6 +7689,7 @@ def _collect_all_funcs(
     module_funcs: list[ast.FunctionDef | ast.AsyncFunctionDef],
     class_methods: list[tuple[str, ast.FunctionDef | ast.AsyncFunctionDef]],
     func_to_class: dict[int, str | None],
+    class_bases: dict[str, list[str]],
 ) -> None:
     """Recursively collect all function nodes from a statement list.
 
@@ -7676,6 +7699,8 @@ def _collect_all_funcs(
     defined inside an ``if`` at class body level are still tagged as methods.
     Closures reset the class context to ``None`` — they are treated as
     independent module-level functions for analysis purposes (issue #99).
+    ``class_bases`` records each class's local (``ast.Name``) base classes so
+    inherited instance attributes resolve along the MRO (issue #105).
     """
     for node in stmts:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -7686,9 +7711,14 @@ def _collect_all_funcs(
                 module_funcs.append(node)
                 func_to_class[id(node)] = None
             # Recurse into function body — closures lose any class context
-            _collect_all_funcs(node.body, None, module_funcs, class_methods, func_to_class)
+            _collect_all_funcs(
+                node.body, None, module_funcs, class_methods, func_to_class, class_bases
+            )
         elif isinstance(node, ast.ClassDef):
-            _collect_all_funcs(node.body, node.name, module_funcs, class_methods, func_to_class)
+            class_bases[node.name] = [b.id for b in node.bases if isinstance(b, ast.Name)]
+            _collect_all_funcs(
+                node.body, node.name, module_funcs, class_methods, func_to_class, class_bases
+            )
         else:
             # Compound statements: propagate the current class context.
             # iter_child_nodes yields both stmt children and non-stmt nodes
@@ -7704,7 +7734,7 @@ def _collect_all_funcs(
                         child_stmts.extend(s for s in body if isinstance(s, ast.stmt))
             if child_stmts:
                 _collect_all_funcs(
-                    child_stmts, class_name, module_funcs, class_methods, func_to_class
+                    child_stmts, class_name, module_funcs, class_methods, func_to_class, class_bases
                 )
 
 
@@ -7749,11 +7779,13 @@ def analyze_source(
     module_funcs: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
     class_methods: list[tuple[str, ast.FunctionDef | ast.AsyncFunctionDef]] = []
     func_to_class: dict[int, str | None] = {}
-    _collect_all_funcs(tree.body, None, module_funcs, class_methods, func_to_class)
+    class_bases: dict[str, list[str]] = {}
+    _collect_all_funcs(tree.body, None, module_funcs, class_methods, func_to_class, class_bases)
 
     # Pass 2: Build the function and class registries.
     registry = FunctionRegistry()
     class_registry = ClassRegistry()
+    class_registry.class_bases = class_bases
     for func_node in module_funcs:
         signature = _extract_function_signature(func_node, schema_registry)
         info = FunctionInfo(

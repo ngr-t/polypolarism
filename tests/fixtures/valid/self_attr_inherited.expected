@@ -1,0 +1,7 @@
+Base.__init__: OK
+ChildInherit.use: OK
+ChildSuper.__init__: OK
+ChildSuper.use: OK
+GrandChild.use: OK
+ChildOverride.__init__: OK
+ChildOverride.use: OK
