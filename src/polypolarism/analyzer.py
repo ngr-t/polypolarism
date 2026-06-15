@@ -83,6 +83,7 @@ from polypolarism.diagnostics import (
     PLY033,
     PLY041,
     PLY042,
+    parse_type_ignore,
     tag,
 )
 from polypolarism.expr_infer import (
@@ -2052,6 +2053,11 @@ class FunctionAnalysis:
     # the declared return type (issues #94/#95). ``inferred_return_type``
     # is the representative (last) one for display.
     return_frames: list[tuple[int, FrameType]] = field(default_factory=list)
+    # Diagnostic suppression spec from a ``# type: ignore`` comment on the
+    # function's ``def`` line.  ``None`` suppresses ALL codes; a non-empty
+    # frozenset suppresses only the listed codes; the empty frozenset (default)
+    # means no suppression.
+    suppressed_codes: frozenset[str] | None = frozenset()
 
     @property
     def has_errors(self) -> bool:
@@ -7506,6 +7512,7 @@ def analyze_source(
 
     # Pass 3: Analyze each function/method body with the registries.
     func_nodes = module_funcs + [m for _, m in class_methods]
+    source_lines = source.splitlines()
     results: list[FunctionAnalysis] = []
     for func_node in func_nodes:
         analysis = analyze_function(
@@ -7518,6 +7525,12 @@ def analyze_source(
             collect_trace=collect_trace,
         )
         if analysis:
+            def_line = (
+                source_lines[func_node.lineno - 1]
+                if 0 < func_node.lineno <= len(source_lines)
+                else ""
+            )
+            analysis.suppressed_codes = parse_type_ignore(def_line)
             results.append(analysis)
 
     return results

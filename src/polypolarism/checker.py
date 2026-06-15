@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re as _re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
@@ -379,6 +380,37 @@ def _check_one_frame(
     return errors, leniency
 
 
+_ANY_CODE = _re.compile(r"\[(PL[YW]\d{3})\]")
+
+
+def _code_of(err: CheckError | str) -> str | None:
+    """Extract the PLY/PLW code from any error value.
+
+    Handles typed errors (``TypeMismatch``/``InferenceFailure`` with a
+    ``.code`` attribute), tagged strings (``"[PLY040] ..."``), and the
+    multi-return prefix form (``"at line N: [PLY040] ..."``).
+    """
+    if isinstance(err, str):
+        m = _ANY_CODE.search(err)
+        return m.group(1) if m else None
+    return getattr(err, "code", None)
+
+
+def _apply_suppression(
+    items: list,
+    suppressed: frozenset[str] | None,
+) -> list:
+    """Filter ``items`` according to a ``# type: ignore`` suppression spec.
+
+    ``suppressed=frozenset()``  — no suppression; return items unchanged.
+    ``suppressed=None``         — blanket suppress; return empty list.
+    ``suppressed={...}``        — remove items whose code is in the set.
+    """
+    if suppressed is not None and not suppressed:
+        return items  # empty frozenset → nothing to suppress
+    return [item for item in items if not (suppressed is None or _code_of(item) in suppressed)]
+
+
 def check_function(analysis: FunctionAnalysis) -> CheckResult:
     """
     Check a single function's declared return type against its inferred return type.
@@ -401,11 +433,13 @@ def check_function(analysis: FunctionAnalysis) -> CheckResult:
     # Check if we have both declared and inferred types
     if analysis.declared_return_type is None:
         # No declared type to check against
+        errors = _apply_suppression(errors, analysis.suppressed_codes)
+        warnings = _apply_suppression(list(analysis.warnings), analysis.suppressed_codes)
         return CheckResult(
             function_name=analysis.name,
             passed=len(errors) == 0,
             errors=errors,
-            warnings=list(analysis.warnings),
+            warnings=warnings,
             trace=trace,
         )
 
@@ -439,14 +473,16 @@ def check_function(analysis: FunctionAnalysis) -> CheckResult:
         errors.extend(frame_errors)
         leniency.extend(frame_leniency)
 
+    errors = _apply_suppression(errors, analysis.suppressed_codes)
+    warnings = _apply_suppression(list(analysis.warnings), analysis.suppressed_codes)
     return CheckResult(
         function_name=analysis.name,
         passed=len(errors) == 0,
         errors=errors,
-        warnings=list(analysis.warnings),
+        warnings=warnings,
         leniency=leniency,
         trace=trace,
-        mismatch_frames=mismatch_frames,
+        mismatch_frames=mismatch_frames if errors else [],
     )
 
 

@@ -163,6 +163,17 @@ SKIP: dict[str, str] = {
     "valid/if_branch_converge.py::both_branches_ok": (
         "non-frame bool parameter 'flag' has no default; branch-dependent behavior is static-only"
     ),
+    # -- type: ignore suppression: the suppressed functions have real runtime bugs;
+    #    the static verdict is OK (suppressed) but runtime would FAIL under check_types.
+    "valid/type_ignore_suppress.py::blanket": (
+        "type: ignore blanket suppress: runtime would FAIL but static is suppressed by design"
+    ),
+    "valid/type_ignore_suppress.py::specific": (
+        "type: ignore[PLY040] suppress: runtime would FAIL but static is suppressed by design"
+    ),
+    "valid/type_ignore_suppress.py::multi_code": (
+        "type: ignore[PLY040, PLY032] suppress: runtime would FAIL but static is suppressed by design"
+    ),
 }
 
 

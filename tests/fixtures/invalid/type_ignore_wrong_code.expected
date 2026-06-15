@@ -1,0 +1,3 @@
+wrong_code: FAIL
+  error: [PLY040] Missing column 'v' of type Float64
+  error: [PLY040] Missing column 'a' of type Float64

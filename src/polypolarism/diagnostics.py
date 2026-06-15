@@ -80,6 +80,27 @@ PLW011 = "PLW011"  # schema field annotation unrecognized; column degrades to Un
 PLW012 = "PLW012"  # grouped aggregation provably yields an all-null column (probed; probably a bug) (#91)
 
 
+_TYPE_IGNORE = re.compile(r"#\s*type:\s*ignore(?:\[([^\]]*)\])?")
+
+
+def parse_type_ignore(line: str) -> frozenset[str] | None:
+    """Parse a ``# type: ignore`` or ``# type: ignore[CODE1, CODE2]`` comment.
+
+    Returns:
+        ``None``           — blanket ignore (suppress all diagnostics)
+        ``frozenset(...)`` — suppress only the listed PLY/PLW codes
+        ``frozenset()``    — no ``type: ignore`` present; nothing suppressed
+    """
+    m = _TYPE_IGNORE.search(line)
+    if m is None:
+        return frozenset()
+    raw = m.group(1)
+    if raw is None:
+        return None  # bare # type: ignore
+    codes = frozenset(c.strip() for c in raw.split(",") if c.strip())
+    return codes or None  # empty brackets treated as blanket
+
+
 def tag(code: str, message: str) -> str:
     """Return ``"[CODE] message"``; idempotent if message is already tagged."""
     if message.startswith(f"[{code}]"):
