@@ -76,6 +76,81 @@ Then run the type checker:
 polypolarism your_module.py
 ```
 
+### A more realistic pipeline
+
+This example shows a multi-step pipeline — join → derive column → group-by → aggregate — and
+demonstrates a type error the checker catches statically:
+
+```python
+import polars as pl
+import pandera.polars as pa
+from pandera.typing.polars import DataFrame
+
+
+class Orders(pa.DataFrameModel):
+    order_id: int
+    region: str
+    product_id: int
+    quantity: int
+
+
+class Products(pa.DataFrameModel):
+    product_id: int
+    unit_price: pl.Float64
+
+
+class RevenueByRegion(pa.DataFrameModel):
+    region: str
+    total_revenue: pl.Float64
+
+
+def compute_revenue(
+    orders: DataFrame[Orders],
+    products: DataFrame[Products],
+) -> DataFrame[RevenueByRegion]:
+    return (
+        orders
+        .join(products, on="product_id", how="inner")
+        .with_columns(revenue=pl.col("quantity") * pl.col("unit_price"))
+        .group_by("region")
+        .agg(total_revenue=pl.col("revenue").sum())
+    )
+
+
+# ── Now introduce a type error ────────────────────────────────────────────────
+
+class RevenueByRegionWrong(pa.DataFrameModel):
+    region: str
+    total_revenue: int  # declared Int64, but sum(Float64) produces Float64
+
+
+def compute_revenue_wrong(
+    orders: DataFrame[Orders],
+    products: DataFrame[Products],
+) -> DataFrame[RevenueByRegionWrong]:
+    return (
+        orders
+        .join(products, on="product_id", how="inner")
+        .with_columns(revenue=pl.col("quantity") * pl.col("unit_price"))
+        .group_by("region")
+        .agg(total_revenue=pl.col("revenue").sum())
+    )
+```
+
+`polypolarism pipeline.py` reports:
+
+```
+  compute_revenue (line 20): OK
+  compute_revenue_wrong (line 40): FAIL
+    - [PLY040] Column 'total_revenue' has type Float64, but declared type is Int64
+
+1 function(s) failed, 1 passed.
+```
+
+`compute_revenue_wrong` passes at the join and aggregation steps but the checker
+tracks the dtype of `revenue` through `quantity × unit_price` (Int64 × Float64 → Float64),
+and catches the mismatch against the `Int64` declaration — before any data reaches runtime.
+
 ## Schema declaration
 
 Use Pandera class-based schemas (`pa.DataFrameModel`; the legacy
