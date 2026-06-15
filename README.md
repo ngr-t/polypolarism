@@ -182,7 +182,3 @@ uv run pytest --cov
 ## License
 
 MIT License - see [LICENSE](LICENSE) for details.
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit issues and pull requests.
