@@ -207,13 +207,19 @@ Status legend: `[ ]` open / `[x]` done / `[-]` deliberately deferred.
   Tiers, cheapest / highest-de-risk first; each independently shippable and
   **opt-in** (no `Row(...)` ⇒ today's behavior byte-for-byte — golden
   fixtures for unannotated code must not move):
-  1. [ ] *De-risk + decide (ADR).* Empirically confirm the hard constraint:
-     `Annotated[DataFrame[S], <marker>]` survives `@pa.check_types` /
-     `Schema.validate` untouched (Pandera must ignore the extra metadata).
-     If it chokes, the surface design changes — so this gates everything.
-     Pin it with a `tests/test_runtime_differential.py` case. Decide the
-     row-algebra scope (add / drop / rename / lacks; one vs many vars).
-     Output: ADR-00NN.
+  1. [ ] *De-risk + decide (ADR).* **Investigated 2026-06-15 — surface
+     decision made; ADR + pinning test still pending. See the C-14 Tier 1
+     notes at the bottom.** The naive `Annotated[DataFrame[S], <marker>]`
+     surface FAILS the hard constraint: pandera 0.31 does not unwrap
+     `Annotated` on a frame annotation, so `@pa.check_types` skips
+     validation entirely (a missing-column frame passes). A runtime-inert
+     **decorator** surface (`@pp.rowpoly("R")` alongside a bare
+     `DataFrame[S]` annotation) satisfies it instead — pandera keeps
+     validating the base in both decorator orders, and the current static
+     analyzer already checks such functions normally. Remaining: write the
+     ADR, pin the constraint with a `tests/test_runtime_differential.py`
+     case, and finalize the row-algebra scope (add / drop / rename / lacks;
+     one vs many vars).
   2. [ ] *Surface + binding, no semantics.* Ship the runtime-inert `Row`
      marker; teach `pandera_annotation.py` / `pandera_dtype.py` to recognize
      `Annotated[DataFrame[S], Row("R")]` and bind a FrameType whose `rest`
@@ -315,3 +321,66 @@ overwrites the recorded value — the same accepted hazard as the string
 constants that resolve join keys. Building per-branch environments would be
 new infrastructure for a niche gain (window constants are rarely
 conditionally rebound) and stays out.
+
+## C-14 Tier 1 — row-variable surface de-risk (2026-06-15)
+
+**Goal:** decide a surface for the static row variable that does NOT deviate
+from Pandera (Pandera must stay the runtime authority validating the base
+schema). Probed against pandera 0.31.1 / polars 1.41.2 (the `runtime`
+group).
+
+**Finding — the naive `Annotated` surface FAILS the hard constraint.** With
+`@pa.check_types def f(df: Annotated[DataFrame[S], marker]) -> ...`, pandera
+does **not** unwrap `Annotated` on a frame annotation: it stops recognizing
+the parameter as a pandera DataFrame and **skips validation entirely**. A
+frame missing the required `id` column passed cleanly (vs the bare
+`DataFrame[S]` baseline, which raised `SchemaError: column 'id' not in
+dataframe`). Return validation was skipped too. So wrapping the frame
+annotation in `Annotated` silently disables Pandera's runtime check — a
+direct violation of the constraint. (The type hint is preserved —
+`get_type_hints(include_extras=True)` shows the `Annotated[...]` — pandera
+just doesn't look through it.)
+
+**Decision — runtime-inert decorator surface.** Keep the annotation a bare,
+pandera-validated `DataFrame[S]` and carry the row variable in an
+orthogonal decorator:
+
+```python
+@pa.check_types
+@pp.rowpoly("R")                      # ships from polypolarism; returns fn unchanged
+def add_score(df: DataFrame[S]) -> DataFrame[OutScore]: ...
+```
+
+Probed: pandera validation fires on a bad frame in **both** decorator orders
+(`@pa.check_types` outer or inner), because the decorator is identity and
+the annotation is untouched. The marker is reachable at runtime
+(`fn.__pp_rowpoly__`) and, more importantly, in the AST polypolarism reads.
+
+**Static side already supports it.** Running the current analyzer:
+`Annotated[DataFrame[S], ...]` params are NOT recognized today (the function
+is silently skipped — frame-level annotation detection doesn't unwrap
+`Annotated`, unlike field-dtype parsing in `pandera_dtype.py`), whereas a
+bare `DataFrame[S]` carrying an unknown `@rowpoly("R")` decorator analyzes
+exactly as today (unknown decorators are ignored; a return-type mismatch on
+such a function still fires PLY040). So the decorator surface is purely
+additive on the static side — no regression, and the row-var reader is a
+new decorator-recognition pass, not a rework of annotation handling.
+
+**Why the decorator over `Annotated`, beyond the constraint:** it is
+*version-robust* — it sidesteps whatever any pandera version does with
+`Annotated`, because the annotation stays the plain form pandera already
+validates. `Annotated` remains the right carrier for *field-level* dtype
+metadata (pandera already uses it there); it is wrong only for the
+*frame-level* row variable.
+
+**Scope note (common case needs no extra algebra):** the "add a column"
+part of a preserving helper is already captured by the difference between
+the param schema (`InId`) and the return schema (`OutScore`); a single
+`@pp.rowpoly("R")` (all open frames in the signature share `R`) covers
+preserve+add. Per-position binding (`@pp.rowpoly(df="R", returns="R")`) and
+explicit drop/rename are only needed once joins / two independent rests
+arrive — deferred to Tiers 4–5.
+
+**Remaining for Tier 1:** write the ADR recording this decision; pin the
+constraint with a `tests/test_runtime_differential.py` case (bad frame
+under `@pa.check_types` + `@pp.rowpoly` must still raise `SchemaError`).
