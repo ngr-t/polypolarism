@@ -4432,15 +4432,30 @@ class ExpressionAnalyzer(ast.NodeVisitor):
 
 
 def _intersect_frame_types(a: FrameType, b: FrameType) -> FrameType:
-    """Column-level intersection for if/else merge points (issue #95).
+    """Column-level merge for if/else merge points (issues #95, #107).
 
-    Retains only columns present in BOTH frames with identical ColumnSpecs.
-    This gives the pessimistic (safe) merged type: the caller can only rely
-    on columns that exist regardless of which branch executed.
+    Keeps columns present in BOTH frames — a column absent on one path can't
+    be relied on downstream. A column whose ColumnSpec matches exactly is kept
+    as-is; one that differs only in dtype/nullability is unified to the common
+    supertype (issue #107: ``Float64`` ⊔ ``Float64?`` = ``Float64?``) rather
+    than dropped, and stays required only if required on both paths. Genuinely
+    incompatible dtypes (no unifier) degrade to ``Unknown`` so the column
+    survives (gradual typing) instead of producing a false ``column not
+    found`` downstream.
     """
-    cols: dict[str, ColumnSpec] = {
-        col: spec for col, spec in a.columns.items() if b.columns.get(col) == spec
-    }
+    cols: dict[str, ColumnSpec] = {}
+    for col, a_spec in a.columns.items():
+        b_spec = b.columns.get(col)
+        if b_spec is None:
+            continue
+        if a_spec == b_spec:
+            cols[col] = a_spec
+            continue
+        try:
+            unified = unify_types(a_spec.dtype, b_spec.dtype)
+        except TypeUnificationError:
+            unified = Unknown()
+        cols[col] = ColumnSpec(dtype=unified, required=a_spec.required and b_spec.required)
     return FrameType(
         cols,
         strict=a.strict or b.strict,

@@ -245,14 +245,19 @@ def _reject_temporal(name: str, dtype: DataType) -> NoReturn:
 
 
 def _infer_sum(dtype: DataType) -> DataType:
-    """sum(T) -> T for numeric types; sub-32-bit ints upcast to Int64."""
-    inner, is_nullable = _unwrap_nullable(dtype)
+    """sum(T) -> T for numeric types; sub-32-bit ints upcast to Int64.
+
+    sum is never nullable (probed polars 1.41.2, grouped and select alike;
+    issue #107): it drops nulls and an all-null / empty group sums to 0 (or
+    a zero Duration), so the receiver's nullability is discarded.
+    """
+    inner, _ = _unwrap_nullable(dtype)
 
     # Probed (polars 1.41.2; issue #85): sum on Duration preserves the
     # receiver unit in both contexts; Date/Datetime/Time are unsupported
     # (select raises, grouped degrades to all-null — see TEMPORAL_TYPES).
     if isinstance(inner, Duration):
-        return _wrap_nullable(inner, is_nullable)
+        return inner
     if isinstance(inner, TEMPORAL_TYPES):
         _reject_temporal("sum", dtype)
 
@@ -265,7 +270,7 @@ def _infer_sum(dtype: DataType) -> DataType:
     # the receiver dtype.
     if isinstance(inner, _SMALL_INT_TYPES):
         inner = Int64()
-    return _wrap_nullable(inner, is_nullable)
+    return inner
 
 
 def _infer_mean(dtype: DataType) -> DataType:

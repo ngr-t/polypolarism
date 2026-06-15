@@ -1,0 +1,4 @@
+W.merge_diff_nullability: OK
+  via: column 'k': passed via Unknown
+W.merge_same_dtype: OK
+  via: column 'k': passed via Unknown

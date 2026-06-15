@@ -128,10 +128,10 @@ class TestAggFunctionTypeErrors:
 class TestNullableHandling:
     """Test nullable type handling in aggregations."""
 
-    def test_sum_nullable_int64_returns_nullable_int64(self):
-        """sum(Nullable[Int64]) -> Nullable[Int64]"""
+    def test_sum_nullable_int64_returns_nonnullable_int64(self):
+        """sum(Nullable[Int64]) -> Int64 (sum drops nulls; never null — issue #107)."""
         result = infer_agg_result_type(AggFunction.SUM, Nullable(Int64()))
-        assert result == Nullable(Int64())
+        assert result == Int64()
 
     def test_mean_nullable_int64_returns_nullable_float64(self):
         """mean(Nullable[Int64]) -> Nullable[Float64]"""
@@ -253,9 +253,10 @@ class TestSmallIntAndLandmarkReceivers:
         result = infer_agg_result_type(func, dtype, context=context)
         assert result == Int64()
 
-    def test_sum_nullable_small_int_keeps_nullability(self):
+    def test_sum_nullable_small_int_upcasts_and_drops_nullability(self):
+        # sum drops nulls (never null — issue #107); UInt8 still upcasts to Int64.
         result = infer_agg_result_type(AggFunction.SUM, Nullable(UInt8()))
-        assert result == Nullable(Int64())
+        assert result == Int64()
 
     @pytest.mark.parametrize("dtype", [Int8(), Int16(), UInt8(), UInt16()])
     def test_mean_small_int_returns_float64(self, dtype):
