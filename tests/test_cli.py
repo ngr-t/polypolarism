@@ -735,3 +735,42 @@ class TestMultiFileInvocation:
             d.get("file") == str(broken) and "SyntaxError" in d["message"]
             for d in data["diagnostics"]
         )
+
+
+class TestVerboseTrace:
+    """-v / --verbose renders the inference trace under each function."""
+
+    SOURCE = """
+import pandera.polars as pa
+import polars as pl
+from pandera.typing.polars import DataFrame
+
+class Sales(pa.DataFrameModel):
+    sku: str
+    qty: int
+
+    class Config:
+        strict = True
+
+def f(df: DataFrame[Sales]) -> DataFrame[Sales]:
+    return df.filter(pl.col("qty") > 0)
+"""
+
+    def test_verbose_shows_trace(self, tmp_path, monkeypatch, capsys):
+        target = tmp_path / "t.py"
+        target.write_text(self.SOURCE)
+        monkeypatch.setattr(sys, "argv", ["polypolarism", "--no-color", "-v", str(target)])
+        main()
+        out = capsys.readouterr().out
+        assert "trace:" in out
+        assert "param df" in out
+        assert "DataFrame{sku: Utf8, qty: Int64} (strict, schema=Sales)" in out
+        assert "return" in out
+
+    def test_default_output_has_no_trace(self, tmp_path, monkeypatch, capsys):
+        target = tmp_path / "t.py"
+        target.write_text(self.SOURCE)
+        monkeypatch.setattr(sys, "argv", ["polypolarism", "--no-color", str(target)])
+        main()
+        out = capsys.readouterr().out
+        assert "trace:" not in out

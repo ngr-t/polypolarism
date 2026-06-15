@@ -14827,3 +14827,62 @@ class TestSchemaContextInMessages:
         assert any("Column 'missing' not found" in e and "schema" not in e for e in a.errors), (
             a.errors
         )
+
+
+class TestInferenceTrace:
+    """--verbose inference trace (user request 2026-06-12): analyses can
+    record the step-by-step frame transformations so the CLI can show
+    HOW polypolarism arrived at its verdict."""
+
+    SOURCE = textwrap.dedent(
+        """
+        import pandera.polars as pa
+        import polars as pl
+        from pandera.typing.polars import DataFrame
+
+
+        class Sales(pa.DataFrameModel):
+            sku: str
+            qty: int
+
+            class Config:
+                strict = True
+
+
+        class Out(pa.DataFrameModel):
+            sku: str
+            total: pl.Int64
+
+            class Config:
+                strict = True
+
+
+        def f(df: DataFrame[Sales]) -> DataFrame[Out]:
+            widened = df.with_columns(doubled=pl.col("qty") * 2)
+            return widened.group_by("sku").agg(total=pl.col("qty").sum())
+        """
+    )
+
+    def test_trace_disabled_by_default(self):
+        (a,) = analyze_source(self.SOURCE)
+        assert a.trace == []
+
+    def test_trace_records_param_chain_and_return(self):
+        (a,) = analyze_source(self.SOURCE, collect_trace=True)
+        labels = [e.label for e in a.trace]
+        assert any("param df" in label for label in labels)
+        assert any("with_columns" in label for label in labels)
+        assert any("agg" in label for label in labels)
+        assert any(label == "return" for label in labels)
+
+    def test_trace_renders_frames_compactly(self):
+        (a,) = analyze_source(self.SOURCE, collect_trace=True)
+        by_label = {e.label: e.result for e in a.trace}
+        assert by_label["param df"] == "DataFrame{sku: Utf8, qty: Int64} (strict, schema=Sales)"
+        assert "doubled: Int64" in next(e.result for e in a.trace if "with_columns" in e.label)
+        assert by_label["return"] == "DataFrame{sku: Utf8, total: Int64}"
+
+    def test_trace_events_carry_line_numbers(self):
+        (a,) = analyze_source(self.SOURCE, collect_trace=True)
+        chain = next(e for e in a.trace if "with_columns" in e.label)
+        assert chain.lineno > 0

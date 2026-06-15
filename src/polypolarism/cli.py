@@ -143,6 +143,10 @@ def _format_result_block(result: CheckResult, function_lines: dict[str, int]) ->
             lines.extend(diff_block)
     for warning in result.warnings:
         lines.append(f"    \033[33m! {warning}\033[0m")
+    if result.trace:
+        lines.append("    trace:")
+        for step in result.trace:
+            lines.append(f"      \033[2m{step}\033[0m")
     return lines
 
 
@@ -263,6 +267,7 @@ def create_parser() -> argparse.ArgumentParser:
 
 def _check_file_with_locations(
     file_path: Path,
+    collect_trace: bool = False,
 ) -> tuple[list[CheckResult], dict[str, int], dict[str, int], list[dict]]:
     """
     Check a file and return results plus per-function source line numbers
@@ -278,7 +283,7 @@ def _check_file_with_locations(
     except (UnicodeDecodeError, OSError) as err:
         return [_parse_error_result(file_path, err)], {}, {}, []
     try:
-        analyses = analyze_source(source, file_path=file_path)
+        analyses = analyze_source(source, file_path=file_path, collect_trace=collect_trace)
     except SyntaxError as err:
         return [_parse_error_result(file_path, err)], {}, {}, []
     results = [check_function(a) for a in analyses]
@@ -287,11 +292,13 @@ def _check_file_with_locations(
     return results, function_lines, function_end_lines, function_summaries(analyses)
 
 
-def _expand_directory_groups(dir_path: Path) -> list[FileResults]:
+def _expand_directory_groups(dir_path: Path, collect_trace: bool = False) -> list[FileResults]:
     """Per-file FileResults for every .py under dir_path."""
     groups: list[FileResults] = []
     for py_file in sorted(dir_path.glob("**/*.py")):
-        results, function_lines, function_end_lines, functions = _check_file_with_locations(py_file)
+        results, function_lines, function_end_lines, functions = _check_file_with_locations(
+            py_file, collect_trace=collect_trace
+        )
         groups.append(
             FileResults(
                 file_path=str(py_file),
@@ -357,7 +364,7 @@ def main(args: list[str] | None = None) -> int:
 
         if path.is_file():
             results, function_lines, function_end_lines, functions = _check_file_with_locations(
-                path
+                path, collect_trace=parsed.verbose
             )
             file_groups.append(
                 FileResults(
@@ -369,7 +376,7 @@ def main(args: list[str] | None = None) -> int:
                 )
             )
         elif path.is_dir():
-            file_groups.extend(_expand_directory_groups(path))
+            file_groups.extend(_expand_directory_groups(path, collect_trace=parsed.verbose))
 
     all_results: list[CheckResult] = [r for g in file_groups for r in g.results]
 

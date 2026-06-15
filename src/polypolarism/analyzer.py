@@ -2019,6 +2019,19 @@ def _is_frame_subtype(actual: FrameType, expected: FrameType) -> bool:
 
 
 @dataclass
+class TraceEvent:
+    """One step of the inference trace (``--verbose``): where, what, and
+    the frame type the step produced. ``result`` is rendered eagerly —
+    frames mutate in place (backward narrowing pins columns), so a live
+    reference would show the final state, not the state at this step."""
+
+    lineno: int
+    col: int
+    label: str  # e.g. "param df", "widened = …", "df.with_columns(…)"
+    result: str  # FrameType.render() snapshot
+
+
+@dataclass
 class FunctionAnalysis:
     """Result of analyzing a single function."""
 
@@ -2033,6 +2046,8 @@ class FunctionAnalysis:
     # check the code and the user could fix that by adding an annotation
     # or an explicit dtype. Does not affect ``has_errors``.
     warnings: list[str] = field(default_factory=list)
+    # Inference trace (empty unless analyzed with ``collect_trace=True``).
+    trace: list[TraceEvent] = field(default_factory=list)
 
     @property
     def has_errors(self) -> bool:
@@ -4319,9 +4334,13 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         module_consts: dict[str, str | list[str] | int] | None = None,
         reported_broken_schemas: set[str] | None = None,
         reported_degraded_schemas: set[str] | None = None,
+        trace: list[TraceEvent] | None = None,
     ):
         self.input_types = input_types
         self.errors = errors
+        # Inference trace sink (``--verbose``). ``None`` disables
+        # collection entirely so the default path pays no rendering cost.
+        self.trace = trace
         # Schema names already flagged PLY041 for this function (issue #69).
         # Shared with ``analyze_function`` (signature sites) so a broken
         # schema is reported once per function however many annotation /
@@ -4435,6 +4454,15 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         """Handle return statements."""
         if node.value:
             self.return_type = self._infer_expr_type(node.value)
+            if self.trace is not None and self.return_type is not None:
+                self.trace.append(
+                    TraceEvent(
+                        lineno=node.lineno,
+                        col=node.col_offset,
+                        label="return",
+                        result=self.return_type.render(),
+                    )
+                )
 
     def visit_Expr(self, node: ast.Expr) -> None:
         """Bare expression statement; recognise ``Schema.validate(df)`` as narrowing.
@@ -4486,6 +4514,15 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 self.var_types[var_name] = inferred
                 self.var_lists.pop(var_name, None)
                 self.var_classes.pop(var_name, None)
+                if self.trace is not None:
+                    self.trace.append(
+                        TraceEvent(
+                            lineno=node.lineno,
+                            col=node.col_offset,
+                            label=f"{var_name} = …",
+                            result=inferred.render(),
+                        )
+                    )
             else:
                 # ``obj = ClassName()`` — track the class for later
                 # ``obj.method()`` resolution.
@@ -4843,6 +4880,26 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         return self._infer_frame_list(node)
 
     def _infer_call_type(self, node: ast.Call) -> FrameType | None:
+        """Infer the type of a method or function call, tracing each
+        frame-producing method step when the trace sink is armed.
+
+        Chains emit receiver-first (the recursion bottoms out at the
+        chain head), which is exactly source reading order."""
+        result = self._infer_call_type_impl(node)
+        if self.trace is not None and result is not None and isinstance(node.func, ast.Attribute):
+            receiver = node.func.value
+            head = f"{receiver.id}." if isinstance(receiver, ast.Name) else "…."
+            self.trace.append(
+                TraceEvent(
+                    lineno=node.lineno,
+                    col=node.col_offset,
+                    label=f"{head}{node.func.attr}(…)",
+                    result=result.render(),
+                )
+            )
+        return result
+
+    def _infer_call_type_impl(self, node: ast.Call) -> FrameType | None:
         """Infer the type of a method or function call."""
         # Function call: func_name(args)
         if isinstance(node.func, ast.Name):
@@ -6985,10 +7042,12 @@ def analyze_function(
     class_registry: ClassRegistry | None = None,
     current_class_name: str | None = None,
     module_consts: dict[str, str | list[str] | int] | None = None,
+    collect_trace: bool = False,
 ) -> FunctionAnalysis | None:
     """Analyze a single function definition."""
     schema_registry = schema_registry or SchemaRegistry()
     class_registry = class_registry or ClassRegistry()
+    trace_events: list[TraceEvent] | None = [] if collect_trace else None
     input_types: dict[str, FrameType] = {}
     declared_return: FrameType | None = None
     errors: list[str] = []
@@ -7113,6 +7172,17 @@ def analyze_function(
             )
         warnings.append(tag(PLW006, hint))
 
+    if trace_events is not None:
+        for param_name, frame_type in input_types.items():
+            trace_events.append(
+                TraceEvent(
+                    lineno=func_node.lineno,
+                    col=func_node.col_offset,
+                    label=f"param {param_name}",
+                    result=frame_type.render(),
+                )
+            )
+
     # Analyze function body with registry
     body_analyzer = FunctionBodyAnalyzer(
         input_types,
@@ -7125,6 +7195,7 @@ def analyze_function(
         module_consts=module_consts,
         reported_broken_schemas=broken_schemas_reported,
         reported_degraded_schemas=degraded_schemas_reported,
+        trace=trace_events,
     )
     for stmt in func_node.body:
         body_analyzer.visit(stmt)
@@ -7167,6 +7238,7 @@ def analyze_function(
         inferred_return_type=body_analyzer.return_type,
         errors=body_analyzer.errors,
         warnings=body_analyzer.warnings,
+        trace=trace_events if trace_events is not None else [],
     )
 
 
@@ -7207,7 +7279,9 @@ def _collect_module_consts(tree: ast.Module) -> dict[str, str | list[str] | int]
     return consts
 
 
-def analyze_source(source: str, file_path: Path | None = None) -> list[FunctionAnalysis]:
+def analyze_source(
+    source: str, file_path: Path | None = None, collect_trace: bool = False
+) -> list[FunctionAnalysis]:
     """
     Analyze Python source code for DataFrame type annotations.
 
@@ -7291,6 +7365,7 @@ def analyze_source(source: str, file_path: Path | None = None) -> list[FunctionA
             class_registry=class_registry,
             current_class_name=func_to_class.get(id(func_node)),
             module_consts=module_consts,
+            collect_trace=collect_trace,
         )
         if analysis:
             results.append(analysis)

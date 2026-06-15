@@ -673,6 +673,25 @@ class FrameType:
             return ""
         return f" in frame from schema '{self.schema_name}'"
 
+    def render(self) -> str:
+        """Compact human rendering for diagnostics and the verbose trace:
+        ``DataFrame{sku: Utf8, qty: Int64, ...} (strict, schema=Sales)``.
+        ``...`` marks an open frame (unknown extras admitted); qualifiers
+        in the trailing parens are omitted when default."""
+        head = "LazyFrame" if self.is_lazy else "DataFrame"
+        cols = ", ".join(f"{name}: {spec}" for name, spec in self.columns.items())
+        if self.rest is not None:
+            cols = f"{cols}, ..." if cols else "..."
+        quals = []
+        if self.strict:
+            quals.append("strict")
+        if self.coerce:
+            quals.append("coerce")
+        if self.schema_name is not None:
+            quals.append(f"schema={self.schema_name}")
+        suffix = f" ({', '.join(quals)})" if quals else ""
+        return f"{head}{{{cols}}}{suffix}"
+
     def lacks(self, name: str) -> bool:
         """True when ``name`` is PROVABLY not a column of this frame:
         unpinned on a closed frame, or marked absent on an open one."""

@@ -105,6 +105,8 @@ class CheckResult:
     # them), so a fixture that passes only because inference degraded to
     # Unknown can't silently mask a false negative (issue #47).
     leniency: list[str] = field(default_factory=list)
+    # Inference trace, pre-rendered (populated only under --verbose).
+    trace: list[str] = field(default_factory=list)
 
     def __repr__(self) -> str:
         status = "PASSED" if self.passed else "FAILED"
@@ -309,6 +311,7 @@ def check_function(analysis: FunctionAnalysis) -> CheckResult:
         CheckResult with pass/fail status and any errors
     """
     errors: list[CheckError] = []
+    trace = [f"L{e.lineno:<4} {e.label:<28} {e.result}" for e in analysis.trace]
 
     # Include any analysis errors
     for err in analysis.errors:
@@ -322,6 +325,7 @@ def check_function(analysis: FunctionAnalysis) -> CheckResult:
             passed=len(errors) == 0,
             errors=errors,
             warnings=list(analysis.warnings),
+            trace=trace,
         )
 
     if analysis.inferred_return_type is None:
@@ -331,6 +335,7 @@ def check_function(analysis: FunctionAnalysis) -> CheckResult:
             passed=False,
             errors=errors,
             warnings=list(analysis.warnings),
+            trace=trace,
         )
 
     declared = analysis.declared_return_type
@@ -401,6 +406,7 @@ def check_function(analysis: FunctionAnalysis) -> CheckResult:
         errors=errors,
         warnings=list(analysis.warnings),
         leniency=leniency,
+        trace=trace,
     )
 
 

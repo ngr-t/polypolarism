@@ -33,6 +33,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `-v` / `--verbose` now shows an inference trace under each function:
+  parameter bindings, every frame-producing method step in source
+  order, variable bindings, and the inferred return — each with the
+  resulting frame rendered compactly
+  (`DataFrame{sku: Utf8, qty: Int64, ...} (strict, schema=Sales)`).
+  Collection is off unless requested, so the default path pays nothing.
+
 - Text output groups results under a header line naming each checked
   file, so multi-file / directory runs show which file every function
   came from; files without annotated functions are listed with an
