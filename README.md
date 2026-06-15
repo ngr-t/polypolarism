@@ -70,12 +70,26 @@ Then run the type checker:
 polypolarism your_module.py
 ```
 
+It lists each annotated function with its source line, then a summary:
+
+```
+your_module.py
+  merge_users_orders (line 24): OK
+
+All 1 function(s) passed.
+```
+
 ### Catching a type error statically
 
 This multi-step pipeline — join → derive column → group-by → aggregate —
 shows an error the checker catches without running the code:
 
 ```python
+import polars as pl
+import pandera.polars as pa
+from pandera.typing.polars import DataFrame
+
+
 class Sales(pa.DataFrameModel):
     order_id: int
     region: str
@@ -109,7 +123,8 @@ def compute_revenue(
 `polypolarism pipeline.py` reports:
 
 ```
-  compute_revenue: FAIL
+pipeline.py
+  compute_revenue (line 23): FAIL
     - [PLY040] Column 'total_revenue' has type Float64, but declared type is Int64
 
 1 function(s) failed, 0 passed.
@@ -134,25 +149,6 @@ polypolarism --version
 polypolarism --no-color path/to/file.py
 polypolarism --polars-version 1.40 path/to/file.py   # suppresses PLW010
 polypolarism --no-version-check path/to/file.py
-```
-
-Example output for valid code:
-
-```
-  merge_users_orders: OK
-  aggregate_sales: OK
-
-All 2 function(s) passed.
-```
-
-For invalid code:
-
-```
-  bad_join: FAIL
-    - [PLY010] Column 'user_id' not found in right frame
-    - [PLY040] Could not infer return type
-
-1 function(s) failed, 0 passed.
 ```
 
 ## Documentation
