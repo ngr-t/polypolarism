@@ -708,3 +708,42 @@ def test_skip_list_is_not_stale() -> None:
         assert key in fixture_keys, f"stale VALUE_OVERRIDES entry: {key}"
     for key in OMIT_OPTIONAL_COLUMNS:
         assert key in fixture_keys, f"stale OMIT_OPTIONAL_COLUMNS entry: {key}"
+
+
+# Module-level so pandera's get_type_hints can resolve the annotation
+# (a function-local schema class is invisible to check_types at call time).
+class _RowPolyPinModel(DataFrameModel):
+    id: int
+
+
+def test_rowpoly_decorator_does_not_disable_pandera_validation() -> None:
+    """C-14 Tier 1 hard-constraint pin: ``@rowpoly`` must not deviate from Pandera.
+
+    The row-variable marker sits BESIDE a bare ``DataFrame[Schema]``
+    annotation — never an ``Annotated`` wrapper, which pandera 0.31 stops
+    recognizing so ``@pa.check_types`` would skip validation entirely. With
+    the decorator, pandera stays the runtime authority in BOTH decorator
+    orders: a conforming frame passes and a frame missing a required column
+    still raises ``SchemaError``.
+    """
+    import pandera.polars as pa
+
+    from polypolarism import rowpoly
+
+    good = pl.DataFrame({"id": [1, 2]})
+    missing_required = pl.DataFrame({"wrong": [1, 2]})
+
+    @pa.check_types
+    @rowpoly("R")
+    def check_outer(df: PanderaDataFrame[_RowPolyPinModel]) -> PanderaDataFrame[_RowPolyPinModel]:
+        return df
+
+    @rowpoly("R")
+    @pa.check_types
+    def check_inner(df: PanderaDataFrame[_RowPolyPinModel]) -> PanderaDataFrame[_RowPolyPinModel]:
+        return df
+
+    for fn in (check_outer, check_inner):
+        fn(good)  # conforming frame validates and passes
+        with pytest.raises(pa.errors.SchemaError):
+            fn(missing_required)  # pandera still enforces the base schema
