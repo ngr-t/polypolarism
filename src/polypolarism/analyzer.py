@@ -2141,6 +2141,10 @@ class FunctionAnalysis:
     # frozenset suppresses only the listed codes; the empty frozenset (default)
     # means no suppression.
     suppressed_codes: frozenset[str] | None = frozenset()
+    # Row-variable name from a ``@rowpoly("R")`` decorator (C-14), else
+    # ``None``. Recorded here for the row-polymorphism threading that later
+    # tiers build on; it has no effect on the current verdict.
+    row_var: str | None = None
 
     @property
     def has_errors(self) -> bool:
@@ -7579,6 +7583,35 @@ def _is_property_method(node: ast.stmt) -> bool:
     return any(isinstance(d, ast.Name) and d.id == "property" for d in node.decorator_list)
 
 
+def _rowpoly_row_var(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str | None:
+    """Row-variable name from a ``@rowpoly("R")`` decorator, else ``None`` (C-14).
+
+    Recognizes the call form with a string-literal argument in both the bare
+    (``@rowpoly("R")``) and attribute (``@pp.rowpoly("R")`` /
+    ``@polypolarism.rowpoly("R")``) spellings. A bare ``@rowpoly`` with no
+    call, or a non-literal argument, is ignored — the row variable needs a
+    statically-known name. The first matching decorator wins (a single row
+    variable per signature today; multiple/positional binding is a later
+    tier). The decorator stays a runtime no-op (see ``polypolarism.rowpoly``).
+    """
+    for deco in node.decorator_list:
+        if not isinstance(deco, ast.Call) or not deco.args:
+            continue
+        func = deco.func
+        if isinstance(func, ast.Name):
+            deco_name = func.id
+        elif isinstance(func, ast.Attribute):
+            deco_name = func.attr
+        else:
+            continue
+        if deco_name != "rowpoly":
+            continue
+        arg = deco.args[0]
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+            return arg.value
+    return None
+
+
 def _collect_class_attr_frames(
     class_node: ast.ClassDef,
     schema_registry: SchemaRegistry,
@@ -7909,6 +7942,7 @@ def analyze_function(
         warnings=body_analyzer.warnings,
         trace=trace_events if trace_events is not None else [],
         return_frames=body_analyzer.return_frames,
+        row_var=_rowpoly_row_var(func_node),
     )
 
 
