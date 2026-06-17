@@ -275,9 +275,27 @@ Status legend: `[ ]` open / `[x]` done / `[-]` deliberately deferred.
           correct code; this diagnostic stays deferred. Revive only if a
           schema-level key marker lands AND threading is extended so that
           row-variable extras (not declared columns) can provably collide.
-  6. [ ] *Ergonomics / tooling.* Optional inference of `R` for untyped
-     helpers; JSON output exposes bound row vars; golden fixtures
-     (valid / invalid / warning) + docs documenting the dialect.
+  6. [~] *Ergonomics / tooling — partial.* Done 2026-06-17:
+     - [x] JSON output (`--format json`) exposes each helper's bound row
+       variable(s): `"row_var": "R"` for `@rowpoly("R")`,
+       `"param_row_vars": {...}` for the keyword form (added only when
+       present, so the payload stays backward-compatible). `FunctionAnalysis`
+       gained `param_row_vars` (it already carried `row_var`).
+     - [x] Docs: `docs/row-polymorphism.md` documents the dialect (surface,
+       threading precision, `PLY043`, JSON exposure, the static-only /
+       Pandera-runtime-authority constraint), with every example verified by
+       running the CLI. Linked from `docs/README.md` / `README.md`; `PLY043`
+       added to the `docs/diagnostics.md` code table.
+     - Golden fixtures already exist (`valid/rowpoly_*`,
+       `invalid/rowpoly_drops_row_variable`, plus the new
+       `valid/rowpoly_select_all_preserves`). A *warning*-category fixture is
+       not added: the only deferred row diagnostic (`R1 # R2` disjointness) is
+       deferred as unsound (see Tier 5), so there is no `@rowpoly` warning to
+       demonstrate.
+     - [ ] **Still deferred:** optional inference of `R` for untyped helpers
+       (no annotation / decorator) — would let polypolarism guess a row
+       variable for a bare `pl.DataFrame` helper. Not built; needs a sound
+       trigger that does not regress the zero-config open-frame behavior.
 
   Invariants across all tiers: Pandera is the runtime authority and the
   marker is runtime-inert (re-gated by a runtime-differential test each
