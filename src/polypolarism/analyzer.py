@@ -86,8 +86,10 @@ from polypolarism.diagnostics import (
     PLY041,
     PLY042,
     PLY043,
+    TaggedError,
     parse_type_ignore,
     tag,
+    tagged_error,
 )
 from polypolarism.expr_infer import (
     ColumnNotFoundError,
@@ -1184,6 +1186,30 @@ def _missing_column_diag(frame: FrameType, name: str) -> tuple[str, str]:
     return PLY001, (
         f"Column '{name}' not found{frame.origin_note()}. "
         f"Available columns: {list(frame.columns.keys())}"
+    )
+
+
+def _missing_column_tagged(frame: FrameType, name: str) -> TaggedError:
+    """:func:`_missing_column_diag` as a structured :class:`TaggedError`.
+
+    Same byte-for-byte text as ``tag(*_missing_column_diag(frame, name))``;
+    additionally carries the looked-up ``column`` and, for the PLY042 island
+    case, the non-strict ``schema`` name (sourced from ``nonstrict_schema``,
+    not parsed from the message)."""
+    code, msg = _missing_column_diag(frame, name)
+    schema = frame.nonstrict_schema if code == PLY042 else None
+    return tagged_error(code, msg, column=name, schema=schema)
+
+
+def _column_not_found_tagged(e: ColumnNotFoundError) -> TaggedError:
+    """Convert a :class:`ColumnNotFoundError` into a structured
+    :class:`TaggedError`, preserving the message text exactly while exposing
+    the exception's ``column`` / ``schema`` for JSON consumers."""
+    return tagged_error(
+        getattr(e, "code", PLY001),
+        str(e),
+        column=getattr(e, "column", None),
+        schema=getattr(e, "schema", None),
     )
 
 
@@ -3415,7 +3441,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 output_name = alias if alias else col_name
                 return output_name, col_type
             except ColumnNotFoundError as e:
-                self.errors.append(tag(getattr(e, "code", PLY001), str(e)))
+                self.errors.append(_column_not_found_tagged(e))
                 return None, None
 
         # Check for pl.lit(value)
@@ -3485,7 +3511,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 try:
                     fields[col] = infer_col(col, self.current_frame)
                 except ColumnNotFoundError as e:
-                    self.errors.append(tag(getattr(e, "code", PLY001), str(e)))
+                    self.errors.append(_column_not_found_tagged(e))
             # Keyword args name the fields: ``pl.struct(x=expr)`` → field
             # ``x`` (issue #47). The value can be any expression; an
             # un-inferable one keeps the field as Unknown rather than
@@ -3527,7 +3553,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 try:
                     map_groups_fallback = infer_col(first_col, self.current_frame)
                 except ColumnNotFoundError as e:
-                    self.errors.append(tag(getattr(e, "code", PLY001), str(e)))
+                    self.errors.append(_column_not_found_tagged(e))
             self.warnings.append(
                 tag(
                     PLW001,
@@ -3548,7 +3574,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 try:
                     col_type = infer_col(col, self.current_frame)
                 except ColumnNotFoundError as e:
-                    self.errors.append(tag(getattr(e, "code", PLY001), str(e)))
+                    self.errors.append(_column_not_found_tagged(e))
                     return col, None  # type: ignore[return-value]
                 try:
                     result_type = infer_agg_result_type(
@@ -3655,7 +3681,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             try:
                 return s, infer_col(s, self.current_frame)
             except ColumnNotFoundError as e:
-                self.errors.append(tag(getattr(e, "code", PLY001), str(e)))
+                self.errors.append(_column_not_found_tagged(e))
                 return s, None
         return self.analyze_select_expr(node)
 
@@ -3944,7 +3970,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             try:
                 infer_col(s, self.current_frame)
             except ColumnNotFoundError as e:
-                self.errors.append(tag(getattr(e, "code", PLY001), str(e)))
+                self.errors.append(_column_not_found_tagged(e))
             return
         if isinstance(node, (ast.List, ast.Tuple)):
             for elt in node.elts:
@@ -6925,8 +6951,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             if input_frame.nonstrict_schema is not None:
                 # OPEN ISLAND (issues #83/#88): undeclared lookups stay
                 # flagged even though the rest keeps subtyping lenient.
-                code, msg = _missing_column_diag(input_frame, name)
-                self.errors.append(tag(code, msg))
+                self.errors.append(_missing_column_tagged(input_frame, name))
                 return None
             # Backward narrowing (ADR-0006 amendment): the assumption
             # "this select succeeded" pins the column INTO the open frame
@@ -6935,8 +6960,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             input_frame.columns[name] = ColumnSpec(dtype=Unknown())
             result_columns[output_name or name] = Unknown()
             return output_name or name
-        code, msg = _missing_column_diag(input_frame, name)
-        self.errors.append(tag(code, msg))
+        self.errors.append(_missing_column_tagged(input_frame, name))
         return None
 
     def _track_output_name(self, name: str, seen: set[str], call_name: str) -> None:
@@ -7027,8 +7051,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                             result_columns[c] = Unknown()
                             self._track_output_name(c, seen_outputs, "select")
                             continue
-                        code, msg = _missing_column_diag(input_frame, c)
-                        self.errors.append(tag(code, msg))
+                        self.errors.append(_missing_column_tagged(input_frame, c))
                         continue
                     result_columns[c] = spec.dtype
                     self._track_output_name(c, seen_outputs, "select")
@@ -7169,8 +7192,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 # missing name may exist among the unknown extras — no error.
                 for c in plural:
                     if c not in input_frame.columns and input_frame.rest is None:
-                        code, msg = _missing_column_diag(input_frame, c)
-                        self.errors.append(tag(code, msg))
+                        self.errors.append(_missing_column_tagged(input_frame, c))
                         continue
                     self._track_output_name(c, seen_outputs, "with_columns")
                 continue
@@ -7186,8 +7208,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 assert names is not None
                 for c in names:
                     if c not in input_frame.columns and input_frame.rest is None:
-                        code, msg = _missing_column_diag(input_frame, c)
-                        self.errors.append(tag(code, msg))
+                        self.errors.append(_missing_column_tagged(input_frame, c))
                         continue
                     self._track_output_name(c, seen_outputs, "with_columns")
                 continue
@@ -7231,8 +7252,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 elif input_frame.rest is not None:
                     result_columns[kw.arg] = Unknown()
                 else:
-                    code, msg = _missing_column_diag(input_frame, col_ref)
-                    self.errors.append(tag(code, msg))
+                    self.errors.append(_missing_column_tagged(input_frame, col_ref))
                     continue
                 column_spans[kw.arg] = Span.from_node(kw.value)
                 self._track_output_name(kw.arg, seen_outputs, "with_columns")
@@ -8071,7 +8091,11 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 try:
                     dtype = infer_col(col_ref, input_frame)
                 except ColumnNotFoundError as e:
-                    expr_analyzer.errors.append(tag(PLY001, str(e)))
+                    # Hardcoded PLY001 here (closed-frame filter path);
+                    # carry the column structurally without touching the text.
+                    expr_analyzer.errors.append(
+                        tagged_error(PLY001, str(e), column=getattr(e, "column", None))
+                    )
                     continue
             else:
                 _, dtype = expr_analyzer.analyze_select_expr(arg)

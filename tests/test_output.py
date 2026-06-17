@@ -8,9 +8,11 @@ from polypolarism.checker import (
     ExtraColumn,
     InferenceFailure,
     MissingColumn,
+    TypeDifference,
 )
+from polypolarism.diagnostics import tagged_error
 from polypolarism.output import Diagnostic, DiagnosticSeverity, format_json
-from polypolarism.types import Int64, Utf8
+from polypolarism.types import Float64, Int64, List, Utf8
 
 
 class TestDiagnostic:
@@ -199,6 +201,213 @@ class TestFormatJson:
         # Should not raise
         parsed = json.loads(output)
         assert isinstance(parsed, dict)
+
+
+class TestStructuredDiagnosticFields:
+    """Batch A: structured ``column`` / ``schema`` / ``declared_type`` /
+    ``inferred_type`` operands on JSON diagnostics, so consumers (the VS Code
+    extension) don't regex the message. Additive: the ``message`` text stays
+    byte-identical and absent fields are omitted.
+
+    Note the DataFrame column NAME is emitted under ``column_name`` — the
+    existing ``column`` key remains the 0-indexed source position.
+    """
+
+    def _diag(self, error, *, line=10):
+        result = CheckResult(function_name="process", passed=False, errors=[error])
+        output = format_json([result], "test.py", function_lines={"process": line})
+        diagnostics = json.loads(output)["diagnostics"]
+        assert len(diagnostics) == 1
+        return diagnostics[0]
+
+    def test_type_difference_exposes_column_and_both_types(self):
+        error = TypeDifference("total_revenue", Int64(), Float64())
+        diag = self._diag(error)
+        assert diag["column_name"] == "total_revenue"
+        assert diag["declared_type"] == "Int64"
+        assert diag["inferred_type"] == "Float64"
+        # No schema operand for a PLY040 dtype difference.
+        assert "schema" not in diag
+        # Message text is byte-identical to the rendered error.
+        assert diag["message"] == str(error)
+        # The 0-indexed source position is still the int ``column`` key.
+        assert isinstance(diag["column"], int)
+
+    def test_type_difference_renders_nested_dtype_canonically(self):
+        # The rendered dtype is the SAME text the message shows.
+        error = TypeDifference("items", List(Int64()), List(Utf8()))
+        diag = self._diag(error)
+        assert diag["declared_type"] == "List[Int64]"
+        assert diag["inferred_type"] == "List[Utf8]"
+        assert "List[Int64]" in diag["message"]
+
+    def test_missing_column_exposes_column_and_declared_type(self):
+        error = MissingColumn("name", Utf8())
+        diag = self._diag(error)
+        assert diag["column_name"] == "name"
+        assert diag["declared_type"] == "Utf8"
+        # A missing column has no inferred dtype.
+        assert "inferred_type" not in diag
+        assert "schema" not in diag
+        assert diag["message"] == str(error)
+
+    def test_extra_column_exposes_column_and_inferred_type(self):
+        error = ExtraColumn("extra", Int64())
+        diag = self._diag(error)
+        assert diag["column_name"] == "extra"
+        assert diag["inferred_type"] == "Int64"
+        # An extra column has no declared dtype.
+        assert "declared_type" not in diag
+        assert "schema" not in diag
+        assert diag["message"] == str(error)
+
+    def test_ply042_exposes_column_and_schema(self):
+        message = (
+            "column 'amount' is not declared in schema 'InputSchema' — the "
+            "(non-strict) schema admits extra columns at runtime, but this "
+            "function's declaration does not promise it. Declare the column "
+            "on the schema, or take a bare pl.DataFrame parameter for "
+            "row-polymorphic helpers"
+        )
+        error = tagged_error("PLY042", message, column="amount", schema="InputSchema")
+        diag = self._diag(error)
+        assert diag["code"] == "PLY042"
+        assert diag["column_name"] == "amount"
+        assert diag["schema"] == "InputSchema"
+        # PLY042 has no dtype operands.
+        assert "declared_type" not in diag
+        assert "inferred_type" not in diag
+        # The message is the tagged text, unchanged.
+        assert diag["message"] == str(error)
+        assert diag["message"] == f"[PLY042] {message}"
+
+    def test_ply001_exposes_column_without_schema(self):
+        error = tagged_error(
+            "PLY001",
+            "Column 'missing' not found. Available columns: ['a', 'b']",
+            column="missing",
+        )
+        diag = self._diag(error)
+        assert diag["code"] == "PLY001"
+        assert diag["column_name"] == "missing"
+        # No schema operand for a plain runtime miss.
+        assert "schema" not in diag
+        assert "declared_type" not in diag
+        assert "inferred_type" not in diag
+        assert diag["message"] == str(error)
+
+    def test_plain_string_error_omits_all_structured_fields(self):
+        # An untagged / unstructured error carries none of the new keys.
+        diag = self._diag("SyntaxError: invalid syntax")
+        for key in ("column_name", "schema", "declared_type", "inferred_type"):
+            assert key not in diag
+
+    def test_untyped_ply032_error_omits_structured_fields(self):
+        # A tagged-but-plain ``str`` error (no structured carrier) still omits
+        # the new fields — they aren't regexed out of the message.
+        diag = self._diag(
+            "[PLY032] Return type expected DataFrame[...] but inferred LazyFrame[...]"
+        )
+        assert diag["code"] == "PLY032"
+        for key in ("column_name", "schema", "declared_type", "inferred_type"):
+            assert key not in diag
+
+
+class TestStructuredFieldsEndToEnd:
+    """Structured fields populated from real analysis (no hand-built errors)."""
+
+    def _diagnostics(self, source: str):
+        from polypolarism.checker import check_source
+
+        results = check_source(textwrap.dedent(source))
+        from polypolarism.analyzer import analyze_source
+
+        analyses = analyze_source(textwrap.dedent(source))
+        function_lines = {a.name: a.lineno for a in analyses}
+        output = format_json(results, "test.py", function_lines=function_lines)
+        return json.loads(output)["diagnostics"]
+
+    def test_type_difference_from_analysis_carries_fields(self):
+        diagnostics = self._diagnostics(
+            """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+
+            class Sales(pa.DataFrameModel):
+                region: str
+                revenue: float
+
+            class RevenueByRegion(pa.DataFrameModel):
+                region: str
+                total_revenue: int
+
+            def compute(sales: DataFrame[Sales]) -> DataFrame[RevenueByRegion]:
+                return (
+                    sales
+                    .group_by("region")
+                    .agg(total_revenue=pl.col("revenue").sum())
+                )
+            """
+        )
+        diff = [d for d in diagnostics if d.get("column_name") == "total_revenue"]
+        assert diff, diagnostics
+        d = diff[0]
+        assert d["code"] == "PLY040"
+        assert d["declared_type"] == "Int64"
+        assert d["inferred_type"] == "Float64"
+
+    def test_ply042_from_analysis_carries_column_and_schema(self):
+        diagnostics = self._diagnostics(
+            """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+
+            class InputSchema(pa.DataFrameModel):
+                a: int
+
+                class Config:
+                    strict = False
+
+            def f(df: DataFrame[InputSchema]) -> DataFrame[InputSchema]:
+                return df.with_columns(b=pl.col("amount") + 1)
+            """
+        )
+        ply042 = [d for d in diagnostics if d.get("code") == "PLY042"]
+        assert ply042, diagnostics
+        d = ply042[0]
+        assert d["column_name"] == "amount"
+        assert d["schema"] == "InputSchema"
+
+    def test_ply001_from_analysis_carries_column(self):
+        diagnostics = self._diagnostics(
+            """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+
+            class Src(pa.DataFrameModel):
+                a: int
+
+                class Config:
+                    strict = True
+
+            class Out(pa.DataFrameModel):
+                a: int
+
+                class Config:
+                    strict = True
+
+            def f(df: DataFrame[Src]) -> DataFrame[Out]:
+                return df.select(pl.col("nope"))
+            """
+        )
+        ply001 = [d for d in diagnostics if d.get("code") == "PLY001"]
+        assert ply001, diagnostics
+        d = ply001[0]
+        assert d["column_name"] == "nope"
+        assert "schema" not in d
 
 
 class TestFormatJsonIntegration:

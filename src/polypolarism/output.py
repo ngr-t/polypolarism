@@ -6,7 +6,13 @@ import json
 from dataclasses import dataclass, field
 from enum import Enum
 
-from polypolarism.checker import CheckResult, TypeMismatch
+from polypolarism.checker import (
+    CheckResult,
+    ExtraColumn,
+    MissingColumn,
+    TypeDifference,
+    TypeMismatch,
+)
 from polypolarism.diagnostics import extract_code
 from polypolarism.types import Span
 
@@ -42,6 +48,21 @@ class Diagnostic:
     # range), shaped to map onto LSP ``relatedInformation``. Empty list →
     # the ``related`` key is omitted, keeping the JSON additive.
     related: list[dict] = field(default_factory=list)
+    # Structured operands of the diagnostic, lifted from the data the
+    # checker / analyzer already hold so consumers (the VS Code extension)
+    # don't regex the message text (Batch A). All optional; each is emitted
+    # only when applicable, keeping the JSON additive and backward-compatible
+    # — the ``message`` text is unchanged.
+    #
+    # ``column_name`` is the DataFrame column the diagnostic is about (named
+    # to avoid colliding with ``column``, the 0-indexed *source* position).
+    # ``schema`` is the declaring schema (PLY042). ``declared_type`` /
+    # ``inferred_type`` are the canonical ``str`` renders of the dtypes the
+    # PLY040 family already carries (the same text the message shows).
+    column_name: str | None = None
+    schema: str | None = None
+    declared_type: str | None = None
+    inferred_type: str | None = None
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
@@ -61,6 +82,16 @@ class Diagnostic:
             result["end_column"] = self.end_column
         if self.related:
             result["related"] = self.related
+        # ``column`` (the int source position above) is unchanged; the
+        # DataFrame column NAME goes under its own key to avoid clobbering it.
+        if self.column_name is not None:
+            result["column_name"] = self.column_name
+        if self.schema is not None:
+            result["schema"] = self.schema
+        if self.declared_type is not None:
+            result["declared_type"] = self.declared_type
+        if self.inferred_type is not None:
+            result["inferred_type"] = self.inferred_type
         return result
 
 
@@ -152,6 +183,45 @@ def _related_from_declared(span: Span) -> dict:
     return related
 
 
+def _structured_fields(error) -> dict[str, str]:
+    """Structured operands of a check error, lifted from data the error
+    object already carries (Batch A) — never parsed from the message.
+
+    Returns a dict with any of ``column_name`` / ``schema`` /
+    ``declared_type`` / ``inferred_type`` that apply; absent fields are left
+    out so the JSON stays minimal.
+
+    - PLY040 family (typed errors): ``TypeDifference`` carries the column
+      plus both dtypes; ``MissingColumn`` the column + its declared
+      ``expected_type``; ``ExtraColumn`` the column + its ``inferred_type``.
+      Each dtype is rendered via canonical ``str(...)`` — the same text the
+      message already shows.
+    - PLY042 / PLY001 (analyzer ``TaggedError`` strings): carry ``column``
+      and, for the non-strict-island PLY042, the ``schema`` name.
+    """
+    fields: dict[str, str] = {}
+    if isinstance(error, TypeDifference):
+        fields["column_name"] = error.column
+        fields["declared_type"] = str(error.declared)
+        fields["inferred_type"] = str(error.inferred)
+    elif isinstance(error, MissingColumn):
+        fields["column_name"] = error.column
+        fields["declared_type"] = str(error.expected_type)
+    elif isinstance(error, ExtraColumn):
+        fields["column_name"] = error.column
+        fields["inferred_type"] = str(error.inferred_type)
+    else:
+        # Analyzer string errors: a ``TaggedError`` carries ``.column`` /
+        # ``.schema`` attributes (plain ``str`` errors have neither).
+        column = getattr(error, "column", None)
+        if column is not None:
+            fields["column_name"] = column
+        schema = getattr(error, "schema", None)
+        if schema is not None:
+            fields["schema"] = schema
+    return fields
+
+
 def _build_diagnostics(group: FileResults) -> list[dict]:
     diagnostics: list[dict] = []
     for result in group.results:
@@ -174,6 +244,7 @@ def _build_diagnostics(group: FileResults) -> list[dict]:
                     declared = getattr(error, "declared_span", None)
                     if declared is not None:
                         related.append(_related_from_declared(declared))
+                fields = _structured_fields(error)
                 diag = Diagnostic(
                     file=group.file_path,
                     line=diag_line,
@@ -184,6 +255,10 @@ def _build_diagnostics(group: FileResults) -> list[dict]:
                     end_column=diag_end_col,
                     code=extract_code(message),
                     related=related,
+                    column_name=fields.get("column_name"),
+                    schema=fields.get("schema"),
+                    declared_type=fields.get("declared_type"),
+                    inferred_type=fields.get("inferred_type"),
                 )
                 diagnostics.append(diag.to_dict())
         for warning in result.warnings:

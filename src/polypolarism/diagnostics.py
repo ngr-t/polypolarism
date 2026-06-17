@@ -115,6 +115,43 @@ def tag(code: str, message: str) -> str:
     return f"[{code}] {message}"
 
 
+class TaggedError(str):
+    """A tagged analyzer error string that also carries structured fields.
+
+    The analyzer collects errors as plain ``str`` (``"[PLY###] message"``);
+    this subclass keeps that exact text — every ``str`` operation (equality,
+    ``str(...)``, regex, ``f"at line N: {e}"`` wrapping, suppression code
+    extraction) behaves byte-for-byte the same — while attaching the
+    structured info the raising site already held. JSON output reads these
+    so consumers don't have to regex the message (issue #70 follow-up).
+
+    ``column`` / ``schema`` are ``None`` when not applicable; the JSON layer
+    omits absent fields and never invents one a code doesn't have.
+    """
+
+    column: str | None
+    schema: str | None
+
+
+def tagged_error(
+    code: str,
+    message: str,
+    *,
+    column: str | None = None,
+    schema: str | None = None,
+) -> TaggedError:
+    """Build a :class:`TaggedError`: ``tag(code, message)`` text plus fields.
+
+    The text is identical to ``tag(code, message)``; ``column`` / ``schema``
+    are attached for structured JSON output and left unset (``None``) when
+    not supplied.
+    """
+    err = TaggedError(tag(code, message))
+    err.column = column
+    err.schema = schema
+    return err
+
+
 _TAGGED_MESSAGE = re.compile(r"^\[(PL[YW]\d{3})\]")
 
 

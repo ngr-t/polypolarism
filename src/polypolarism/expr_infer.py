@@ -50,11 +50,24 @@ class ColumnNotFoundError(Exception):
     default, ``PLY042`` when the frame is the checked island of a
     non-strict declared schema (issue #83) — there the lookup is an
     interface violation, not a runtime certainty.
+
+    ``column`` / ``schema`` carry the structured info the message already
+    embeds (the looked-up column name; the non-strict schema name for the
+    PLY042 island case), so the analyzer can surface them on the JSON
+    diagnostic without re-parsing the message text.
     """
 
-    def __init__(self, message: str, code: str = "PLY001") -> None:
+    def __init__(
+        self,
+        message: str,
+        code: str = "PLY001",
+        column: str | None = None,
+        schema: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
+        self.column = column
+        self.schema = schema
 
 
 class TypePromotionError(Exception):
@@ -109,7 +122,8 @@ def infer_col(column_name: str, frame: FrameType) -> DataType:
                 # guaranteed runtime ColumnNotFoundError.
                 raise ColumnNotFoundError(
                     f"Column '{column_name}' not found — it was removed earlier "
-                    f"in this chain (drop/rename)"
+                    f"in this chain (drop/rename)",
+                    column=column_name,
                 )
             if frame.nonstrict_schema is not None:
                 # OPEN ISLAND (issues #83/#88): the rest keeps frame-level
@@ -123,6 +137,8 @@ def infer_col(column_name: str, frame: FrameType) -> DataType:
                     f"take a bare pl.DataFrame parameter for row-polymorphic "
                     f"helpers",
                     code="PLY042",
+                    column=column_name,
+                    schema=frame.nonstrict_schema,
                 )
             # Backward narrowing (ADR-0006 amendment): the lookup is
             # assumed to succeed, so the column provably exists on every
@@ -143,10 +159,13 @@ def infer_col(column_name: str, frame: FrameType) -> DataType:
                 f"take a bare pl.DataFrame parameter for row-polymorphic "
                 f"helpers",
                 code="PLY042",
+                column=column_name,
+                schema=frame.nonstrict_schema,
             )
         available = list(frame.columns.keys())
         raise ColumnNotFoundError(
-            f"Column '{column_name}' not found{frame.origin_note()}. Available columns: {available}"
+            f"Column '{column_name}' not found{frame.origin_note()}. Available columns: {available}",
+            column=column_name,
         )
     return dtype
 
