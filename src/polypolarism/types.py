@@ -812,6 +812,104 @@ class RowVar:
     name: str
 
 
+# Numeric / simple scalar dtypes whose pandera annotation is just
+# ``pl.<ClassName>`` — the ``__str__`` of each is already the polars class
+# name, so the renderer reuses it directly. Parametrized dtypes (Datetime,
+# Duration, Decimal, Enum) and containers (List, Array, Struct) need a call
+# form and are handled explicitly below.
+_SIMPLE_ANNOTATION_DTYPES: tuple[type[DataType], ...] = (
+    Int8,
+    Int16,
+    Int32,
+    Int64,
+    Int128,
+    UInt8,
+    UInt16,
+    UInt32,
+    UInt64,
+    UInt128,
+    Float16,
+    Float32,
+    Float64,
+    Utf8,
+    Boolean,
+    Binary,
+    Date,
+    Time,
+    Categorical,
+)
+
+
+def render_dtype_annotation(dtype: DataType) -> str | None:
+    """Render ``dtype`` as a ready-to-insert pandera class-based annotation
+    string (Batch B, Request 3) — e.g. ``"pl.Float64"``, ``"pl.List(pl.Int64)"``,
+    ``'pl.Datetime("us", "UTC")'``.
+
+    The string is a polars dtype expression in the call/attribute form that
+    pandera's ``DataFrameModel`` field annotations accept (and that
+    :func:`pandera_dtype.parse_field_annotation` round-trips). It is meant to
+    be inserted verbatim by the editor's quick-fix.
+
+    Nullability is NOT part of the dtype annotation — pandera declares it via
+    ``pa.Field(nullable=True)`` — so a :class:`Nullable` wrapper renders its
+    INNER dtype.
+
+    Returns ``None`` (and the caller OMITS the field) for any dtype that
+    cannot be rendered soundly: :class:`Unknown`, :class:`Null` (a
+    null-literal sentinel, not a declarable column dtype), a width-less
+    :class:`Array` (pandera requires the width), a bare :class:`Enum`
+    (unknown categories), an OPEN :class:`Struct` (unknown extra fields), or
+    any container whose element / field dtype is itself unrenderable. Never
+    emits a guessed or malformed annotation.
+    """
+    if isinstance(dtype, Nullable):
+        return render_dtype_annotation(dtype.inner)
+
+    if isinstance(dtype, _SIMPLE_ANNOTATION_DTYPES):
+        return f"pl.{dtype}"
+
+    if isinstance(dtype, Datetime):
+        if dtype.tz is not None:
+            return f'pl.Datetime("{dtype.unit}", "{dtype.tz}")'
+        return f'pl.Datetime("{dtype.unit}")'
+
+    if isinstance(dtype, Duration):
+        return f'pl.Duration("{dtype.unit}")'
+
+    if isinstance(dtype, Decimal):
+        return f"pl.Decimal({dtype.precision}, {dtype.scale})"
+
+    if isinstance(dtype, Enum):
+        if dtype.categories is None:
+            return None
+        cats = ", ".join(f'"{c}"' for c in dtype.categories)
+        return f"pl.Enum([{cats}])"
+
+    if isinstance(dtype, List):
+        inner = render_dtype_annotation(dtype.inner)
+        return f"pl.List({inner})" if inner is not None else None
+
+    if isinstance(dtype, Array):
+        if dtype.width is None:
+            return None
+        inner = render_dtype_annotation(dtype.inner)
+        return f"pl.Array({inner}, {dtype.width})" if inner is not None else None
+
+    if isinstance(dtype, Struct):
+        if dtype.open:
+            return None
+        rendered_fields: list[str] = []
+        for name, field_dtype in dtype.fields.items():
+            rendered = render_dtype_annotation(field_dtype)
+            if rendered is None:
+                return None
+            rendered_fields.append(f'"{name}": {rendered}')
+        return f"pl.Struct({{{', '.join(rendered_fields)}}})"
+
+    # Unknown, Null, and anything unforeseen: omit rather than guess.
+    return None
+
+
 @dataclass
 class FrameList:
     """A list of frames sharing the same ``element`` FrameType.

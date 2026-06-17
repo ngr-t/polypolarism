@@ -12,7 +12,7 @@ from polypolarism.checker import (
 )
 from polypolarism.diagnostics import tagged_error
 from polypolarism.output import Diagnostic, DiagnosticSeverity, format_json
-from polypolarism.types import Float64, Int64, List, Utf8
+from polypolarism.types import Array, Float64, Int64, List, Span, Unknown, Utf8
 
 
 class TestDiagnostic:
@@ -311,6 +311,124 @@ class TestStructuredDiagnosticFields:
         assert diag["code"] == "PLY032"
         for key in ("column_name", "schema", "declared_type", "inferred_type"):
             assert key not in diag
+
+
+class TestPly040RetypeFix:
+    """Batch B, Request 3: a PLY040 ``TypeDifference`` carries fix metadata so
+    the editor can offer a "retype the schema field" quick fix without
+    AST-parsing or string-building.
+
+    - ``suggested_annotation``: a ready-to-insert annotation STRING for the
+      INFERRED dtype (omitted when the dtype is unrenderable).
+    - ``declared_annotation_range``: the {line, column, end_line, end_column}
+      of the declared field's annotation (from the SECONDARY ``declared_span``).
+
+    Additive: ``message`` byte-identical, both fields omitted when unknown.
+    """
+
+    def _diag(self, error, *, line=10):
+        result = CheckResult(function_name="process", passed=False, errors=[error])
+        output = format_json([result], "test.py", function_lines={"process": line})
+        diagnostics = json.loads(output)["diagnostics"]
+        assert len(diagnostics) == 1
+        return diagnostics[0]
+
+    def test_suggested_annotation_for_inferred_dtype(self):
+        error = TypeDifference("total_revenue", Int64(), Float64())
+        diag = self._diag(error)
+        # The suggestion is the INFERRED dtype (what the body actually produced).
+        assert diag["suggested_annotation"] == "pl.Float64"
+        assert diag["message"] == str(error)
+
+    def test_suggested_annotation_nested_container(self):
+        error = TypeDifference("items", List(Int64()), List(Utf8()))
+        diag = self._diag(error)
+        assert diag["suggested_annotation"] == "pl.List(pl.Utf8)"
+
+    def test_unrenderable_inferred_dtype_omits_suggested_annotation(self):
+        # An un-inferable (Unknown) inferred dtype has no sound annotation —
+        # the key is omitted, never guessed.
+        error = TypeDifference("c", Int64(), Unknown())
+        diag = self._diag(error)
+        assert "suggested_annotation" not in diag
+        assert diag["message"] == str(error)
+
+    def test_widthless_array_inferred_omits_suggested_annotation(self):
+        error = TypeDifference("c", Array(Int64(), 3), Array(Int64(), None))
+        diag = self._diag(error)
+        assert "suggested_annotation" not in diag
+
+    def test_declared_annotation_range_from_span(self):
+        span = Span(line=12, column=4, end_line=12, end_column=20)
+        error = TypeDifference("total_revenue", Int64(), Float64(), declared_span=span)
+        diag = self._diag(error)
+        rng = diag["declared_annotation_range"]
+        assert rng == {"line": 12, "column": 4, "end_line": 12, "end_column": 20}
+
+    def test_declared_annotation_range_omitted_when_no_span(self):
+        error = TypeDifference("total_revenue", Int64(), Float64())
+        diag = self._diag(error)
+        assert "declared_annotation_range" not in diag
+
+    def test_non_type_difference_has_no_retype_fields(self):
+        # MissingColumn / ExtraColumn are not "retype" mismatches — no
+        # suggested_annotation (they get their own fixes elsewhere).
+        diag = self._diag(MissingColumn("name", Utf8()))
+        assert "suggested_annotation" not in diag
+
+
+class TestPly040RetypeFixEndToEnd:
+    """Request 3 from real analysis: the retype fix metadata is populated end
+    to end with line numbers matching the real schema source."""
+
+    def _diagnostics(self, source: str):
+        from polypolarism.analyzer import analyze_source
+        from polypolarism.checker import check_function
+
+        analyses = analyze_source(textwrap.dedent(source))
+        results = [check_function(a) for a in analyses]
+        function_lines = {a.name: a.lineno for a in analyses}
+        function_end_lines = {a.name: a.end_lineno for a in analyses}
+        output = format_json(
+            results,
+            "pipeline.py",
+            function_lines=function_lines,
+            function_end_lines=function_end_lines,
+        )
+        return json.loads(output)["diagnostics"]
+
+    def test_retype_fix_points_at_declared_field(self):
+        diagnostics = self._diagnostics(
+            """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+
+            class Sales(pa.DataFrameModel):
+                region: str
+                revenue: float
+
+            class RevenueByRegion(pa.DataFrameModel):
+                region: str
+                total_revenue: int
+
+            def compute(sales: DataFrame[Sales]) -> DataFrame[RevenueByRegion]:
+                return (
+                    sales
+                    .group_by("region")
+                    .agg(total_revenue=pl.col("revenue").sum())
+                )
+            """
+        )
+        diff = [d for d in diagnostics if d.get("column_name") == "total_revenue"]
+        assert diff, diagnostics
+        d = diff[0]
+        assert d["code"] == "PLY040"
+        # The inferred dtype is Float64 (mean/sum of float revenue).
+        assert d["suggested_annotation"] == "pl.Float64"
+        # ``total_revenue: int`` is on line 12 (1-indexed in the dedented src).
+        rng = d["declared_annotation_range"]
+        assert rng["line"] == 12
 
 
 class TestStructuredFieldsEndToEnd:
