@@ -68,9 +68,10 @@ class Diagnostic:
     # annotation STRING for the INFERRED dtype (e.g. ``"pl.Float64"``);
     # ``None`` when the dtype is unrenderable → the key is omitted (never a
     # guess). ``declared_annotation_range`` is the {line, column, end_line,
-    # end_column} of the declared field's annotation (the SECONDARY span),
-    # so the editor knows exactly what text to replace; ``None`` when the
-    # span is unknown.
+    # end_column} of JUST the declared field's ANNOTATION node (issue #113 —
+    # ``int`` / ``pl.Int64``, NOT the whole ``name: ann = pa.Field(...)``
+    # line), so ``replace(range, suggested_annotation)`` rewrites only the
+    # annotation; ``None`` when the span is unknown (e.g. a string forward-ref).
     suggested_annotation: str | None = None
     declared_annotation_range: dict | None = None
     # Fix object for a PLY042 "declare the column on the schema" quick fix
@@ -273,13 +274,17 @@ def _retype_fix_fields(error) -> tuple[str | None, dict | None]:
     inferred dtype differs from the declared one). ``suggested_annotation``
     renders the INFERRED dtype to a pandera annotation string — ``None`` when
     unrenderable, so the caller omits the key rather than guess.
-    ``declared_annotation_range`` comes from the SECONDARY ``declared_span``
-    (the schema field's annotation), as a {line, column, end_line, end_column}
-    dict — ``None`` when the span is unknown."""
+    ``declared_annotation_range`` comes from ``declared_annotation_span`` — the
+    span of JUST the field's ANNOTATION node (``AnnAssign.annotation``), NOT
+    the whole-field ``declared_span`` (issue #113), so a consumer doing
+    ``replace(declared_annotation_range, suggested_annotation)`` turns
+    ``total: int`` into ``total: pl.Float64`` while preserving the field name
+    and any ``= pa.Field(...)``. ``None`` when the annotation span is unknown
+    (e.g. a string forward-ref annotation) → the caller omits the key."""
     if not isinstance(error, TypeDifference):
         return None, None
     suggested = render_dtype_annotation(error.inferred)
-    span = getattr(error, "declared_span", None)
+    span = getattr(error, "declared_annotation_span", None)
     declared_range = _span_dict(span) if span is not None else None
     return suggested, declared_range
 

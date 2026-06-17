@@ -358,12 +358,25 @@ class TestPly040RetypeFix:
         diag = self._diag(error)
         assert "suggested_annotation" not in diag
 
-    def test_declared_annotation_range_from_span(self):
-        span = Span(line=12, column=4, end_line=12, end_column=20)
-        error = TypeDifference("total_revenue", Int64(), Float64(), declared_span=span)
+    def test_declared_annotation_range_from_annotation_span(self):
+        # Issue #113: the range tracks the ANNOTATION span, not the whole-field
+        # ``declared_span``.
+        ann_span = Span(line=12, column=11, end_line=12, end_column=14)
+        error = TypeDifference(
+            "total_revenue", Int64(), Float64(), declared_annotation_span=ann_span
+        )
         diag = self._diag(error)
         rng = diag["declared_annotation_range"]
-        assert rng == {"line": 12, "column": 4, "end_line": 12, "end_column": 20}
+        assert rng == {"line": 12, "column": 11, "end_line": 12, "end_column": 14}
+
+    def test_declared_annotation_range_ignores_whole_field_span(self):
+        # Issue #113: a whole-field ``declared_span`` alone (no annotation span)
+        # no longer drives ``declared_annotation_range`` — replacing the whole
+        # field would destroy the field name.
+        whole_field = Span(line=12, column=4, end_line=12, end_column=20)
+        error = TypeDifference("total_revenue", Int64(), Float64(), declared_span=whole_field)
+        diag = self._diag(error)
+        assert "declared_annotation_range" not in diag
 
     def test_declared_annotation_range_omitted_when_no_span(self):
         error = TypeDifference("total_revenue", Int64(), Float64())
@@ -429,6 +442,58 @@ class TestPly040RetypeFixEndToEnd:
         # ``total_revenue: int`` is on line 12 (1-indexed in the dedented src).
         rng = d["declared_annotation_range"]
         assert rng["line"] == 12
+        # Issue #113: the range covers ONLY the ``int`` annotation, NOT the
+        # whole field. The line is ``    total_revenue: int``: ``total_revenue``
+        # starts at col 4, the annotation ``int`` at col 19 (4 + len("total_
+        # revenue") + len(": ") = 4 + 13 + 2). The whole-field "declared here"
+        # related span ends at col 22; the annotation range stays inside it.
+        assert rng["column"] == 19
+        assert rng["end_column"] == 22
+        related = d["related"][0]
+        assert related["column"] == 4  # whole field still starts at the name
+        # The range a consumer would replace is exactly ``int``.
+        assert rng["end_column"] - rng["column"] == len("int")
+
+    def test_retype_range_excludes_field_value(self):
+        # Issue #113: with a trailing ``= pa.Field(...)`` the annotation range
+        # must still cover only the annotation, leaving the name and the
+        # ``= pa.Field(...)`` value intact.
+        diagnostics = self._diagnostics(
+            """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+
+            class Sales(pa.DataFrameModel):
+                region: str
+                revenue: float
+
+            class RevenueByRegion(pa.DataFrameModel):
+                region: str
+                total_revenue: int = pa.Field(ge=0)
+
+            def compute(sales: DataFrame[Sales]) -> DataFrame[RevenueByRegion]:
+                return (
+                    sales
+                    .group_by("region")
+                    .agg(total_revenue=pl.col("revenue").sum())
+                )
+            """
+        )
+        diff = [d for d in diagnostics if d.get("column_name") == "total_revenue"]
+        assert diff, diagnostics
+        d = diff[0]
+        rng = d["declared_annotation_range"]
+        # Line is ``    total_revenue: int = pa.Field(ge=0)``: annotation
+        # ``int`` runs col 19..22 — strictly before the ``= pa.Field(...)``.
+        assert rng["line"] == 12
+        assert rng["column"] == 19
+        assert rng["end_column"] == 22
+        # The "declared here" related span spans the WHOLE field (through the
+        # ``= pa.Field(ge=0)``), and is wider than the annotation range.
+        related = d["related"][0]
+        assert related["column"] == 4
+        assert related["end_column"] > rng["end_column"]
 
 
 class TestPly042FixObject:

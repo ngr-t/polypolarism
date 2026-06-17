@@ -117,7 +117,7 @@ def extract_dataframe_annotation(
     if base is None:
         return None
     # Stamp the laziness onto a copy so the registry's cached value stays neutral.
-    return FrameType(
+    frame = FrameType(
         columns=base.columns,
         strict=base.strict,
         rest=base.rest,
@@ -127,6 +127,11 @@ def extract_dataframe_annotation(
         schema_name=base.schema_name,
         column_spans=base.column_spans,
     )
+    # ``column_annotation_spans`` is diagnostic-only and not a constructor
+    # parameter (issue #113) — carry it across so the declared-RETURN frame
+    # keeps the annotation-only spans for the retype quick fix's range.
+    frame.column_annotation_spans = dict(base.column_annotation_spans)
+    return frame
 
 
 def bare_frame_annotation(annotation: ast.expr) -> str | None:

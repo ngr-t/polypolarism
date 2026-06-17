@@ -73,6 +73,18 @@ class Schema:
     # threaded into the bound frame's ``column_spans`` side map. Inherited
     # fields keep the parent's span until a child re-declares the field.
     field_spans: dict[str, Span] = field(default_factory=dict)
+    # Per-field source ``Span`` for JUST the ANNOTATION node of the
+    # ``AnnAssign`` (``AnnAssign.annotation`` — ``int`` / ``pl.Int64`` /
+    # ``Annotated[...]``), NOT the whole ``name: ann = pa.Field(...)`` line
+    # (issue #113). This is the range the PLY040 retype quick fix replaces
+    # with the suggested annotation, so a ``total: int`` becomes
+    # ``total: pl.Float64`` (the field name and any ``= pa.Field(...)`` are
+    # preserved). A field whose annotation is a string forward-ref has no
+    # reliable in-file span for the inner expression, so it is simply absent
+    # here (the quick fix then omits ``declared_annotation_range``). Kept
+    # SEPARATE from ``field_spans`` so the "declared here" location is
+    # unchanged. Inheritance mirrors ``field_spans``.
+    field_annotation_spans: dict[str, Span] = field(default_factory=dict)
     # Absolute path (as ``str``) of the file that DEFINES this schema's class,
     # and the 1-indexed line of the ``class`` header (Batch B, Request 2).
     # Diagnostic provenance only — used to build the PLY042 "declare the
@@ -125,6 +137,10 @@ class Schema:
         """
         ft = self.to_frame_type()
         ft.column_spans = dict(self.field_spans)
+        # Issue #113: annotation-only spans for the retype quick fix's
+        # ``declared_annotation_range`` (separate from ``column_spans``, which
+        # remains the whole-field "declared here" location).
+        ft.column_annotation_spans = dict(self.field_annotation_spans)
         return ft
 
     def validate_result_frame(self) -> FrameType:
@@ -759,6 +775,28 @@ def _looks_like_schema(
     return False
 
 
+def _annotation_span(annotation: ast.expr) -> Span | None:
+    """Span of JUST the annotation node of a field ``AnnAssign`` (issue #113).
+
+    For an ordinary annotation (``int`` / ``pl.Int64`` / ``Series[int]`` /
+    ``Annotated[...]``) this is ``Span.from_node(annotation)`` — the range the
+    retype quick fix replaces with the suggested dtype, leaving the field name
+    and any ``= pa.Field(...)`` value untouched (``AnnAssign.value`` is a
+    separate node).
+
+    A STRING forward-ref annotation (``total: "int"``) carries no reliable
+    in-file span for the inner expression: parsing the string yields positions
+    relative to the substring, not the source file. We therefore return
+    ``None`` so the caller omits ``declared_annotation_range`` rather than
+    point at the surrounding quotes or a bogus offset.
+    """
+    if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+        return None
+    if getattr(annotation, "lineno", None) is None:
+        return None
+    return Span.from_node(annotation)
+
+
 def _parse_schema(
     node: ast.ClassDef,
     registry: SchemaRegistry,
@@ -802,6 +840,8 @@ def _parse_schema(
             schema.definition_warnings.setdefault(col_name, detail)
         for col_name, span in parent.field_spans.items():
             schema.field_spans.setdefault(col_name, span)
+        for col_name, span in parent.field_annotation_spans.items():
+            schema.field_annotation_spans.setdefault(col_name, span)
         if parent.strict:
             schema.strict = True
         if parent.coerce:
@@ -815,6 +855,15 @@ def _parse_schema(
             # diagnostics. The span covers the whole ``name: ann`` line; a
             # child re-declaring an inherited field overrides the span.
             schema.field_spans[field_name] = Span.from_node(stmt)
+            # Issue #113: the annotation-only span (``AnnAssign.annotation``)
+            # — what the retype quick fix replaces. A re-declaration with an
+            # unrangeable (string forward-ref) annotation drops any inherited
+            # entry rather than keeping a stale parent span.
+            ann_span = _annotation_span(stmt.annotation)
+            if ann_span is not None:
+                schema.field_annotation_spans[field_name] = ann_span
+            else:
+                schema.field_annotation_spans.pop(field_name, None)
             # Issue #69: a wrong-arity ``Annotated`` form deterministically
             # crashes pandera at runtime. Record it; a healthy re-declaration
             # shadows (and thereby repairs) an inherited broken one.

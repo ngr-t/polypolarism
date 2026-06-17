@@ -671,6 +671,17 @@ class FrameType:
     # return-statement line at the diagnostic layer.
     column_spans: dict[str, Span]
     # Diagnostic provenance only (no semantic effect, excluded from
+    # ``__eq__``): per-column source ``Span`` for JUST the declared field's
+    # ANNOTATION node (``AnnAssign.annotation``), as opposed to the whole
+    # ``name: ann = pa.Field(...)`` line in ``column_spans`` (issue #113).
+    # Set ONLY on the function's declared-RETURN frame (from a schema's
+    # ``field_annotation_spans``); it is the range the PLY040 retype quick fix
+    # replaces, so the field name and any ``= pa.Field(...)`` survive. Not a
+    # constructor parameter — like ``column_spans`` it is attached after
+    # construction by ``declared_return_frame`` and defaults empty everywhere
+    # else. Never consulted by ``__eq__``.
+    column_annotation_spans: dict[str, Span]
+    # Diagnostic provenance only (no semantic effect, excluded from
     # ``__eq__``): the pandera schema this frame was bound from, kept
     # through the same column-ops that keep ``nonstrict_schema`` so
     # column-not-found messages can name the violated contract
@@ -735,6 +746,10 @@ class FrameType:
         self.nonstrict_schema = nonstrict_schema
         self.schema_name = schema_name
         self.column_spans = dict(column_spans) if column_spans else {}
+        # Issue #113: declared-side annotation-only spans, attached after
+        # construction by ``declared_return_frame``; empty for every other
+        # frame. Not a constructor parameter (purely diagnostic provenance).
+        self.column_annotation_spans = {}
         # Diagnostic-only; the analyzer decides when a predicate-keyed
         # reduction set this. Stored verbatim (it can ride on a closed frame
         # too — e.g. a skolemized {id, sentinel} frame after a regex select

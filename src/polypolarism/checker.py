@@ -36,6 +36,12 @@ class TypeMismatch:
     → the diagnostic layer falls back to the return-statement line);
     ``declared_span`` is the schema field it was checked against. Set by
     ``_check_one_frame`` from the two frames' ``column_spans`` side maps.
+
+    ``TypeDifference`` additionally carries ``declared_annotation_span`` — the
+    span of JUST the declared field's annotation node (issue #113), separate
+    from ``declared_span`` (the whole-field "declared here" location) — so the
+    retype quick fix replaces only the annotation. Set from the declared
+    frame's ``column_annotation_spans`` side map.
     """
 
     code = PLY040
@@ -83,6 +89,11 @@ class TypeDifference(TypeMismatch):
     inferred: DataType
     primary: Span | None = field(default=None, compare=False)
     declared_span: Span | None = field(default=None, compare=False)
+    # Issue #113: span of the declared field's ANNOTATION node only (the
+    # retype quick fix's replacement range), distinct from ``declared_span``
+    # (the whole-field "declared here" location). ``None`` when the schema had
+    # no annotation span for the column (e.g. a string forward-ref annotation).
+    declared_annotation_span: Span | None = field(default=None, compare=False)
 
     def __str__(self) -> str:
         return tag(
@@ -359,6 +370,12 @@ def _check_one_frame(
         """The declared schema-field span for ``col_name`` (SECONDARY)."""
         return declared.column_spans.get(col_name)
 
+    def declared_annotation_span(col_name: str) -> Span | None:
+        """The declared field's ANNOTATION-only span for ``col_name`` (issue
+        #113) — the retype quick fix's replacement range. ``None`` when the
+        schema carried no annotation span (e.g. a string forward-ref)."""
+        return declared.column_annotation_spans.get(col_name)
+
     # Eager/lazy mismatch on the return type.
     if declared.is_lazy != inferred.is_lazy:
         expected_kind = "LazyFrame" if declared.is_lazy else "DataFrame"
@@ -446,6 +463,7 @@ def _check_one_frame(
                     inferred_spec.dtype,
                     primary=primary_span(col_name),
                     declared_span=declared_span(col_name),
+                    declared_annotation_span=declared_annotation_span(col_name),
                 )
             )
 
