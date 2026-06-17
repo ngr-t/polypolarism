@@ -125,6 +125,120 @@ class TestIndexDeclarationsAndRefs:
         assert len(refs) == 1
         assert refs[0].origin is None
 
+    def test_bare_string_select_ref_resolves_origin(self, tmp_path: Path):
+        _project_marker(tmp_path)
+        f = tmp_path / "app.py"
+        _write(
+            f,
+            """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+
+
+            class Input(pa.DataFrameModel):
+                region: str
+
+
+            def f(df: DataFrame[Input]) -> DataFrame[Input]:
+                return df.select("region")
+            """,
+        )
+        index = build_column_index(f)
+        # The bare ``select("region")`` string is indexed and resolves to the
+        # field origin (the receiver is the schema-bound frame).
+        refs = [r for r in index if r.column_name == "region" and r.span.line == 11]
+        assert len(refs) == 1
+        assert refs[0].origin == ("Input", "region")
+
+    def test_rename_keys_and_values_indexed_origin_none(self, tmp_path: Path):
+        _project_marker(tmp_path)
+        f = tmp_path / "app.py"
+        _write(
+            f,
+            """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+
+
+            class Input(pa.DataFrameModel):
+                region: str
+
+
+            def f(df: DataFrame[Input]):
+                return df.rename({"region": "area"})
+            """,
+        )
+        index = build_column_index(f)
+        rename_line = [r for r in index if r.span.line == 11]
+        names = {r.column_name for r in rename_line}
+        # Both the rename key and value tokens are indexed for position lookup.
+        assert "region" in names
+        assert "area" in names
+        # The rename VALUE (new name) is a NEW identity -> origin None.
+        area = next(r for r in rename_line if r.column_name == "area")
+        assert area.origin is None
+
+    def test_dict_subscript_does_not_borrow_schema_origin(self, tmp_path: Path):
+        _project_marker(tmp_path)
+        f = tmp_path / "app.py"
+        _write(
+            f,
+            """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+
+
+            class Input(pa.DataFrameModel):
+                region: str
+
+
+            def f(df: DataFrame[Input]):
+                config = {"region": "x"}
+                val = config["region"]
+                return df.select(pl.col("region"))
+            """,
+        )
+        index = build_column_index(f)
+        # The dict subscript ``config["region"]`` must NOT be indexed as a
+        # column ref (config is not a frame); only the schema declaration and
+        # the real pl.col ref carry the (Input, region) origin.
+        region_origins = [
+            r for r in index if r.column_name == "region" and r.origin == ("Input", "region")
+        ]
+        # declaration (line 7) + pl.col (line 13) — NOT the dict subscript.
+        origin_lines = sorted(r.span.line for r in region_origins)
+        assert origin_lines == [7, 13]
+
+    def test_select_on_non_frame_is_not_indexed(self, tmp_path: Path):
+        _project_marker(tmp_path)
+        f = tmp_path / "app.py"
+        _write(
+            f,
+            """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+
+
+            class Input(pa.DataFrameModel):
+                region: str
+
+
+            def f(df: DataFrame[Input]):
+                helper = SomeHelper()
+                helper.select("region")
+                return df
+            """,
+        )
+        index = build_column_index(f)
+        # ``helper.select("region")`` (helper is untracked) must not borrow
+        # the schema origin — no origin ref on the helper line (12).
+        line12 = [r for r in index if r.span.line == 12]
+        assert all(r.origin is None for r in line12)
+
 
 # --------------------------------------------------------------------------
 # rename_targets resolution

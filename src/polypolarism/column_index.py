@@ -35,21 +35,24 @@ re-implement the full analyzer. It follows, per function:
 * any reassignment the follower does not understand DROPS the binding, so
   later refs off that variable are ``origin=None``.
 
-Indexed reference kinds (the SOUND SUBSET shipped here):
+Indexed reference kinds:
 
 * schema field DECLARATIONS — origin ``(schema, field)`` (the rename anchor);
 * ``pl.col("X")`` / ``pl.col("X", "Y")`` string-literal references — origin
   ``(schema, field)`` when the receiver chain provably resolves to that
-  schema's frame with ``X`` still live, else ``origin=None``.
+  schema's frame with ``X`` still live, else ``origin=None``;
+* bare-string column refs ``select("X")`` / ``drop("X")`` / ``df["X"]`` and a
+  ``rename`` SOURCE key — origin-resolved the same way (the literal names the
+  receiver frame's column);
+* ``rename`` TARGET values and ``...alias("X")`` OUTPUT names — recorded with
+  ``origin=None`` (a NEW identity: origin restarts at the rename/alias), so a
+  query lands on the single occurrence and never name-broadcasts to the old
+  column.
 
-The regex form ``pl.col("^...$")`` names no single column and is skipped.
-Bare-string column refs (``select("X")`` / ``df["X"]``), ``rename`` keys /
-values, and ``with_columns`` / ``agg`` alias OUTPUT names are deliberately
-NOT origin-indexed in this subset: a bare ``select("X")`` is followable but
-adds no rename safety beyond ``pl.col``, and a rename/alias output name is a
-NEW identity (origin restarts) — so to stay sound they are simply left out
-(querying one falls to the single-occurrence position fallback). See
-``docs/backlog.md`` for the deferred extension.
+The regex form ``pl.col("^...$")`` names no single column and is skipped. The
+keyword alias form ``with_columns(X=...)`` / ``agg(X=...)`` has no
+string-literal span the editor can rewrite as a column token, so its output
+name is not indexed (deferred — see ``docs/backlog.md``).
 """
 
 from __future__ import annotations
@@ -434,42 +437,99 @@ class _FileIndexer:
         node: ast.AST,
         var_state: dict[str, tuple[str, frozenset[str]]],
     ) -> None:
-        """Record every ``pl.col`` string-literal column reference reachable
-        in ``node`` WITHOUT descending into nested function defs (those are
-        indexed separately with their own binding state).
+        """Record every column NAME reference reachable in ``node`` WITHOUT
+        descending into nested function defs (those are indexed separately
+        with their own binding state).
 
-        Each ``pl.col("X")`` is resolved against the binding of the variable
-        whose method chain it appears inside. A ``pl.col`` is only matched to
-        a single unambiguous frame binding when exactly one schema is live in
-        scope at that statement; otherwise it is recorded origin=None (sound).
+        Resolved-origin refs (``pl.col("X")``, bare ``select("X")`` /
+        ``drop("X")`` / ``df["X"]`` against a schema-bound receiver, and a
+        ``rename`` SOURCE key) get origin ``(schema, X)`` when exactly one
+        schema is live in this statement's scope and ``X`` is still live; else
+        ``origin=None``. A ``rename`` TARGET value and a ``with_columns`` /
+        ``agg`` alias OUTPUT name are NEW identities, always recorded
+        ``origin=None`` (so a query lands on the single occurrence, never
+        name-broadcasting to the old column).
         """
-        # Determine the candidate schema-origin binding for refs in this
-        # statement. We resolve a pl.col against the receiver variable of the
-        # innermost enclosing method chain (handled in the walk below).
         for descendant in _walk_no_nested_defs(node):
             if isinstance(descendant, ast.Call):
                 self._record_pl_col(descendant, var_state)
+                self._record_method_string_refs(descendant, var_state)
+            elif isinstance(descendant, ast.Subscript):
+                self._record_subscript_ref(descendant, var_state)
+
+    def _emit_ref(
+        self,
+        const: ast.Constant,
+        name: str,
+        var_state: dict[str, tuple[str, frozenset[str]]],
+        *,
+        resolve_origin: bool,
+    ) -> None:
+        """Append one ``ColumnRef`` for the string literal ``const``.
+
+        When ``resolve_origin`` is False the ref is always origin-less (a new
+        identity — rename target / alias output). Otherwise the origin is
+        resolved against the unambiguous live schema, matching only when
+        ``name`` is still a live field of it.
+        """
+        origin: tuple[str, str] | None = None
+        schema_source: str | None = None
+        if resolve_origin:
+            origin_schema = self._unambiguous_live_schema(var_state)
+            if origin_schema is not None:
+                schema_name, live = origin_schema
+                if name in live:
+                    origin = (schema_name, name)
+                    schema_source = self._schema_source(schema_name)
+        self.refs.append(
+            ColumnRef(
+                file=self.file,
+                span=_string_literal_span(const),
+                column_name=name,
+                origin=origin,
+                schema_source=schema_source,
+            )
+        )
 
     def _record_pl_col(
         self,
         call: ast.Call,
         var_state: dict[str, tuple[str, frozenset[str]]],
     ) -> None:
-        const_args = _pl_col_string_args(call)
-        if not const_args:
+        for const in _pl_col_string_args(call):
+            self._emit_ref(const, str(const.value), var_state, resolve_origin=True)
+
+    def _record_method_string_refs(
+        self,
+        call: ast.Call,
+        var_state: dict[str, tuple[str, frozenset[str]]],
+    ) -> None:
+        """Index bare-string column refs in ``select`` / ``drop`` / ``rename``
+        and the alias OUTPUT name of ``...alias("X")``.
+
+        ``pl.col(...)`` arguments are handled by ``_record_pl_col`` and skipped
+        here to avoid double-recording.
+
+        SOUNDNESS: a bare ``select`` / ``drop`` / ``rename`` string is only a
+        COLUMN name when the receiver provably resolves to a schema frame —
+        ``cfg.select("x")`` on an unrelated object must not borrow a schema's
+        origin. So the source-key resolution uses the SPECIFIC receiver's frame
+        state (``None`` when the receiver is not a followable schema frame),
+        not the function-level heuristic.
+        """
+        if not isinstance(call.func, ast.Attribute):
             return
-        origin_schema = self._unambiguous_live_schema(var_state)
-        for const in const_args:
-            # ``_pl_col_string_args`` already guarantees a ``str`` value; the
-            # annotation re-establishes it for the type checker.
-            name: str = const.value  # type: ignore[assignment]
+        method = call.func.attr
+        receiver_state = self._eval_frame_state(call.func.value, var_state)
+        live = receiver_state[1] if receiver_state is not None else None
+        schema_name = receiver_state[0] if receiver_state is not None else None
+
+        def emit_resolved(const: ast.Constant, name: str) -> None:
             origin: tuple[str, str] | None = None
             schema_source: str | None = None
-            if origin_schema is not None:
-                schema_name, live = origin_schema
-                if name in live:
-                    origin = (schema_name, name)
-                    schema_source = self._schema_source(schema_name)
+            if schema_name is not None and live is not None and name in live:
+                origin = (schema_name, name)
+                schema_source = self._schema_source(schema_name)
             self.refs.append(
                 ColumnRef(
                     file=self.file,
@@ -479,6 +539,79 @@ class _FileIndexer:
                     schema_source=schema_source,
                 )
             )
+
+        if method in ("select", "drop"):
+            # Only record bare-string selectors when the receiver is a known
+            # frame — otherwise the name may not be a column at all.
+            if receiver_state is None:
+                return
+            for arg in call.args:
+                for const in _flat_string_consts(arg):
+                    emit_resolved(const, str(const.value))
+        elif method == "rename":
+            if receiver_state is None:
+                return
+            if call.args and isinstance(call.args[0], ast.Dict):
+                mapping = call.args[0]
+                for key_node, val_node in zip(mapping.keys, mapping.values, strict=False):
+                    if isinstance(key_node, ast.Constant) and isinstance(key_node.value, str):
+                        # The SOURCE key is the existing column -> resolvable.
+                        emit_resolved(key_node, key_node.value)
+                    if isinstance(val_node, ast.Constant) and isinstance(val_node.value, str):
+                        # The TARGET value is a NEW identity -> origin-less.
+                        self._emit_ref(val_node, val_node.value, var_state, resolve_origin=False)
+        elif method == "alias":
+            # ``...alias("X")`` names a NEW output column -> origin-less. The
+            # keyword-form alias (``with_columns(X=...)``) has no string-literal
+            # span the editor can rewrite, so only the call form is indexed.
+            if call.args and isinstance(call.args[0], ast.Constant):
+                arg0 = call.args[0]
+                if isinstance(arg0.value, str):
+                    self._emit_ref(arg0, arg0.value, var_state, resolve_origin=False)
+
+    def _record_subscript_ref(
+        self,
+        node: ast.Subscript,
+        var_state: dict[str, tuple[str, frozenset[str]]],
+    ) -> None:
+        """Index ``df["X"]`` string-key column access.
+
+        SOUNDNESS: a subscript with a string key is only a COLUMN access when
+        its receiver is provably a schema-bound frame variable — ``d["k"]`` on
+        a dict, list, or any unrelated object must NOT be indexed (it would
+        otherwise borrow an in-scope schema's origin and corrupt an unrelated
+        edit). So the receiver must be a ``Name`` tracked in ``var_state``, and
+        the origin is resolved against THAT variable's own binding (never the
+        function-level unambiguous-schema heuristic, which could misattribute a
+        non-frame subscript)."""
+        key = node.slice
+        if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
+            return
+        receiver = node.value
+        if not isinstance(receiver, ast.Name):
+            return
+        binding = var_state.get(receiver.id)
+        origin: tuple[str, str] | None = None
+        schema_source: str | None = None
+        if binding is not None:
+            schema_name, live = binding
+            if key.value in live:
+                origin = (schema_name, key.value)
+                schema_source = self._schema_source(schema_name)
+        # A string-keyed subscript on an UNTRACKED receiver is not provably a
+        # column access at all — skip it entirely rather than record an
+        # origin-less token that the position fallback could rename.
+        if origin is None and binding is None:
+            return
+        self.refs.append(
+            ColumnRef(
+                file=self.file,
+                span=_string_literal_span(key),
+                column_name=key.value,
+                origin=origin,
+                schema_source=schema_source,
+            )
+        )
 
     def _unambiguous_live_schema(
         self,
@@ -506,6 +639,25 @@ class _FileIndexer:
         for live in lives[1:]:
             merged = merged & live
         return schema_name, merged
+
+
+def _flat_string_consts(node: ast.expr) -> list[ast.Constant]:
+    """Bare string-literal column-name constants directly in ``node``, for
+    ``select`` / ``drop`` arguments.
+
+    Handles a bare ``"X"`` constant and a ``["X", "Y"]`` / ``("X",)`` list of
+    constants. Regex-anchored names are excluded (they name no single column).
+    ``pl.col(...)`` calls are NOT descended into here — those are recorded by
+    ``_record_pl_col`` — so a name is never double-counted.
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return [] if _is_regex_col_pattern(node.value) else [node]
+    if isinstance(node, (ast.List, ast.Tuple)):
+        out: list[ast.Constant] = []
+        for elt in node.elts:
+            out.extend(_flat_string_consts(elt))
+        return out
+    return []
 
 
 def _selected_column_names(node: ast.expr) -> set[str] | None:
