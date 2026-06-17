@@ -637,6 +637,74 @@ class TestPly042FixObjectEndToEnd:
         assert fix["schema_insert_line"] == 6
 
 
+class TestPly042SuggestedDtype:
+    """Issue #114: the PLY042 ``fix`` carries ``suggested_dtype`` (a ready-to-
+    insert pandera annotation string) WHEN the undeclared column's dtype is
+    statically constrained by its use (e.g. ``.cast(pl.Float64)``), and OMITS
+    it when the dtype is genuinely unconstrained (the today behavior — sound,
+    never a guess)."""
+
+    def _ply042_fix(self, tmp_path, body: str) -> dict:
+        from polypolarism.cli import check_file
+
+        (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\n")
+        app = tmp_path / "app.py"
+        app.write_text(
+            textwrap.dedent(
+                f"""
+                import polars as pl
+                import pandera.polars as pa
+                from pandera.typing.polars import DataFrame
+
+
+                class InputSchema(pa.DataFrameModel):
+                    a: int
+
+                    class Config:
+                        strict = False
+
+
+                def f(df: DataFrame[InputSchema]) -> DataFrame[InputSchema]:
+                    return {body}
+                """
+            ).lstrip("\n")
+        )
+        results = check_file(app)
+        diags = _diagnostics_from_results(results, app)
+        ply042 = [d for d in diags if d.get("code") == "PLY042"]
+        assert ply042, diags
+        return ply042[0]["fix"]
+
+    def test_suggested_dtype_present_for_cast_constrained_column(self, tmp_path):
+        # ``pl.col("amount").cast(pl.Float64)`` pins the column to Float64.
+        fix = self._ply042_fix(tmp_path, 'df.with_columns(b=pl.col("amount").cast(pl.Float64))')
+        assert fix["column"] == "amount"
+        assert fix["suggested_dtype"] == "pl.Float64"
+
+    def test_suggested_dtype_for_simple_cast_target(self, tmp_path):
+        fix = self._ply042_fix(tmp_path, 'df.with_columns(b=pl.col("amount").cast(pl.Int64))')
+        assert fix["suggested_dtype"] == "pl.Int64"
+
+    def test_suggested_dtype_omitted_for_unconstrained_column(self, tmp_path):
+        # A bare ``pl.col("amount") + 1`` resolves to Unknown → omit (no
+        # regression: this is today's behavior).
+        fix = self._ply042_fix(tmp_path, 'df.with_columns(b=pl.col("amount") + 1)')
+        assert "suggested_dtype" not in fix
+
+    def test_suggested_dtype_omitted_for_bare_reference(self, tmp_path):
+        # ``pl.col("amount")`` with no constraint at all → Unknown → omit.
+        fix = self._ply042_fix(tmp_path, 'df.with_columns(b=pl.col("amount"))')
+        assert "suggested_dtype" not in fix
+
+    def test_cast_to_nullable_renders_inner_dtype(self, tmp_path):
+        # Nullability is declared via pa.Field, not the annotation — so a
+        # nested container cast renders its inner dtype string.
+        fix = self._ply042_fix(
+            tmp_path, 'df.with_columns(b=pl.col("amount").cast(pl.List(pl.Int64)))'
+        )
+        assert fix["suggested_dtype"] == "pl.List(pl.Int64)"
+
+
 class TestPly042RelaxParamHelper:
     """Batch B, Request 4 (low priority): the PLY042 diagnostic whose fix is
     "relax the param" carries ``param_name`` and ``param_annotation_range``

@@ -26,6 +26,16 @@ Errors are tagged with a stable `[PLY###]` prefix for IDE/CI consumers:
 | `PLY042` | a column referenced inside a function is not declared in its (non-strict) parameter/validated schema — an undeclared dependency on caller extras ("checked island"), not a provable runtime failure; declare the column, or take a bare `pl.DataFrame` for row-polymorphic helpers |
 | `PLY043` | a `@rowpoly` helper body provably drops its row variable — a return point produces a closed frame that loses the caller's extra columns (e.g. a `select` of a fixed column set), breaking the threading promise. Static-only (the property is relative to the caller). Use `with_columns` / `select(pl.all())`, or remove the row variable from `@rowpoly`. See [Row polymorphism](row-polymorphism.md) |
 
+> **PLY042 "declare the column" quick fix (`--format json`) is location-only
+> unless the column's use constrains its type.** The `fix` object always
+> carries where to insert (`schema`, `column`, `schema_file`,
+> `schema_insert_line`); it adds `suggested_dtype` (a ready-to-insert
+> annotation, e.g. `"pl.Float64"`) only when the reference statically pins the
+> dtype — e.g. `pl.col("amount").cast(pl.Float64)`. A bare
+> `pl.col("amount")` on an open/non-strict frame resolves to `Unknown`, so
+> `suggested_dtype` is omitted (sound — never a guessed dtype); the editor then
+> offers only the "relax the param to bare `pl.DataFrame`" fix (issue #114).
+
 ## Apply-style helpers and warning codes
 
 Some patterns are **not statically decidable** without help from the

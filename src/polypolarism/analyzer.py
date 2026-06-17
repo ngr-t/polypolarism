@@ -167,6 +167,7 @@ from polypolarism.types import (
     UInt128,
     Unknown,
     Utf8,
+    render_dtype_annotation,
 )
 from polypolarism.types import (
     List as ListT,
@@ -4464,6 +4465,33 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         # name method preserves the dtype; the output name is unknowable.
         return None, inner_type
 
+    def _suggest_dtype_for_ply042(self, errors_before: int, target: DataType | None) -> None:
+        """Attach a ``suggested_dtype`` to a PLY042 fix raised since
+        ``errors_before`` (issue #114).
+
+        ``target`` is a STATICALLY-known dtype the column reference is
+        constrained to — e.g. the explicit ``.cast(T)`` target — that the
+        editor can declare on the schema. Renders it through the shared
+        :func:`render_dtype_annotation`; an ``Unknown`` / otherwise
+        unrenderable target leaves the fix untouched (no guessed dtype). Only
+        a PLY042 :class:`TaggedError` that already carries a ``fix`` object is
+        enriched (an unknown schema file means there was no fix to complete).
+        """
+        if target is None:
+            return
+        suggested = render_dtype_annotation(target)
+        if suggested is None:
+            return
+        for err in self.errors[errors_before:]:
+            fix = getattr(err, "fix", None)
+            if (
+                isinstance(err, str)
+                and err.startswith(f"[{PLY042}]")
+                and isinstance(fix, dict)
+                and "suggested_dtype" not in fix
+            ):
+                fix["suggested_dtype"] = suggested
+
     def _analyze_method_chain(self, node: ast.expr) -> tuple[str | None, DataType | None] | None:
         """Analyze ``pl.col("x").<method>(...)`` style chains.
 
@@ -4542,9 +4570,24 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         # Warning watermark: the ``cast`` branch below retracts a PLW007 the
         # receiver analysis emits when the cast repairs the degradation.
         warnings_before_receiver = len(self.warnings)
+        # Error watermark: a ``pl.col("x").cast(T)`` on an undeclared-column
+        # PLY042 island raises the PLY042 inside the receiver lookup (before
+        # the cast is seen). The explicit cast STATICALLY constrains the
+        # column to ``T``, so enrich that just-emitted PLY042 fix with a
+        # ``suggested_dtype`` so the editor can write a complete field (issue
+        # #114). Only the receiver's NEW errors are considered.
+        errors_before_receiver = len(self.errors)
         receiver_result = self.analyze_select_expr(receiver)
         receiver_name, receiver_type = receiver_result
         if receiver_type is None and receiver_name is None:
+            # Receiver wasn't recognised. Before bailing, if this is a
+            # ``.cast(T)`` whose target is statically known, attach the
+            # suggested dtype to a PLY042 fix the receiver lookup raised
+            # (issue #114).
+            if method == "cast" and node.args:
+                self._suggest_dtype_for_ply042(
+                    errors_before_receiver, _resolve_pl_dtype(node.args[0])
+                )
             # Receiver wasn't recognised — bail out.
             return None
 
