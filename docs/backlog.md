@@ -207,42 +207,39 @@ Status legend: `[ ]` open / `[x]` done / `[-]` deliberately deferred.
   Tiers, cheapest / highest-de-risk first; each independently shippable and
   **opt-in** (no `Row(...)` ⇒ today's behavior byte-for-byte — golden
   fixtures for unannotated code must not move):
-  1. [ ] *De-risk + decide (ADR).* **Investigated 2026-06-15 — surface
-     decision made; ADR + pinning test still pending. See the C-14 Tier 1
-     notes at the bottom.** The naive `Annotated[DataFrame[S], <marker>]`
-     surface FAILS the hard constraint: pandera 0.31 does not unwrap
-     `Annotated` on a frame annotation, so `@pa.check_types` skips
-     validation entirely (a missing-column frame passes). A runtime-inert
-     **decorator** surface (`@pp.rowpoly("R")` alongside a bare
-     `DataFrame[S]` annotation) satisfies it instead — pandera keeps
-     validating the base in both decorator orders, and the current static
-     analyzer already checks such functions normally. Remaining: write the
-     ADR, pin the constraint with a `tests/test_runtime_differential.py`
-     case, and finalize the row-algebra scope (add / drop / rename / lacks;
-     one vs many vars).
-  2. [ ] *Surface + binding, no semantics.* Ship the runtime-inert `Row`
-     marker; teach `pandera_annotation.py` / `pandera_dtype.py` to recognize
-     `Annotated[DataFrame[S], Row("R")]` and bind a FrameType whose `rest`
-     is a *named, bound* `RowVar` (vs today's anonymous open marker). Pure
-     plumbing — behavior unchanged.
-  3. [ ] *Precision (call-site instantiation).* At a call, unify the param's
-     `Row("R")` against the actual argument's extras
-     (`R := actual.columns − declared.columns`, with real dtypes) and
-     substitute into the return's `Row("R")`. Downstream reads of the
-     caller's extras keep their real dtype instead of degrading to
-     `Unknown`. Touches the analyzer call path + the open-frame column read
-     in `expr_infer`.
-  4. [ ] *Soundness (preservation check).* Skolemize `R` while checking the
-     helper body and require the inferred return to contain all of `R`; a
-     body that drops it fails with a new `PLY0xx` ("frame does not preserve
-     row variable R"). This is the part Pandera fundamentally *cannot* check
-     (the property is relative to the caller, hence static-only).
-  5. [ ] *Row algebra + relations.* `Row("R")` add / drop / rename; `lacks`
-     constraints (reuse the ADR-0006 `absent` machinery, promoted from its
-     monomorphic form); join / concat over two disjoint row vars
-     (`R1 # R2`) with static disjointness checking. Property tests for the
-     row-unification laws, mirroring the existing `_is_frame_subtype` laws
-     in `tests/test_properties.py`.
+  **Surface as built (Tiers 1–5, on branch `feat/row-polymorphism`,
+  2026-06-17):** the de-risk picked a runtime-inert **decorator**
+  `@rowpoly("R")` beside a bare `DataFrame[Schema]` annotation — NOT
+  `Annotated[..., Row("R")]`, which pandera 0.31 refuses to unwrap on a frame
+  annotation, silently disabling `@pa.check_types`. See `src/polypolarism/
+  rowpoly.py` and the C-14 Tier 1 notes at the bottom.
+  1. [x] *De-risk + decide.* Done 2026-06-15/17 (commit 022c621 notes +
+     `3b938da`). Decorator surface selected and pinned by a
+     `tests/test_runtime_differential.py` case (a missing-column frame still
+     raises `SchemaError` under `@pa.check_types` + `@rowpoly`, both decorator
+     orders). A standalone ADR was not written — the rationale lives in the
+     backlog Tier 1 notes; promote to `docs/adr/` if the feature graduates
+     from research to shipped.
+  2. [x] *Surface + binding, no semantics.* Done 2026-06-17 (`1b909de`).
+     `analyze_function` recognizes `@rowpoly("R")` and records
+     `FunctionAnalysis.row_var` / `FunctionSignature.row_var`; metadata-only,
+     verdict unchanged.
+  3. [x] *Precision (call-site instantiation).* Done 2026-06-17 (`a313a89`).
+     `_thread_row_poly_extras` adds the caller's extras (arg columns − declared
+     param columns) to the call result with their real dtypes; a wrong-dtype
+     declaration of a preserved column now fails PLY040 where the open-frame
+     Unknown leniency used to accept it.
+  4. [x] *Soundness (preservation check).* Done 2026-06-17 (`f6028bb`, PLY043).
+     `_check_row_preservation` skolemizes the row variable (sentinel column)
+     and flags a return point that provably drops it. Static-only — the
+     invalid fixture is runtime-SKIPped (caller-relative property).
+  5. [x] *Row algebra + relations — partial.* Done 2026-06-17 (`b2e5a69`):
+     per-parameter row variables `@rowpoly(a="R1", b="R2")` (multi-frame
+     threading + per-variable preservation, so a join helper preserves both
+     sides), plus threading-law property tests in `test_properties.py`. **Still
+     deferred:** explicit `R1 # R2` disjointness *diagnostics*, and row
+     add / drop / rename *tracking* through the body (`lacks` promoted to a
+     polymorphic constraint). Open as a Tier-5 remainder.
   6. [ ] *Ergonomics / tooling.* Optional inference of `R` for untyped
      helpers; JSON output exposes bound row vars; golden fixtures
      (valid / invalid / warning) + docs documenting the dialect.
