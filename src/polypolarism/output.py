@@ -87,24 +87,40 @@ def _frame_summary(frame) -> dict | None:
     }
 
 
+def _function_summary(analysis) -> dict:
+    """One ``function_summaries`` entry for a single analyzed function.
+
+    The row-polymorphism fields (C-14 Tier 6) are added only when present so
+    the JSON stays backward-compatible for pandera-only code: a positional
+    ``@rowpoly("R")`` adds ``"row_var": "R"``; a keyword
+    ``@rowpoly(a="R1", b="R2")`` adds ``"param_row_vars": {"a": "R1", ...}``;
+    a function with neither carries neither key.
+    """
+    summary = {
+        "name": analysis.name,
+        "line": analysis.lineno,
+        "end_line": analysis.end_lineno,
+        "params": {name: _frame_summary(ft) for name, ft in analysis.input_types.items()},
+        "declared_return": _frame_summary(analysis.declared_return_type),
+        "inferred_return": _frame_summary(analysis.inferred_return_type),
+    }
+    row_var = getattr(analysis, "row_var", None)
+    if row_var is not None:
+        summary["row_var"] = row_var
+    param_row_vars = getattr(analysis, "param_row_vars", None)
+    if param_row_vars:
+        summary["param_row_vars"] = dict(param_row_vars)
+    return summary
+
+
 def function_summaries(analyses) -> list[dict]:
     """Per-function schema summaries for editor hovers (D-11).
 
-    One entry per analyzed function: source span, parameter frames, and
-    the declared / inferred return frames, with dtypes rendered through
-    their canonical ``str`` forms.
+    One entry per analyzed function: source span, parameter frames, the
+    declared / inferred return frames (dtypes rendered through their canonical
+    ``str`` forms), and any bound row variable(s) from ``@rowpoly`` (C-14).
     """
-    return [
-        {
-            "name": analysis.name,
-            "line": analysis.lineno,
-            "end_line": analysis.end_lineno,
-            "params": {name: _frame_summary(ft) for name, ft in analysis.input_types.items()},
-            "declared_return": _frame_summary(analysis.declared_return_type),
-            "inferred_return": _frame_summary(analysis.inferred_return_type),
-        }
-        for analysis in analyses
-    ]
+    return [_function_summary(analysis) for analysis in analyses]
 
 
 def _build_diagnostics(group: FileResults) -> list[dict]:

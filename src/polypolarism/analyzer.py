@@ -2218,6 +2218,11 @@ class FunctionAnalysis:
     # ``None``. Recorded here for the row-polymorphism threading that later
     # tiers build on; it has no effect on the current verdict.
     row_var: str | None = None
+    # Per-parameter row variables from ``@rowpoly(a="R1", b="R2")`` (Tier 5):
+    # param name -> row-variable name. Empty for the single-``R`` / no-decorator
+    # forms. Surfaced (alongside ``row_var``) in the ``--format json`` function
+    # entries so editors can show a helper's bound row variable(s) (Tier 6).
+    param_row_vars: dict[str, str] = field(default_factory=dict)
 
     @property
     def has_errors(self) -> bool:
@@ -8183,6 +8188,7 @@ def analyze_function(
         trace=trace_events if trace_events is not None else [],
         return_frames=body_analyzer.return_frames,
         row_var=_rowpoly_row_var(func_node),
+        param_row_vars=_rowpoly_param_row_vars(func_node),
     )
 
 

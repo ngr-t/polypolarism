@@ -312,3 +312,97 @@ class TestJsonFunctionsArray:
         assert fn["inferred_return"]["open"] is True
         assert fn["inferred_return"]["columns"]["x"] == "Int64"
         assert fn["params"]["df"]["open"] is True
+
+    def test_no_rowpoly_omits_row_var_fields(self):
+        # Backward-compatible: a pandera-only function carries neither row-var
+        # key, so existing JSON consumers see no new fields (C-14 Tier 6).
+        functions = self._functions(
+            """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+
+            class Src(pa.DataFrameModel):
+                a: int
+
+                class Config:
+                    strict = False
+
+            def f(df: DataFrame[Src]) -> DataFrame[Src]:
+                return df.with_columns(a=pl.col("a") + 1)
+            """
+        )
+        fn = functions[0]
+        assert "row_var" not in fn
+        assert "param_row_vars" not in fn
+
+    def test_positional_rowpoly_exposes_row_var(self):
+        # ``@rowpoly("R")`` surfaces ``"row_var": "R"`` (and no param map).
+        functions = self._functions(
+            """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+            from polypolarism import rowpoly
+
+            class InId(pa.DataFrameModel):
+                id: int
+
+                class Config:
+                    strict = False
+
+            class OutScore(pa.DataFrameModel):
+                id: int
+                score: float
+
+                class Config:
+                    strict = False
+
+            @rowpoly("R")
+            def add_score(df: DataFrame[InId]) -> DataFrame[OutScore]:
+                return df.with_columns(score=pl.col("id").cast(pl.Float64))
+            """
+        )
+        fn = functions[0]
+        assert fn["name"] == "add_score"
+        assert fn["row_var"] == "R"
+        assert "param_row_vars" not in fn
+
+    def test_keyword_rowpoly_exposes_param_row_vars(self):
+        # ``@rowpoly(a="R1", b="R2")`` surfaces the per-parameter map (and no
+        # shared ``row_var``).
+        functions = self._functions(
+            """
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+            from polypolarism import rowpoly
+
+            class A(pa.DataFrameModel):
+                id: int
+
+                class Config:
+                    strict = False
+
+            class B(pa.DataFrameModel):
+                id: int
+                tag: str
+
+                class Config:
+                    strict = False
+
+            class Joined(pa.DataFrameModel):
+                id: int
+                tag: str
+
+                class Config:
+                    strict = False
+
+            @rowpoly(a="R1", b="R2")
+            def merge(a: DataFrame[A], b: DataFrame[B]) -> DataFrame[Joined]:
+                return a.join(b, on="id", how="inner")
+            """
+        )
+        fn = functions[0]
+        assert fn["name"] == "merge"
+        assert fn["param_row_vars"] == {"a": "R1", "b": "R2"}
+        assert "row_var" not in fn
