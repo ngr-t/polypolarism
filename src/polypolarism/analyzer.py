@@ -153,6 +153,7 @@ from polypolarism.types import (
     Null,
     Nullable,
     RowVar,
+    Span,
     Struct,
     Time,
     UInt8,
@@ -6282,6 +6283,10 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             int_consts=self._int_consts(),
         )
         agg_exprs: list[AggExpr] = []
+        # Per-output producing-expression spans (issue #110): the agg keyword
+        # value / positional ``.alias`` expression. Stamped onto the result
+        # frame so a return-type mismatch points at ``agg(name=<expr>)``.
+        column_spans: dict[str, Span] = {}
         for arg in node.args:
             # A plural ``pl.col`` inside an aggregation expression produces
             # one output per column (issue #42): ``agg(pl.col("a", "b").sum())``
@@ -6290,6 +6295,10 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 agg_expr = expr_analyzer.analyze_agg_expr(expr)
                 if agg_expr:
                     agg_exprs.append(agg_expr)
+                    # A positional ``<expr>.alias("name")`` names the output —
+                    # stamp the whole expression (covered op; #110).
+                    if agg_expr.alias is not None and arg is expr:
+                        column_spans.setdefault(agg_expr.alias, Span.from_node(arg))
 
         # Kwarg-form ``agg(name=expr)`` — polars uses the kwarg name as the
         # output column. It overrides any ``.alias(...)`` buried in the
@@ -6309,6 +6318,8 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 agg_exprs.append(
                     AggExpr(column=kw.arg, function=None, alias=kw.arg, dtype=Unknown())
                 )
+            # The kwarg name wins over any buried alias; stamp the value.
+            column_spans[kw.arg] = Span.from_node(kw.value)
 
         self.errors.extend(expr_analyzer.errors)
 
@@ -6322,7 +6333,13 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                         self.warnings.append(
                             _all_null_agg_warning(agg_expr.function, direct_col_type)
                         )
-            return infer_groupby_result(input_frame, keys, agg_exprs)
+            result = infer_groupby_result(input_frame, keys, agg_exprs)
+            # Stamp only the columns we actually produced spans for; keys and
+            # unstamped outputs fall back to the return line (#110).
+            for name, span in column_spans.items():
+                if name in result.columns:
+                    result.column_spans[name] = span
+            return result
         except GroupByTypeError as e:
             self.errors.append(tag(PLY011, str(e)))
             return None
@@ -6510,6 +6527,27 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         else:
             seen.add(name)
 
+    @staticmethod
+    def _stamp_positional_alias_spans(node: ast.Call, column_spans: dict[str, Span]) -> None:
+        """Stamp producing-expression spans for ``<expr>.alias("name")``
+        positional arguments of a ``select`` / ``with_columns`` call (issue
+        #110).
+
+        Only a TOP-LEVEL trailing ``.alias("literal")`` is covered (the
+        high-value case); the span is the whole positional expression so the
+        editor underlines ``pl.col("a").sum().alias("b")``, not just the
+        alias call. Other positional forms fall back to the return line. A
+        kwarg-stamped name is not overwritten (kwargs win in polars).
+        """
+        for arg in _flatten_column_args(node.args):
+            if not (isinstance(arg, ast.Call) and isinstance(arg.func, ast.Attribute)):
+                continue
+            if arg.func.attr != "alias" or not arg.args:
+                continue
+            name_node = arg.args[0]
+            if isinstance(name_node, ast.Constant) and isinstance(name_node.value, str):
+                column_spans.setdefault(name_node.value, Span.from_node(arg))
+
     def _infer_select_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
         """Infer type of .select() call."""
         expr_analyzer = ExpressionAnalyzer(
@@ -6519,6 +6557,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             int_consts=self._int_consts(),
         )
         result_columns: dict[str, DataType] = {}
+        # Per-column producing-expression spans (issue #110) — see
+        # ``_infer_with_columns_call``.
+        column_spans: dict[str, Span] = {}
         # Output names produced by THIS call — a repeat is a runtime
         # DuplicateError (issue #36). Registration keeps the last dtype.
         seen_outputs: set[str] = set()
@@ -6618,6 +6659,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     col_ref, input_frame, result_columns, output_name=kw.arg
                 )
                 if registered is not None:
+                    column_spans[registered] = Span.from_node(kw.value)
                     self._track_output_name(registered, seen_outputs, "select")
                 continue
             _, dtype = expr_analyzer.analyze_select_expr(kw.value)
@@ -6625,14 +6667,19 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 result_columns[kw.arg] = dtype
             else:
                 result_columns[kw.arg] = Unknown()
+            column_spans[kw.arg] = Span.from_node(kw.value)
             self._track_output_name(kw.arg, seen_outputs, "select")
 
         self.errors.extend(expr_analyzer.errors)
+
+        # ``.alias("name")`` positional expressions (issue #110).
+        self._stamp_positional_alias_spans(node, column_spans)
 
         if result_columns or has_opaque_outputs:
             return FrameType(
                 columns=result_columns,
                 rest=RowVar("name") if has_opaque_outputs else None,
+                column_spans=column_spans,
             )
         return None
 
@@ -6640,6 +6687,12 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         """Infer type of .with_columns() call."""
         # Start with all existing columns
         result_columns: dict[str, ColumnSpec | DataType] = dict(input_frame.columns)
+        # Per-column producing-expression spans (issue #110): the keyword
+        # value that built each named output. Used as the PRIMARY span of a
+        # return-type mismatch so the editor points at ``b=<expr>`` rather
+        # than the whole function. Only kwarg / ``.alias`` outputs are stamped
+        # (covered ops; everything else falls back to the return line).
+        column_spans: dict[str, Span] = {}
 
         expr_analyzer = ExpressionAnalyzer(
             input_frame,
@@ -6739,6 +6792,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     code, msg = _missing_column_diag(input_frame, col_ref)
                     self.errors.append(tag(code, msg))
                     continue
+                column_spans[kw.arg] = Span.from_node(kw.value)
                 self._track_output_name(kw.arg, seen_outputs, "with_columns")
                 continue
             _, dtype = expr_analyzer.analyze_select_expr(kw.value)
@@ -6746,9 +6800,14 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 result_columns[kw.arg] = dtype
             else:
                 result_columns[kw.arg] = Unknown()
+            column_spans[kw.arg] = Span.from_node(kw.value)
             self._track_output_name(kw.arg, seen_outputs, "with_columns")
 
         self.errors.extend(expr_analyzer.errors)
+
+        # Stamp ``.alias("name")`` outputs from positional expressions too
+        # (issue #110): a trailing alias names the producing expression.
+        self._stamp_positional_alias_spans(node, column_spans)
 
         return FrameType(
             columns=result_columns,
@@ -6759,6 +6818,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             absent=input_frame.absent,
             nonstrict_schema=input_frame.nonstrict_schema,
             schema_name=input_frame.schema_name,
+            column_spans=column_spans,
         )
 
     # -- frame methods --------------------------------------------------

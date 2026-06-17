@@ -3,8 +3,6 @@
 import json
 import textwrap
 
-import pytest
-
 from polypolarism.checker import (
     CheckResult,
     ExtraColumn,
@@ -456,10 +454,6 @@ class TestColumnMismatchSpans:
         # ``def f`` is on line 13; ``return df`` is on line 14.
         assert diag["line"] == 14
 
-    @pytest.mark.xfail(
-        reason="step 3 (inferred-side expression stamping) not yet implemented",
-        strict=True,
-    )
     def test_type_difference_primary_points_at_agg_expr(self):
         """Step 3: the PRIMARY span points at the agg keyword expression
         that produced the wrong dtype, not the whole function."""
@@ -560,10 +554,6 @@ class TestColumnMismatchSpans:
         # ``missing: str`` is on line 14.
         assert related[0]["line"] == 14
 
-    @pytest.mark.xfail(
-        reason="step 3 (inferred-side expression stamping) not yet implemented",
-        strict=True,
-    )
     def test_with_columns_expr_span_is_primary(self):
         """Step 3: a ``with_columns(name=expr)`` mismatch points at the
         keyword expression."""
