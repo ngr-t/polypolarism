@@ -17,6 +17,100 @@ while a soundness check (`PLY043`) confirms the body actually preserves it.
 > checked by polypolarism alone. Code without `@rowpoly` behaves exactly as
 > before — the feature is purely additive.
 
+## Why `strict = False` is not enough
+
+A non-strict schema already lets a helper *accept* a wide input — that part
+needs no `@rowpoly`. What it cannot express is that the caller's **extra columns
+keep their dtypes** through the call, or that the helper is **obliged to
+preserve** them. Both gaps are silent false negatives.
+
+The example below is one file. The two halves have identical bodies (only the
+names differ, to keep both in one file) — the one real difference is the
+`@rowpoly("R")` decorator. The caller passes a frame whose extra column
+`region` is really `Utf8`, and both result schemas *lie* about it
+(`region: int`):
+
+```python
+import polars as pl
+import pandera.polars as pa
+from pandera.typing.polars import DataFrame
+
+from polypolarism import rowpoly
+
+
+class InId(pa.DataFrameModel):
+    id: int
+
+    class Config:
+        strict = False
+
+
+class OutScore(pa.DataFrameModel):
+    id: int
+    score: float
+
+    class Config:
+        strict = False
+
+
+class Caller(pa.DataFrameModel):
+    id: int
+    region: str  # caller-specific extra column — really Utf8
+
+    class Config:
+        strict = False
+
+
+class Result(pa.DataFrameModel):
+    id: int
+    score: float
+    region: int  # BUG: region is really Utf8, not Int64
+
+    class Config:
+        strict = False
+
+
+# (1) plain non-strict — no @rowpoly
+def add_score_plain(df: DataFrame[InId]) -> DataFrame[OutScore]:
+    return df.with_columns(score=pl.col("id").cast(pl.Float64))
+
+
+def use_plain(c: DataFrame[Caller]) -> DataFrame[Result]:
+    return add_score_plain(c).select("id", "score", "region")
+
+
+# (2) identical code, with @rowpoly
+@rowpoly("R")
+def add_score(df: DataFrame[InId]) -> DataFrame[OutScore]:
+    return df.with_columns(score=pl.col("id").cast(pl.Float64))
+
+
+def use_rowpoly(c: DataFrame[Caller]) -> DataFrame[Result]:
+    return add_score(c).select("id", "score", "region")
+```
+
+```text
+$ polypolarism why_strict_false.py
+  add_score_plain (line 41): OK
+  use_plain (line 45): OK
+  add_score (line 51): OK
+  use_rowpoly (line 55): FAIL
+    - [PLY040] Column 'region' has type Utf8, but declared type is Int64
+```
+
+With plain `strict = False`, `use_plain` **passes** — a false negative. The
+helper's non-strict return is an open frame, so `region` flows through but
+degrades to `Unknown`, and `Unknown` satisfies the wrong `region: int`
+declaration. There is no annotation you can add to the non-strict schemas that
+recovers `region`'s real `Utf8` type at the call site: the column simply is not
+part of either declared schema.
+
+With `@rowpoly("R")`, `use_rowpoly` **fails `PLY040`**: the row variable threads
+`region` into the result *with its real `Utf8` dtype*, so the lying `int`
+declaration is caught. That precision — and the matching obligation that the
+body actually preserve `region` (the [`PLY043`](#ply043--the-preservation-check)
+check below) — is exactly what `strict = False` alone cannot say.
+
 ## The hard constraint: Pandera stays the runtime authority
 
 `@rowpoly` is a **runtime no-op**. It returns the decorated function unchanged,
@@ -204,6 +298,11 @@ The check is conservative — it only fires on a **provable** drop:
   silent. An all-columns selector resolves to the full column set, so it
   preserves the row variable; only a *fixed* set of named columns drops it.
 - An **open** result is not a provable drop (gradual), so it stays silent.
+
+Without `@rowpoly`, the same dropping body type-checks **silently** — its
+non-strict return matches `OutScore`, and nothing records that it was supposed
+to preserve the caller's columns. `strict = False` cannot express that
+obligation; `PLY043` is the check that does.
 
 Because the property is relative to the *caller* (did the helper keep columns
 the caller supplied?), Pandera cannot check it at runtime — an input
