@@ -1,0 +1,12 @@
+positive_guard: OK
+  via: column 'a': presence proven by guard, dtype coerced to Float64
+negated_early_raise: OK
+  via: column 'a': presence proven by guard, dtype coerced to Float64
+set_subset_guard: OK
+  via: column 'a': presence proven by guard, dtype coerced to Float64
+  via: column 'b': presence proven by guard, dtype coerced to Float64
+issubset_guard: OK
+  via: column 'a': presence proven by guard, dtype coerced to Float64
+  via: column 'b': presence proven by guard, dtype coerced to Float64
+schema_membership_guard: OK
+  via: column 'a': presence proven by guard, dtype coerced to Float64

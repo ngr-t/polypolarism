@@ -4431,6 +4431,141 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         return None
 
 
+def _string_constants(node: ast.expr) -> list[str] | None:
+    """The string literal(s) tested for membership, or ``None``.
+
+    Recognizes a single ``"a"`` (``ast.Constant``) and a literal set / list /
+    tuple of string constants (``{"a", "b"}``). Any non-string element or a
+    non-literal container disqualifies the whole form — only fully syntactic
+    column-name sets narrow.
+    """
+    if isinstance(node, ast.Constant):
+        return [node.value] if isinstance(node.value, str) else None
+    if isinstance(node, (ast.Set, ast.List, ast.Tuple)):
+        names: list[str] = []
+        for elt in node.elts:
+            if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                names.append(elt.value)
+            else:
+                return None
+        return names or None
+    return None
+
+
+def _columns_source_var(node: ast.expr) -> str | None:
+    """The frame variable name in a ``df.columns`` / ``df.schema`` /
+    ``set(df.columns)`` membership source, or ``None``.
+
+    Only the exact ``Name`` receiver is recognized (``df``); aliasing through
+    another expression is out of scope (issue #109).
+    """
+    # ``set(df.columns)`` — unwrap one set(...) call.
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "set"
+        and len(node.args) == 1
+    ):
+        node = node.args[0]
+    if (
+        isinstance(node, ast.Attribute)
+        and node.attr in ("columns", "schema")
+        and isinstance(node.value, ast.Name)
+    ):
+        return node.value.id
+    return None
+
+
+def _column_membership_guard(test: ast.expr) -> tuple[str, frozenset[str], bool] | None:
+    """Recognize a column-membership predicate and return
+    ``(var_name, columns, is_positive)`` or ``None`` (issue #109).
+
+    ``is_positive`` is True when the predicate asserts presence in its own
+    (true) branch:
+
+    - ``"a" in df.columns`` / ``"a" in df.schema``            -> positive
+    - ``"a" not in df.columns``                               -> negative
+    - ``{"a", "b"} <= set(df.columns)`` (and ``>=`` flipped)  -> positive
+    - ``set(df.columns) >= {"a", "b"}``                       -> positive
+    - ``{"a", "b"}.issubset(df.columns / set(df.columns))``   -> positive
+
+    Only a single comparison operator is recognized (chained compares such as
+    ``a in b in c`` are ignored).
+    """
+    # ``{"a", "b"}.issubset(df.columns)`` — a method call, not a Compare.
+    if (
+        isinstance(test, ast.Call)
+        and isinstance(test.func, ast.Attribute)
+        and test.func.attr == "issubset"
+        and len(test.args) == 1
+    ):
+        names = _string_constants(test.func.value)
+        var = _columns_source_var(test.args[0])
+        if names is not None and var is not None:
+            return var, frozenset(names), True
+        return None
+
+    if not (isinstance(test, ast.Compare) and len(test.ops) == 1):
+        return None
+    op = test.ops[0]
+    left = test.left
+    right = test.comparators[0]
+
+    if isinstance(op, (ast.In, ast.NotIn)):
+        names = _string_constants(left)
+        var = _columns_source_var(right)
+        if names is not None and var is not None:
+            return var, frozenset(names), isinstance(op, ast.In)
+        return None
+
+    # Subset relations: ``{...} <= set(df.columns)`` / ``set(df.columns) >= {...}``.
+    if isinstance(op, ast.LtE):
+        names = _string_constants(left)
+        var = _columns_source_var(right)
+        if names is not None and var is not None:
+            return var, frozenset(names), True
+    elif isinstance(op, ast.GtE):
+        names = _string_constants(right)
+        var = _columns_source_var(left)
+        if names is not None and var is not None:
+            return var, frozenset(names), True
+    return None
+
+
+def _branch_always_exits(body: list[ast.stmt]) -> bool:
+    """True when the branch's last top-level statement is a ``return`` or
+    ``raise`` — i.e. control never falls through to the code after the ``if``.
+
+    Only the simplest unconditional form is recognized; nested conditional
+    exits are intentionally out of scope (sound to ignore: we just decline
+    to propagate the narrowing past the ``if``).
+    """
+    return bool(body) and isinstance(body[-1], (ast.Return, ast.Raise))
+
+
+def _narrow_present(frame: FrameType, columns: frozenset[str]) -> FrameType:
+    """A copy of ``frame`` with each name in ``columns`` pinned present at
+    ``Unknown`` dtype (issue #109 — presence-only, not dtype).
+
+    Already-present columns keep their declared spec (a guard never overwrites
+    a known dtype with ``Unknown``). The copy is deep enough that mutating the
+    narrowed frame downstream never leaks into the unnarrowed binding.
+    """
+    new_columns = dict(frame.columns)
+    changed = False
+    for name in columns:
+        if name not in new_columns:
+            new_columns[name] = ColumnSpec(dtype=Unknown(), presence_only=True)
+            changed = True
+    if not changed:
+        return frame
+    narrowed = copy.copy(frame)
+    narrowed.columns = new_columns
+    # A pinned column clears a stale absence mark (issue #78).
+    narrowed.absent = frame.absent - columns
+    return narrowed
+
+
 def _intersect_frame_types(a: FrameType, b: FrameType) -> FrameType:
     """Column-level merge for if/else merge points (issues #95, #107).
 
@@ -4586,7 +4721,28 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         saved_var_alt_types = dict(self.var_alt_types)
         prev_narrowing = self._narrowing_enabled
         self._narrowing_enabled = False
+
+        # Column-membership guard (issue #109): ``if "a" in df.columns:`` proves
+        # ``a`` present (at Unknown dtype) in the matching branch. The positive
+        # fact ("a" present) lands in the true branch for ``in`` and in the
+        # false branch for ``not in``.
+        guard = _column_membership_guard(node.test)
+        guard_var: str | None = None
+        true_narrowing: frozenset[str] | None = None
+        false_narrowing: frozenset[str] | None = None
+        if guard is not None and guard[0] in self.var_types:
+            guard_var, cols, is_positive = guard
+            if is_positive:
+                true_narrowing = cols
+            else:
+                false_narrowing = cols
+
         try:
+            if guard_var is not None and true_narrowing is not None:
+                self.var_types[guard_var] = _narrow_present(
+                    self.var_types[guard_var], true_narrowing
+                )
+                self.var_alt_types.pop(guard_var, None)
             for stmt in node.body:
                 self.visit(stmt)
             if_var_types = dict(self.var_types)
@@ -4594,6 +4750,11 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
 
             self.var_types = dict(saved_var_types)
             self.var_alt_types = dict(saved_var_alt_types)
+            if guard_var is not None and false_narrowing is not None:
+                self.var_types[guard_var] = _narrow_present(
+                    self.var_types[guard_var], false_narrowing
+                )
+                self.var_alt_types.pop(guard_var, None)
             for stmt in node.orelse:
                 self.visit(stmt)
             else_var_types = dict(self.var_types)
@@ -4655,6 +4816,24 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                         merged_alts[var] = else_var_alt_types[var]
             self.var_types = merged
             self.var_alt_types = merged_alts
+
+            # Early-exit propagation (issue #109): when one branch always
+            # exits (``return`` / ``raise``), only the other branch falls
+            # through, so the post-``if`` flow keeps that surviving branch's
+            # bindings — including a guard narrowing. The classic idiom is
+            # ``if "a" not in df.columns: raise`` ... then use ``a`` below.
+            if guard_var is not None and guard_var in saved_var_types:
+                body_exits = _branch_always_exits(node.body)
+                else_exits = bool(node.orelse) and _branch_always_exits(node.orelse)
+                survivor: dict[str, FrameType] | None = None
+                survivor_alts: dict[str, list[FrameType]] | None = None
+                if body_exits and not else_exits:
+                    survivor, survivor_alts = else_var_types, else_var_alt_types
+                elif else_exits and not body_exits:
+                    survivor, survivor_alts = if_var_types, if_var_alt_types
+                if survivor is not None and guard_var in survivor:
+                    self.var_types = dict(survivor)
+                    self.var_alt_types = dict(survivor_alts) if survivor_alts else {}
         finally:
             self._narrowing_enabled = prev_narrowing
 

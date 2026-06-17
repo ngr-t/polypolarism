@@ -104,6 +104,20 @@ SKIP: dict[str, str] = {
     "valid/pandera_lazyframe_validate.py": (
         "validate-narrowing: body requires columns beyond the annotated input schema"
     ),
+    # -- column-membership guards (issue #109): the guarded column is absent
+    #    from the annotated input schema (that absence is what makes the guard
+    #    narrow), so the harness — which synthesizes inputs FROM the schema —
+    #    cannot build a frame that reaches the guarded branch; the static
+    #    narrowing has no runtime counterpart to compare against. Same shape as
+    #    the validate-narrowing skips above.
+    "valid/column_membership_guard.py": (
+        "column-membership guard: guarded column is absent from the input schema, "
+        "so synthesized inputs can't reach the guarded branch"
+    ),
+    "invalid/column_membership_guard_no_coerce.py": (
+        "column-membership guard: guarded column is absent from the input schema, "
+        "so synthesized inputs can't reach the guarded branch"
+    ),
     # -- known modeled divergence: sink_csv(lazy=True) terminates the plan at
     #    runtime (collect() writes the file and yields a 0-column frame);
     #    polypolarism deliberately models sink_* as identity (see fixture).

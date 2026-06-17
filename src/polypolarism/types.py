@@ -561,10 +561,19 @@ class ColumnSpec:
     `required=True` means the column must exist in the frame.
     `required=False` means the column may be absent (Pandera `Optional[T]`).
     Value-level nullability is encoded by wrapping `dtype` in `Nullable(...)`.
+
+    `presence_only` marks a column whose PRESENCE is proven but whose dtype
+    is not (issue #109 — a runtime ``if "a" in df.columns:`` guard). Its
+    ``dtype`` is always ``Unknown()``; the flag lets the checker withhold the
+    blanket ``Unknown`` leniency when the declared side is a concrete dtype
+    under ``coerce=False`` (presence alone cannot prove the dtype, and pandera
+    will not cast it). Excluded from equality/hash (``compare=False``) so it
+    never perturbs frame-shape comparisons or branch merges.
     """
 
     dtype: DataType
     required: bool = True
+    presence_only: bool = field(default=False, compare=False)
 
     def __str__(self) -> str:
         marker = "" if self.required else "?"

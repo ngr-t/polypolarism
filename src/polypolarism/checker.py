@@ -350,6 +350,23 @@ def _check_one_frame(
         if declared_spec.required and not inferred_spec.required:
             errors.append(MissingColumn(col_name, declared_spec.dtype))
             continue
+        # Presence-only column (issue #109): a guard proved the column EXISTS
+        # but not its dtype. The blanket ``Unknown`` leniency would wrongly
+        # accept it against any declared dtype; withhold it unless the
+        # declared side is itself ``Unknown`` or the schema coerces (pandera
+        # casts at validation time). Otherwise the dtype is unproven and the
+        # presence guard alone cannot satisfy a concrete, non-coerce slot.
+        if inferred_spec.presence_only and not isinstance(
+            _get_base_type(declared_spec.dtype), Unknown
+        ):
+            if declared.coerce:
+                leniency.append(
+                    f"column '{col_name}': presence proven by guard, dtype coerced "
+                    f"to {declared_spec.dtype}"
+                )
+            else:
+                errors.append(MissingColumn(col_name, declared_spec.dtype))
+            continue
         verdict = _subtype_verdict(inferred_spec.dtype, declared_spec.dtype)
         if verdict.ok:
             if verdict.reason is not None:
