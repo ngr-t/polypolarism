@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -286,6 +287,18 @@ def create_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip the polars / pandera version detection and warning",
     )
+    parser.add_argument(
+        "--rename-targets",
+        metavar="FILE:LINE:COL",
+        default=None,
+        help=(
+            "Read-only query mode (Batch C): given a source position on a "
+            "column-name token, emit JSON listing every source occurrence "
+            "that PROVABLY refers to the same column (declaration + references "
+            "sharing a (schema, field) origin). LINE is 1-indexed, COL is "
+            "0-indexed. No files are modified."
+        ),
+    )
     return parser
 
 
@@ -362,10 +375,58 @@ def _emit_version_warnings(
             print(f"\033[33m! {w.message}\033[0m", file=sys.stderr)
 
 
+def _parse_position_arg(spec: str) -> tuple[Path, int, int] | None:
+    """Parse a ``FILE:LINE:COL`` position spec for ``--rename-targets``.
+
+    ``LINE`` is 1-indexed, ``COL`` is 0-indexed (the shape ``ast`` exposes).
+    The FILE part may itself contain colons (Windows drive letters), so the
+    spec is split from the RIGHT: the last two ``:``-separated fields are
+    LINE and COL, everything before is the path. Returns ``None`` when the
+    trailing fields are not integers.
+    """
+    parts = spec.rsplit(":", 2)
+    if len(parts) != 3:
+        return None
+    file_str, line_str, col_str = parts
+    try:
+        line = int(line_str)
+        col = int(col_str)
+    except ValueError:
+        return None
+    return Path(file_str), line, col
+
+
+def _run_rename_targets(spec: str) -> int:
+    """Handle the read-only ``--rename-targets FILE:LINE:COL`` query mode.
+
+    Emits the rename-target JSON payload on stdout and returns 0. A malformed
+    position spec or a missing file is reported on stderr with exit code 1.
+    """
+    from polypolarism.column_index import rename_targets
+
+    parsed = _parse_position_arg(spec)
+    if parsed is None:
+        print(
+            f"Error: invalid --rename-targets position '{spec}' (expected FILE:LINE:COL)",
+            file=sys.stderr,
+        )
+        return 1
+    file_path, line, col = parsed
+    if not file_path.exists():
+        print(f"Error: Path not found: {file_path}", file=sys.stderr)
+        return 1
+    result = rename_targets(file_path, line=line, col=col)
+    print(json.dumps(result))
+    return 0
+
+
 def main(args: list[str] | None = None) -> int:
     """Entry point for the CLI. Returns 0 on success, 1 on any failure."""
     parser = create_parser()
     parsed = parser.parse_args(args)
+
+    if parsed.rename_targets is not None:
+        return _run_rename_targets(parsed.rename_targets)
 
     if not parsed.paths:
         parser.print_help()
