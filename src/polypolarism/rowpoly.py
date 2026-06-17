@@ -26,14 +26,18 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import Callable
-from typing import TypeVar
+from typing import TypeVar, overload
 
 __all__ = ["rowpoly"]
 
 _F = TypeVar("_F", bound=Callable[..., object])
 
 
-def rowpoly(*args: str, **kwargs: str) -> Callable[[_F], _F]:
+@overload
+def rowpoly(fn: _F, /) -> _F: ...  # bare ``@rowpoly`` (no parens)
+@overload
+def rowpoly(*args: str, **kwargs: str) -> Callable[[_F], _F]: ...  # @rowpoly("R") / (a="R1")
+def rowpoly(*args: object, **kwargs: str) -> object:
     """Tag the decorated function with row variable(s) (runtime no-op).
 
     Accepts both surfaces and is inert under each:
@@ -54,7 +58,7 @@ def rowpoly(*args: str, **kwargs: str) -> Callable[[_F], _F]:
     ``@rowpoly`` anyway; this only keeps the runtime behavior inert.)
     """
     if len(args) == 1 and not kwargs and callable(args[0]):
-        return args[0]  # type: ignore[return-value]
+        return args[0]
 
     def decorate(fn: _F) -> _F:
         # Builtins / ``__slots__`` objects reject attribute writes — the

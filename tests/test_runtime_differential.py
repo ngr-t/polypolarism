@@ -754,6 +754,9 @@ def test_rowpoly_decorator_does_not_disable_pandera_validation() -> None:
         return df
 
     for fn in (check_outer, check_inner):
-        fn(good)  # conforming frame validates and passes
+        # Plain runtime frames are deliberately passed to pandera-typed params
+        # (the whole point is runtime validation); the static arg-type mismatch
+        # is expected here.
+        fn(good)  # pyright: ignore[reportArgumentType]  # conforming frame passes
         with pytest.raises(pa.errors.SchemaError):
-            fn(missing_required)  # pandera still enforces the base schema
+            fn(missing_required)  # pyright: ignore[reportArgumentType]  # base schema enforced
