@@ -162,6 +162,18 @@ SKIP: dict[str, str] = {
     "invalid/dtype_annotated_no_metadata.py": (
         "module crashes at import: single-argument Annotated is a typing-level TypeError"
     ),
+    # -- issue #110: the out-of-function diagnostics (module top level / __main__
+    #    guard / frame-untyped def) fire on statements with no frame PARAMETER,
+    #    so the harness — which synthesizes inputs for and calls frame-typed
+    #    functions — has no runnable counterpart to compare against. The
+    #    module-level reproducer (`boom = src.select(pl.col("nope_module"))`)
+    #    additionally raises ColumnNotFoundError at IMPORT time: that crash IS
+    #    the static PLY001's subject, so the module cannot be loaded at all.
+    "invalid/module_level_scopes.py": (
+        "module crashes at import: the module-level missing-column reference (the "
+        "PLY001 subject) raises ColumnNotFoundError; the flagged scopes have no "
+        "frame parameter, so there is no harness-callable function"
+    ),
     # -- issue #69 (PLY041): the input schema is the broken one, so the
     #    harness cannot synthesize an input frame (to_schema raises the very
     #    TypeError the fixture exists to flag). The return-side siblings in

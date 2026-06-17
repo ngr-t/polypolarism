@@ -1,0 +1,6 @@
+get_kv: OK
+<module>: FAIL
+  error: [PLY001] Column 'nope_module' not found. Available columns: ['k', 'v']
+  error: [PLY001] Column 'nope_guard' not found. Available columns: ['k', 'v']
+main: FAIL
+  error: [PLY001] Column 'nope_main' not found. Available columns: ['k', 'v']

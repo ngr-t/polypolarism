@@ -177,6 +177,24 @@ Status legend: `[ ]` open / `[x]` done / `[-]` deliberately deferred.
      annotations`. Parse `ast.Constant(str)` annotations via
      `ast.parse(..., mode="eval")` at the detection sites.
 
+- [-] **C-15: Class-body statements unanalyzed (issue #110 remainder).**
+  Issue #110 extended provable-error checking (missing-column references,
+  dtype misuse) to statements outside a frame-typed function signature:
+  module top level, top-level `if __name__` / compound blocks, and
+  frame-untyped module-level functions (`def main() -> None:`) are now
+  analyzed, seeded only from provably-known frames (a typed same-module
+  call's closed return, `Schema.validate(...)`, or a `pl.DataFrame`
+  literal). **Class-body statements outside methods remain deferred** —
+  a frame pipeline written directly in a class body (rare) is not checked.
+  Deferred deliberately, not for soundness (the reused analyzer only fires
+  on provably-closed frames) but for scope: a class body needs its own
+  name environment and interacts with `self`/`cls` attribute resolution
+  (issues #104/#108). To cover it, drive a `FunctionBodyAnalyzer` over the
+  `ClassDef` body statements with a fresh seed, mirroring the `<module>`
+  pass in `_analyze_out_of_function_scopes`, and decide how class-level
+  bindings should (or should not) feed method analysis. Low priority —
+  driver/demo pipelines live at module / `main()` level, which is covered.
+
 - [ ] **C-14: True row polymorphism via `Annotated`-carried row variables**
   (user request 2026-06-15). Research-grade precision/soundness upgrade for
   column-preserving helpers. Today an open frame's `rest` is an *anonymous*

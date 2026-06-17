@@ -14887,3 +14887,153 @@ class TestInferenceTrace:
         (a,) = analyze_source(self.SOURCE, collect_trace=True)
         chain = next(e for e in a.trace if "with_columns" in e.label)
         assert chain.lineno > 0
+
+
+class TestOutOfFunctionScopes:
+    """Issue #110: provable missing-column / dtype errors are flagged outside a
+    frame-typed function signature when the receiver schema is statically known
+    (module top level, ``if __name__`` guard, frame-untyped functions), while
+    open / unknown receivers stay silent."""
+
+    HEADER = textwrap.dedent(
+        """
+        import polars as pl
+        import pandera.polars as pa
+        from pandera.typing.polars import DataFrame
+
+
+        class KV(pa.DataFrameModel):
+            k: str
+            v: float
+
+            class Config:
+                strict = True
+
+
+        class Loose(pa.DataFrameModel):
+            k: str
+
+
+        def get_kv() -> DataFrame[KV]:
+            return pl.DataFrame({"k": ["a"], "v": [1.0]})
+
+
+        def get_loose() -> DataFrame[Loose]:
+            return pl.DataFrame({"k": ["a"]})
+        """
+    )
+
+    def _named(self, results):
+        return {r.name: r for r in results}
+
+    def test_module_top_level_missing_column_flagged(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            src = get_kv()
+            boom = src.select(pl.col("nope_module"))
+            """
+        )
+        by_name = self._named(analyze_source(source))
+        assert "<module>" in by_name
+        assert any("nope_module" in e for e in by_name["<module>"].errors)
+
+    def test_if_name_guard_missing_column_flagged(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            src = get_kv()
+
+            if __name__ == "__main__":
+                boom = src.select(pl.col("nope_guard"))
+            """
+        )
+        by_name = self._named(analyze_source(source))
+        assert "<module>" in by_name
+        assert any("nope_guard" in e for e in by_name["<module>"].errors)
+
+    def test_frame_untyped_function_missing_column_flagged(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            def main() -> None:
+                df = get_kv()
+                boom = df.select(pl.col("nope_main"))
+            """
+        )
+        by_name = self._named(analyze_source(source))
+        assert "main" in by_name
+        assert any("nope_main" in e for e in by_name["main"].errors)
+
+    def test_valid_reference_on_known_frame_is_silent(self):
+        source = self.HEADER + textwrap.dedent(
+            """
+            src = get_kv()
+            fine = src.select(pl.col("k"), pl.col("v"))
+            """
+        )
+        by_name = self._named(analyze_source(source))
+        # No <module> entry is produced when nothing flags.
+        assert "<module>" not in by_name
+
+    def test_open_frame_missing_column_stays_silent(self):
+        """A non-strict schema's call result is an OPEN frame: a 'missing'
+        reference is not provable, so it must NOT be flagged (soundness)."""
+        source = self.HEADER + textwrap.dedent(
+            """
+            loose = get_loose()
+            maybe = loose.select(pl.col("not_declared"))
+            """
+        )
+        by_name = self._named(analyze_source(source))
+        assert "<module>" not in by_name
+
+    def test_unpinnable_local_stays_silent(self):
+        """A local bound from an unknown call has no static schema — silent."""
+        source = self.HEADER + textwrap.dedent(
+            """
+            mystery = some_unknown_loader()
+            anything = mystery.select(pl.col("whatever"))
+            """
+        )
+        by_name = self._named(analyze_source(source))
+        assert "<module>" not in by_name
+
+    def test_typed_function_not_double_reported(self):
+        """The module pass must not re-analyze typed function bodies (no
+        spilling into nested defs)."""
+        source = self.HEADER + textwrap.dedent(
+            """
+            def transform(df: DataFrame[KV]) -> DataFrame[KV]:
+                return df.select(pl.col("nope_typed"), pl.col("k"), pl.col("v"))
+
+            src = get_kv()
+            ok = src.select(pl.col("k"), pl.col("v"))
+            """
+        )
+        results = analyze_source(source)
+        nope_typed_hits = [r.name for r in results if any("nope_typed" in e for e in r.errors)]
+        # Reported exactly once, under the typed function — not also <module>.
+        assert nope_typed_hits == ["transform"]
+
+    def test_mutually_recursive_untyped_helpers_do_not_recurse_forever(self):
+        """The out-of-function passes inline untyped calls to infer return
+        types; a mutually recursive untyped pair must not blow the stack
+        (recursion guard on FunctionRegistry)."""
+        source = textwrap.dedent(
+            """
+            import polars as pl
+
+
+            def ping(x):
+                return pong(x)
+
+
+            def pong(x):
+                return ping(x)
+
+
+            def main() -> None:
+                y = ping(1)
+            """
+        )
+        # Must simply return without raising RecursionError.
+        results = analyze_source(source)
+        assert isinstance(results, list)

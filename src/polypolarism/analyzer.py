@@ -2079,6 +2079,14 @@ class FunctionRegistry:
     """Registry of all functions in a file."""
 
     functions: dict[str, FunctionInfo] = field(default_factory=dict)
+    # Names of untyped functions whose body is currently being inlined by
+    # ``_analyze_untyped_function``. Shared across the nested body analyzers
+    # (they all carry the same registry) so a directly or mutually recursive
+    # untyped helper is detected and its return type left uninferable instead
+    # of recursing without bound. Pre-existing latent risk, surfaced once the
+    # out-of-function passes (issue #110) start inlining from module / main
+    # scopes in files full of untyped mutually-recursive helpers.
+    analyzing: set[str] = field(default_factory=set)
 
     def register(self, info: FunctionInfo) -> None:
         """Register a function."""
@@ -5023,6 +5031,27 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
     def visit_AsyncWith(self, node: ast.AsyncWith) -> None:
         self._visit_with_narrowing_disabled(node)
 
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        """Do not descend into a nested function definition.
+
+        Nested ``def`` / ``async def`` (and class) bodies are discovered and
+        analyzed independently by ``analyze_source`` (issue #99), each under
+        its own parameter/seed environment. Recursing into them from the
+        enclosing scope's pass would analyze them under the WRONG variable
+        bindings and double-report. The no-op also bounds the new
+        out-of-function passes (issue #110): driving a body analyzer over a
+        module's top-level statements (or a frame-untyped function body) must
+        not spill into the functions and classes defined there."""
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        # Same rationale as visit_FunctionDef.
+        pass
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        # Same rationale as visit_FunctionDef: class bodies and their methods
+        # are analyzed independently; the enclosing scope's pass stops here.
+        pass
+
     def visit_Return(self, node: ast.Return) -> None:
         """Handle return statements.
 
@@ -6148,28 +6177,38 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         if cache_key in func_info.inferred_returns:
             return func_info.inferred_returns[cache_key]
 
-        # Build input types from function parameters and provided arg types
-        input_types: dict[str, FrameType] = {}
-        func_node = func_info.node
-        for idx, arg in enumerate(func_node.args.args):
-            if idx < len(arg_types):
-                arg_type = arg_types[idx]
-                if arg_type is not None:
-                    input_types[arg.arg] = arg_type
+        # Recursion guard: a directly or mutually recursive untyped helper
+        # would otherwise re-enter its own body forever (the result cache is
+        # only populated AFTER analysis). A recursive return type can't be
+        # recovered by inlining anyway, so leave it uninferable (None).
+        if func_info.name in self.registry.analyzing:
+            return None
+        self.registry.analyzing.add(func_info.name)
+        try:
+            # Build input types from function parameters and provided arg types
+            input_types: dict[str, FrameType] = {}
+            func_node = func_info.node
+            for idx, arg in enumerate(func_node.args.args):
+                if idx < len(arg_types):
+                    arg_type = arg_types[idx]
+                    if arg_type is not None:
+                        input_types[arg.arg] = arg_type
 
-        # Analyze the function body — warnings bubble up to the calling
-        # body analyzer so the user sees them on the outer function.
-        errors: list[str] = []
-        body_analyzer = FunctionBodyAnalyzer(
-            input_types,
-            errors,
-            self.registry,
-            self.schema_registry,
-            warnings=self.warnings,
-            module_consts=self.module_consts,
-        )
-        for stmt in func_node.body:
-            body_analyzer.visit(stmt)
+            # Analyze the function body — warnings bubble up to the calling
+            # body analyzer so the user sees them on the outer function.
+            errors: list[str] = []
+            body_analyzer = FunctionBodyAnalyzer(
+                input_types,
+                errors,
+                self.registry,
+                self.schema_registry,
+                warnings=self.warnings,
+                module_consts=self.module_consts,
+            )
+            for stmt in func_node.body:
+                body_analyzer.visit(stmt)
+        finally:
+            self.registry.analyzing.discard(func_info.name)
 
         # Cache and return the result
         result = body_analyzer.return_type
@@ -8525,6 +8564,11 @@ def analyze_source(
     func_nodes = module_funcs + [m for _, m in class_methods]
     source_lines = source.splitlines()
     results: list[FunctionAnalysis] = []
+    # Module-level functions skipped by the signature gate (frame-untyped:
+    # ``def main() -> None:`` / ``def helper():``). Their bodies are still
+    # analyzed for the provable-error subset (issue #110) once the registries
+    # are built, but only when they seed a local from a statically-known frame.
+    untyped_module_funcs: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
     for func_node in func_nodes:
         analysis = analyze_function(
             func_node,
@@ -8543,5 +8587,169 @@ def analyze_source(
             )
             analysis.suppressed_codes = parse_type_ignore(def_line)
             results.append(analysis)
+        elif func_to_class.get(id(func_node)) is None:
+            # ``analyze_function`` returned None ⇒ no frame-typed signature.
+            # Only module-level functions/closures are covered here; class
+            # methods stay out of scope (``self``/``cls`` and class-body
+            # bindings are deferred — see docs/backlog.md).
+            untyped_module_funcs.append(func_node)
+
+    # Pass 4 (issue #110): out-of-function scopes. The same body analyzer that
+    # flags PLY001 / dtype misuse inside typed functions is run over additional
+    # scopes, seeded ONLY from provably-known frames (a typed same-module call's
+    # closed return, ``Schema.validate(...)``, or a ``pl.DataFrame`` literal).
+    # No new diagnostic codes — soundness comes for free from the analyzer:
+    # column-not-found fires only on a provably CLOSED frame, so an open /
+    # unknown receiver stays silent. Class bodies remain deferred.
+    results.extend(
+        _analyze_out_of_function_scopes(
+            tree,
+            untyped_module_funcs,
+            registry,
+            schema_registry,
+            class_registry,
+            module_consts,
+            source_lines,
+        )
+    )
 
     return results
+
+
+def _analyze_out_of_function_scopes(
+    tree: ast.Module,
+    untyped_module_funcs: list[ast.FunctionDef | ast.AsyncFunctionDef],
+    registry: FunctionRegistry,
+    schema_registry: SchemaRegistry,
+    class_registry: ClassRegistry,
+    module_consts: dict[str, str | list[str] | int],
+    source_lines: list[str],
+) -> list[FunctionAnalysis]:
+    """Analyze statements outside any frame-typed function signature (issue #110).
+
+    Two scopes are covered, both producing ``declared_return_type=None``
+    ``FunctionAnalysis`` entries (so the checker just surfaces the body
+    analyzer's errors — no return-type contract is claimed):
+
+    * ``<module>`` — module top-level statements plus the top-level compound
+      blocks that contain them (``if __name__ == "__main__":`` and any other
+      top-level ``if`` / ``for`` / ``with`` / ``try``). One body analyzer is
+      driven over ``tree.body`` in source order, so a name bound from a typed
+      call (``src = get_kv()``) is visible to the later statements and the
+      guard block, exactly like the module-level const machinery.
+
+    * one entry per frame-untyped module-level function (``def main() -> None:``)
+      whose body assigns locals from typed calls / literals — analyzed with an
+      empty seed so only statically-known receivers are checked.
+
+    **Errors only.** These scopes surface the PROVABLE-runtime-error subset the
+    issue targets (missing-column references, dtype misuse — all PLY codes the
+    in-function analyzer already emits on a CLOSED frame). Advisory PLW warnings
+    (unknown-function-return, unmodeled-method, ...) are intentionally NOT
+    propagated from here: they are imprecision notes, not provable failures, and
+    raising them on every file's top-level driver statements would be noise
+    beyond the issue's scope. Soundness is inherited from the analyzer — a
+    missing-column error fires only on a provably closed frame, so an open /
+    unknown receiver stays silent.
+
+    Class bodies and class methods are intentionally out of scope (deferred —
+    see docs/backlog.md C-15). The no-op ``visit_FunctionDef`` /
+    ``visit_ClassDef`` on ``FunctionBodyAnalyzer`` keep the module pass from
+    spilling into nested definitions, which are analyzed independently.
+    """
+    extra: list[FunctionAnalysis] = []
+
+    # --- module top level + top-level compound blocks --------------------
+    module_errors: list[str] = []
+    module_analyzer = FunctionBodyAnalyzer(
+        {},
+        module_errors,
+        registry,
+        schema_registry,
+        warnings=[],  # advisory warnings are dropped (see docstring)
+        class_registry=class_registry,
+        current_class_name=None,
+        module_consts=module_consts,
+    )
+    for stmt in tree.body:
+        # Nested defs/classes are skipped by the analyzer's no-op visitors,
+        # but import / assignment / expression / compound statements all flow
+        # through, building the top-level environment as they go.
+        module_analyzer.visit(stmt)
+
+    if module_errors:
+        # Anchor the synthetic entry at the first executable top-level
+        # statement — skipping the module docstring, ``__future__`` /
+        # ordinary imports, and the def/class definitions (reported under
+        # their own names) — so the CLI's "(line N)" points into the module
+        # pipeline rather than the file header.
+        anchor_line = 1
+        for index, stmt in enumerate(tree.body):
+            if isinstance(
+                stmt,
+                (
+                    ast.Import,
+                    ast.ImportFrom,
+                    ast.FunctionDef,
+                    ast.AsyncFunctionDef,
+                    ast.ClassDef,
+                ),
+            ):
+                continue
+            # Leading bare string expression = module docstring.
+            if (
+                index == 0
+                and isinstance(stmt, ast.Expr)
+                and isinstance(stmt.value, ast.Constant)
+                and isinstance(stmt.value.value, str)
+            ):
+                continue
+            anchor_line = stmt.lineno
+            break
+        extra.append(
+            FunctionAnalysis(
+                name="<module>",
+                lineno=anchor_line,
+                end_lineno=tree.body[-1].end_lineno or anchor_line if tree.body else anchor_line,
+                input_types={},
+                declared_return_type=None,
+                inferred_return_type=None,
+                errors=module_errors,
+            )
+        )
+
+    # --- frame-untyped module-level functions ----------------------------
+    for func_node in untyped_module_funcs:
+        fn_errors: list[str] = []
+        fn_analyzer = FunctionBodyAnalyzer(
+            {},
+            fn_errors,
+            registry,
+            schema_registry,
+            warnings=[],  # advisory warnings are dropped (see docstring)
+            class_registry=class_registry,
+            current_class_name=None,
+            module_consts=module_consts,
+        )
+        for stmt in func_node.body:
+            fn_analyzer.visit(stmt)
+        if fn_errors:
+            def_line = (
+                source_lines[func_node.lineno - 1]
+                if 0 < func_node.lineno <= len(source_lines)
+                else ""
+            )
+            extra.append(
+                FunctionAnalysis(
+                    name=func_node.name,
+                    lineno=func_node.lineno,
+                    end_lineno=func_node.end_lineno or func_node.lineno,
+                    input_types={},
+                    declared_return_type=None,
+                    inferred_return_type=fn_analyzer.return_type,
+                    errors=fn_errors,
+                    suppressed_codes=parse_type_ignore(def_line),
+                )
+            )
+
+    return extra

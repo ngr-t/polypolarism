@@ -75,8 +75,10 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["B011"]
-# Fixtures simulate external code with deliberately undefined names.
-"tests/fixtures/**/*.py" = ["F821"]
+# Fixtures simulate external code with deliberately undefined names (F821)
+# and driver/demo statements that bind a result without using it (F841) —
+# the bound name is the analysis subject, not a value the fixture consumes.
+"tests/fixtures/**/*.py" = ["F821", "F841"]
 
 [tool.pyright]
 include = ["src", "tests"]
