@@ -251,10 +251,18 @@ Status legend: `[ ]` open / `[x]` done / `[-]` deliberately deferred.
      `_check_row_preservation` skolemizes the row variable (sentinel column)
      and flags a return point that provably drops it. Static-only — the
      invalid fixture is runtime-SKIPped (caller-relative property).
-  5. [x] *Row algebra + relations — partial.* Done 2026-06-17 (`b2e5a69`):
-     per-parameter row variables `@rowpoly(a="R1", b="R2")` (multi-frame
-     threading + per-variable preservation, so a join helper preserves both
-     sides), plus threading-law property tests in `test_properties.py`.
+  5. [x] *Row algebra + relations — done / item closed.* Per-parameter row
+     variables `@rowpoly(a="R1", b="R2")` (`b2e5a69`), threading-law property
+     tests, duplicate-output detection (PLY015, `47ad73c`), and the
+     `@rowpoly("R", drops=<selector>)` declared-restriction surface
+     (`293320c`). The "polymorphic lacks / disjointness" residual is **closed
+     per ADR-0009**: the practical core (monomorphic `absent`, strict-as-
+     exact-columns, rename/select collision PLY015, join `_right` suffix
+     modeling, `drops=`) is shipped; the definition-time `R1 # R2`
+     disjointness diagnostic is **permanently deferred as unsound** (false-
+     positive on every join helper's key); the `@rowpoly`-join colliding-
+     extras suffix precision is **deferred as niche**; a polymorphic
+     "open-but-lacks-X" annotation has **no consumer**. See ADR-0009.
      **Tier-5 remainder, 2026-06-17:**
      - [x] *Row add/drop/rename tracking — no false positive.* Audited
        whether `_check_row_preservation` (PLY043) wrongly flags
