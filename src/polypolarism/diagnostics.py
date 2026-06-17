@@ -127,10 +127,16 @@ class TaggedError(str):
 
     ``column`` / ``schema`` are ``None`` when not applicable; the JSON layer
     omits absent fields and never invents one a code doesn't have.
+
+    ``fix`` is an optional structured quick-fix payload (Batch B, Request 2):
+    the PLY042 "declare the column on the schema" object
+    (``{schema, column, schema_file, schema_insert_line, suggested_dtype?}``).
+    ``None`` when no sound fix could be built; the JSON layer omits it.
     """
 
     column: str | None
     schema: str | None
+    fix: dict | None
 
 
 def tagged_error(
@@ -139,16 +145,18 @@ def tagged_error(
     *,
     column: str | None = None,
     schema: str | None = None,
+    fix: dict | None = None,
 ) -> TaggedError:
     """Build a :class:`TaggedError`: ``tag(code, message)`` text plus fields.
 
-    The text is identical to ``tag(code, message)``; ``column`` / ``schema``
-    are attached for structured JSON output and left unset (``None``) when
-    not supplied.
+    The text is identical to ``tag(code, message)``; ``column`` / ``schema`` /
+    ``fix`` are attached for structured JSON output and left unset (``None``)
+    when not supplied.
     """
     err = TaggedError(tag(code, message))
     err.column = column
     err.schema = schema
+    err.fix = fix
     return err
 
 

@@ -849,3 +849,84 @@ class TestUnresolvedObjectSchemaDerivations:
         )
         schema = registry.get("s")
         assert schema is not None and schema.unresolved
+
+
+class TestSchemaSourceProvenance:
+    """Batch B, Request 2: each Schema records the absolute path of the file
+    that DEFINES its class (``source_file``) and the class-header line
+    (``header_line``), for the PLY042 "declare the column" quick fix.
+
+    ``collect_schemas`` takes an optional ``source_file``; the cross-file
+    import path (``collect_schemas_with_imports``) populates each schema with
+    the path of the module it was actually parsed from."""
+
+    def test_collect_schemas_records_source_file_and_header(self, tmp_path):
+        import ast as _ast
+
+        from polypolarism.pandera_schema import collect_schemas
+
+        src = textwrap.dedent(
+            """
+            import pandera.polars as pa
+
+            class S(pa.DataFrameModel):
+                id: int
+                name: str
+            """
+        ).lstrip("\n")
+        path = tmp_path / "mod.py"
+        path.write_text(src)
+        registry = collect_schemas(_ast.parse(src), source_file=path)
+        schema = registry.get("S")
+        assert schema is not None
+        assert schema.source_file == str(path)
+        # ``class S`` is on line 3 (1-indexed).
+        assert schema.header_line == 3
+
+    def test_no_source_file_leaves_provenance_none(self):
+        registry = _collect(
+            """
+            import pandera.polars as pa
+
+            class S(pa.DataFrameModel):
+                id: int
+            """
+        )
+        schema = registry.get("S")
+        assert schema is not None
+        assert schema.source_file is None
+
+    def test_cross_file_import_records_defining_module(self, tmp_path):
+        import ast as _ast
+
+        from polypolarism.pandera_schema import collect_schemas_with_imports
+
+        (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\n")
+        schemas_py = tmp_path / "schemas.py"
+        schemas_py.write_text(
+            textwrap.dedent(
+                """
+                import pandera.polars as pa
+
+
+                class Users(pa.DataFrameModel):
+                    user_id: int
+
+                    class Config:
+                        strict = False
+                """
+            ).lstrip("\n")
+        )
+        app_py = tmp_path / "app.py"
+        app_src = textwrap.dedent(
+            """
+            from pandera.typing.polars import DataFrame
+            from schemas import Users
+            """
+        ).lstrip("\n")
+        app_py.write_text(app_src)
+        registry = collect_schemas_with_imports(_ast.parse(app_src), app_py)
+        users = registry.get("Users")
+        assert users is not None
+        # The defining file is schemas.py, NOT app.py.
+        assert users.source_file == str(schemas_py.resolve())

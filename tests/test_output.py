@@ -431,6 +431,162 @@ class TestPly040RetypeFixEndToEnd:
         assert rng["line"] == 12
 
 
+class TestPly042FixObject:
+    """Batch B, Request 2: a PLY042 diagnostic carries a structured ``fix``
+    object so the extension can offer a "declare the column on the schema"
+    quick fix. Additive: ``message`` byte-identical, ``fix`` omitted when the
+    schema file is unknown."""
+
+    def _diag(self, error, *, line=10):
+        result = CheckResult(function_name="process", passed=False, errors=[error])
+        output = format_json([result], "test.py", function_lines={"process": line})
+        diagnostics = json.loads(output)["diagnostics"]
+        assert len(diagnostics) == 1
+        return diagnostics[0]
+
+    def test_fix_object_present_when_carried(self):
+        fix = {
+            "schema": "InputSchema",
+            "column": "amount",
+            "schema_file": "/abs/path.py",
+            "schema_insert_line": 16,
+            "suggested_dtype": "Float64",
+        }
+        error = tagged_error(
+            "PLY042",
+            "column 'amount' is not declared in schema 'InputSchema' — ...",
+            column="amount",
+            schema="InputSchema",
+            fix=fix,
+        )
+        diag = self._diag(error)
+        assert diag["code"] == "PLY042"
+        assert diag["fix"] == fix
+        # The message is byte-identical to the tagged text.
+        assert diag["message"] == str(error)
+
+    def test_fix_omitted_when_not_carried(self):
+        # A PLY042 without a fix (unknown schema file) omits the key.
+        error = tagged_error(
+            "PLY042",
+            "column 'amount' is not declared in schema 'InputSchema' — ...",
+            column="amount",
+            schema="InputSchema",
+        )
+        diag = self._diag(error)
+        assert "fix" not in diag
+
+    def test_non_ply042_has_no_fix(self):
+        error = TypeDifference("c", Int64(), Float64())
+        diag = self._diag(error)
+        assert "fix" not in diag
+
+
+class TestPly042FixObjectEndToEnd:
+    """Request 2 from real analysis: the ``fix`` object is populated with line
+    numbers matching the real schema source — same-file AND cross-file."""
+
+    def test_same_file_fix_points_at_schema(self, tmp_path):
+        from polypolarism.cli import check_file
+
+        (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\n")
+        app = tmp_path / "app.py"
+        app.write_text(
+            textwrap.dedent(
+                """
+                import polars as pl
+                import pandera.polars as pa
+                from pandera.typing.polars import DataFrame
+
+
+                class InputSchema(pa.DataFrameModel):
+                    a: int
+
+                    class Config:
+                        strict = False
+
+
+                def f(df: DataFrame[InputSchema]) -> DataFrame[InputSchema]:
+                    return df.with_columns(b=pl.col("amount") + 1)
+                """
+            ).lstrip("\n")
+        )
+        results = check_file(app)
+        diags = _diagnostics_from_results(results, app)
+        ply042 = [d for d in diags if d.get("code") == "PLY042"]
+        assert ply042, diags
+        fix = ply042[0]["fix"]
+        assert fix["schema"] == "InputSchema"
+        assert fix["column"] == "amount"
+        assert fix["schema_file"] == str(app.resolve())
+        # The only field ``a: int`` is on line 7; insert after it → line 8.
+        assert fix["schema_insert_line"] == 8
+        # ``amount`` has no statically known dtype → suggested_dtype omitted.
+        assert "suggested_dtype" not in fix
+        # Message unchanged (still names the schema).
+        assert "InputSchema" in ply042[0]["message"]
+
+    def test_cross_file_fix_points_at_other_module(self, tmp_path):
+        from polypolarism.cli import check_file
+
+        (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\n")
+        schemas_py = tmp_path / "schemas.py"
+        schemas_py.write_text(
+            textwrap.dedent(
+                """
+                import pandera.polars as pa
+
+
+                class InputSchema(pa.DataFrameModel):
+                    a: int
+
+                    class Config:
+                        strict = False
+                """
+            ).lstrip("\n")
+        )
+        app = tmp_path / "app.py"
+        app.write_text(
+            textwrap.dedent(
+                """
+                import polars as pl
+                from pandera.typing.polars import DataFrame
+                from schemas import InputSchema
+
+
+                def f(df: DataFrame[InputSchema]) -> DataFrame[InputSchema]:
+                    return df.with_columns(b=pl.col("amount") + 1)
+                """
+            ).lstrip("\n")
+        )
+        results = check_file(app)
+        diags = _diagnostics_from_results(results, app)
+        ply042 = [d for d in diags if d.get("code") == "PLY042"]
+        assert ply042, diags
+        fix = ply042[0]["fix"]
+        assert fix["schema"] == "InputSchema"
+        assert fix["column"] == "amount"
+        # The defining file is schemas.py, NOT app.py.
+        assert fix["schema_file"] == str(schemas_py.resolve())
+        # ``a: int`` is on line 5 of schemas.py; insert after → line 6.
+        assert fix["schema_insert_line"] == 6
+
+
+def _diagnostics_from_results(results, file_path):
+    from polypolarism.analyzer import analyze_source
+
+    analyses = analyze_source(file_path.read_text(), file_path=file_path)
+    function_lines = {a.name: a.lineno for a in analyses}
+    function_end_lines = {a.name: a.end_lineno for a in analyses}
+    output = format_json(
+        results,
+        str(file_path),
+        function_lines=function_lines,
+        function_end_lines=function_end_lines,
+    )
+    return json.loads(output)["diagnostics"]
+
+
 class TestStructuredFieldsEndToEnd:
     """Structured fields populated from real analysis (no hand-built errors)."""
 

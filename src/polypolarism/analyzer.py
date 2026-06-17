@@ -1189,28 +1189,92 @@ def _missing_column_diag(frame: FrameType, name: str) -> tuple[str, str]:
     )
 
 
-def _missing_column_tagged(frame: FrameType, name: str) -> TaggedError:
+def _ply042_fix(
+    schema_name: str,
+    column: str,
+    schema_registry: SchemaRegistry | None,
+    suggested_dtype: str | None = None,
+) -> dict | None:
+    """Build the PLY042 "declare the column on the schema" quick-fix object
+    (Batch B, Request 2), or ``None`` when it can't be built soundly.
+
+    Shape: ``{schema, column, schema_file, schema_insert_line,
+    suggested_dtype?}``. ``schema_file`` is the absolute path of the file that
+    DEFINES the schema (a different module for an imported schema) — sourced
+    from ``Schema.source_file``; the whole object is OMITTED when that is
+    unknown (absence = "no quick fix", never a guessed path).
+    ``schema_insert_line`` is the 1-indexed line to insert a new field: after
+    the last existing field (max ``field_spans`` end_line) or, when the schema
+    has no fields, after the class header. ``suggested_dtype`` is included only
+    when a statically-known inferred dtype NAME was supplied."""
+    if schema_registry is None:
+        return None
+    schema = schema_registry.get(schema_name)
+    if schema is None or schema.source_file is None:
+        return None
+
+    insert_line: int | None = None
+    for span in schema.field_spans.values():
+        end = span.end_line if span.end_line is not None else span.line
+        if insert_line is None or end > insert_line:
+            insert_line = end
+    if insert_line is None:
+        # No declared fields — insert right after the class header.
+        insert_line = schema.header_line
+    if insert_line is None:
+        return None
+    insert_line += 1
+
+    fix: dict = {
+        "schema": schema_name,
+        "column": column,
+        "schema_file": schema.source_file,
+        "schema_insert_line": insert_line,
+    }
+    if suggested_dtype is not None:
+        fix["suggested_dtype"] = suggested_dtype
+    return fix
+
+
+def _missing_column_tagged(
+    frame: FrameType,
+    name: str,
+    schema_registry: SchemaRegistry | None = None,
+) -> TaggedError:
     """:func:`_missing_column_diag` as a structured :class:`TaggedError`.
 
     Same byte-for-byte text as ``tag(*_missing_column_diag(frame, name))``;
     additionally carries the looked-up ``column`` and, for the PLY042 island
     case, the non-strict ``schema`` name (sourced from ``nonstrict_schema``,
-    not parsed from the message)."""
+    not parsed from the message) plus the structured ``fix`` quick-fix object
+    (Batch B, Request 2 — only when ``schema_registry`` resolves the defining
+    file)."""
     code, msg = _missing_column_diag(frame, name)
     schema = frame.nonstrict_schema if code == PLY042 else None
-    return tagged_error(code, msg, column=name, schema=schema)
+    fix = None
+    if code == PLY042 and schema is not None:
+        fix = _ply042_fix(schema, name, schema_registry)
+    return tagged_error(code, msg, column=name, schema=schema, fix=fix)
 
 
-def _column_not_found_tagged(e: ColumnNotFoundError) -> TaggedError:
+def _column_not_found_tagged(
+    e: ColumnNotFoundError,
+    schema_registry: SchemaRegistry | None = None,
+) -> TaggedError:
     """Convert a :class:`ColumnNotFoundError` into a structured
     :class:`TaggedError`, preserving the message text exactly while exposing
-    the exception's ``column`` / ``schema`` for JSON consumers."""
-    return tagged_error(
-        getattr(e, "code", PLY001),
-        str(e),
-        column=getattr(e, "column", None),
-        schema=getattr(e, "schema", None),
-    )
+    the exception's ``column`` / ``schema`` for JSON consumers.
+
+    For the PLY042 island case the structured ``fix`` quick-fix object is
+    attached too (Batch B, Request 2 — only when ``schema_registry`` resolves
+    the defining file)."""
+    code = getattr(e, "code", PLY001)
+    column = getattr(e, "column", None)
+    schema = getattr(e, "schema", None)
+    fix = None
+    if code == PLY042 and schema is not None and column is not None:
+        fix = _ply042_fix(schema, column, schema_registry)
+    return tagged_error(code, str(e), column=column, schema=schema, fix=fix)
 
 
 def _call_result_frame(declared: FrameType | None, source_name: str) -> FrameType | None:
@@ -2729,9 +2793,14 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         registry: FunctionRegistry | None = None,
         element_dtype: DataType | None = None,
         int_consts: Mapping[str, int] | None = None,
+        schema_registry: SchemaRegistry | None = None,
     ):
         self.current_frame = current_frame
         self.errors: list[str] = []
+        # Pandera schema registry, passed in by the body analyzer so a PLY042
+        # island column-not-found can build its quick-fix object (Batch B,
+        # Request 2). ``None`` when standalone — the fix is simply omitted.
+        self.schema_registry = schema_registry
         # Shared advisory channel (passed in by the body analyzer so warnings
         # bubble up to FunctionAnalysis). New list when used standalone.
         self.warnings: list[str] = warnings if warnings is not None else []
@@ -3441,7 +3510,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 output_name = alias if alias else col_name
                 return output_name, col_type
             except ColumnNotFoundError as e:
-                self.errors.append(_column_not_found_tagged(e))
+                self.errors.append(_column_not_found_tagged(e, self.schema_registry))
                 return None, None
 
         # Check for pl.lit(value)
@@ -3511,7 +3580,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 try:
                     fields[col] = infer_col(col, self.current_frame)
                 except ColumnNotFoundError as e:
-                    self.errors.append(_column_not_found_tagged(e))
+                    self.errors.append(_column_not_found_tagged(e, self.schema_registry))
             # Keyword args name the fields: ``pl.struct(x=expr)`` → field
             # ``x`` (issue #47). The value can be any expression; an
             # un-inferable one keeps the field as Unknown rather than
@@ -3553,7 +3622,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 try:
                     map_groups_fallback = infer_col(first_col, self.current_frame)
                 except ColumnNotFoundError as e:
-                    self.errors.append(_column_not_found_tagged(e))
+                    self.errors.append(_column_not_found_tagged(e, self.schema_registry))
             self.warnings.append(
                 tag(
                     PLW001,
@@ -3574,7 +3643,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 try:
                     col_type = infer_col(col, self.current_frame)
                 except ColumnNotFoundError as e:
-                    self.errors.append(_column_not_found_tagged(e))
+                    self.errors.append(_column_not_found_tagged(e, self.schema_registry))
                     return col, None  # type: ignore[return-value]
                 try:
                     result_type = infer_agg_result_type(
@@ -3681,7 +3750,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             try:
                 return s, infer_col(s, self.current_frame)
             except ColumnNotFoundError as e:
-                self.errors.append(_column_not_found_tagged(e))
+                self.errors.append(_column_not_found_tagged(e, self.schema_registry))
                 return s, None
         return self.analyze_select_expr(node)
 
@@ -3703,6 +3772,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             registry=self.registry,
             element_dtype=element_dtype,
             int_consts=self.int_consts,
+            schema_registry=self.schema_registry,
         )
         _, body_dtype = child.analyze_select_expr(call_node.args[0])
         self.errors.extend(child.errors)
@@ -3970,7 +4040,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             try:
                 infer_col(s, self.current_frame)
             except ColumnNotFoundError as e:
-                self.errors.append(_column_not_found_tagged(e))
+                self.errors.append(_column_not_found_tagged(e, self.schema_registry))
             return
         if isinstance(node, (ast.List, ast.Tuple)):
             for elt in node.elts:
@@ -6738,6 +6808,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             warnings=self.warnings,
             registry=self.registry,
             int_consts=self._int_consts(),
+            schema_registry=self.schema_registry,
         )
         agg_exprs: list[AggExpr] = []
         # Per-output producing-expression spans (issue #110): the agg keyword
@@ -6951,7 +7022,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             if input_frame.nonstrict_schema is not None:
                 # OPEN ISLAND (issues #83/#88): undeclared lookups stay
                 # flagged even though the rest keeps subtyping lenient.
-                self.errors.append(_missing_column_tagged(input_frame, name))
+                self.errors.append(_missing_column_tagged(input_frame, name, self.schema_registry))
                 return None
             # Backward narrowing (ADR-0006 amendment): the assumption
             # "this select succeeded" pins the column INTO the open frame
@@ -6960,7 +7031,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             input_frame.columns[name] = ColumnSpec(dtype=Unknown())
             result_columns[output_name or name] = Unknown()
             return output_name or name
-        self.errors.append(_missing_column_tagged(input_frame, name))
+        self.errors.append(_missing_column_tagged(input_frame, name, self.schema_registry))
         return None
 
     def _track_output_name(self, name: str, seen: set[str], call_name: str) -> None:
@@ -7010,6 +7081,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             warnings=self.warnings,
             registry=self.registry,
             int_consts=self._int_consts(),
+            schema_registry=self.schema_registry,
         )
         result_columns: dict[str, DataType] = {}
         # Per-column producing-expression spans (issue #110) — see
@@ -7051,7 +7123,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                             result_columns[c] = Unknown()
                             self._track_output_name(c, seen_outputs, "select")
                             continue
-                        self.errors.append(_missing_column_tagged(input_frame, c))
+                        self.errors.append(
+                            _missing_column_tagged(input_frame, c, self.schema_registry)
+                        )
                         continue
                     result_columns[c] = spec.dtype
                     self._track_output_name(c, seen_outputs, "select")
@@ -7164,6 +7238,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             warnings=self.warnings,
             registry=self.registry,
             int_consts=self._int_consts(),
+            schema_registry=self.schema_registry,
         )
         # Output names produced by THIS call — a repeat within the call is a
         # runtime duplicate-name error (issue #36). Collision with a
@@ -7192,7 +7267,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 # missing name may exist among the unknown extras — no error.
                 for c in plural:
                     if c not in input_frame.columns and input_frame.rest is None:
-                        self.errors.append(_missing_column_tagged(input_frame, c))
+                        self.errors.append(
+                            _missing_column_tagged(input_frame, c, self.schema_registry)
+                        )
                         continue
                     self._track_output_name(c, seen_outputs, "with_columns")
                 continue
@@ -7208,7 +7285,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 assert names is not None
                 for c in names:
                     if c not in input_frame.columns and input_frame.rest is None:
-                        self.errors.append(_missing_column_tagged(input_frame, c))
+                        self.errors.append(
+                            _missing_column_tagged(input_frame, c, self.schema_registry)
+                        )
                         continue
                     self._track_output_name(c, seen_outputs, "with_columns")
                 continue
@@ -7252,7 +7331,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 elif input_frame.rest is not None:
                     result_columns[kw.arg] = Unknown()
                 else:
-                    self.errors.append(_missing_column_tagged(input_frame, col_ref))
+                    self.errors.append(
+                        _missing_column_tagged(input_frame, col_ref, self.schema_registry)
+                    )
                     continue
                 column_spans[kw.arg] = Span.from_node(kw.value)
                 self._track_output_name(kw.arg, seen_outputs, "with_columns")
@@ -8080,6 +8161,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             warnings=self.warnings,
             registry=self.registry,
             int_consts=self._int_consts(),
+            schema_registry=self.schema_registry,
         )
         for arg in node.args:
             dtype: DataType | None
@@ -8129,6 +8211,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             warnings=self.warnings,
             registry=self.registry,
             int_consts=self._int_consts(),
+            schema_registry=self.schema_registry,
         )
         for key_node in key_nodes:
             if _resolve_selector(key_node, input_frame) is not None:

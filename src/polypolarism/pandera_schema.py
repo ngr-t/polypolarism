@@ -73,6 +73,15 @@ class Schema:
     # threaded into the bound frame's ``column_spans`` side map. Inherited
     # fields keep the parent's span until a child re-declares the field.
     field_spans: dict[str, Span] = field(default_factory=dict)
+    # Absolute path (as ``str``) of the file that DEFINES this schema's class,
+    # and the 1-indexed line of the ``class`` header (Batch B, Request 2).
+    # Diagnostic provenance only — used to build the PLY042 "declare the
+    # column" quick fix's ``schema_file`` / ``schema_insert_line``. ``None``
+    # when the schema was parsed without a known source file (e.g.
+    # ``collect_schemas`` on a bare string). Set to the IMPORTED module's
+    # path on the cross-file path so an editor edits the right file.
+    source_file: str | None = None
+    header_line: int | None = None
 
     def to_frame_type(self) -> FrameType:
         # Checked-island semantics (issue #83, user-approved): a
@@ -221,6 +230,20 @@ def _import_statements(tree: ast.Module) -> list[ast.stmt]:
     return stmts
 
 
+def _resolve_source_file(source_file: Path | None) -> str | None:
+    """Absolute-path ``str`` of ``source_file``, or ``None`` when unset.
+
+    Resolution failures (a path that can't be ``.resolve()``-d) fall back to
+    the path's string form rather than dropping the provenance — a best-effort
+    absolute path is still useful to an editor."""
+    if source_file is None:
+        return None
+    try:
+        return str(source_file.resolve())
+    except OSError:
+        return str(source_file)
+
+
 def collect_schemas_with_imports(tree: ast.Module, file_path: Path) -> SchemaRegistry:
     """Like ``collect_schemas`` but also resolves project-local imports.
 
@@ -249,23 +272,32 @@ def collect_schemas_with_imports(tree: ast.Module, file_path: Path) -> SchemaReg
     rooted at them, aliased bases, and dotted ``mod.Schema`` bases) parse
     with the parent's fields merged exactly like the same-file path.
     """
-    registry = collect_schemas(tree)
+    registry = collect_schemas(tree, source_file=file_path)
     own_names = set(registry.schemas)
     visited: set[Path] = set()
     with contextlib.suppress(OSError):
         visited.add(file_path.resolve())
-    imported_trees: list[ast.Module] = []
+    imported_trees: list[tuple[ast.Module, Path]] = []
     _merge_imports(tree, file_path, registry, visited, imported_trees)
     _merge_module_imports(tree, file_path, registry)
     aliases = _collect_name_aliases(tree)
-    _collect_inherited_subclasses(tree, imported_trees, registry, own_names, aliases)
+    _collect_inherited_subclasses(
+        tree, imported_trees, registry, own_names, aliases, main_source_file=file_path
+    )
     return registry
 
 
-def collect_schemas(tree: ast.Module) -> SchemaRegistry:
-    """Walk a module AST and return the set of Pandera schemas defined at top level."""
+def collect_schemas(tree: ast.Module, source_file: Path | None = None) -> SchemaRegistry:
+    """Walk a module AST and return the set of Pandera schemas defined at top level.
+
+    ``source_file`` (when given) is recorded on each parsed schema as its
+    defining file (Batch B, Request 2) — used to build the PLY042 quick fix's
+    ``schema_file``. Resolved to an absolute path so the editor edits the
+    right file regardless of cwd.
+    """
     registry = SchemaRegistry()
     aliases = _collect_name_aliases(tree)
+    resolved_source = _resolve_source_file(source_file)
 
     candidate_names: set[str] = set()
     candidates: dict[str, ast.ClassDef] = {}
@@ -284,7 +316,9 @@ def collect_schemas(tree: ast.Module) -> SchemaRegistry:
 
     sorted_names = _topo_sort(candidates, aliases)
     for name in sorted_names:
-        registry.schemas[name] = _parse_schema(candidates[name], registry, aliases)
+        registry.schemas[name] = _parse_schema(
+            candidates[name], registry, aliases, source_file=resolved_source
+        )
 
     _collect_object_schemas(tree, registry)
     _scan_frame_aliases(tree, registry)
@@ -729,10 +763,15 @@ def _parse_schema(
     node: ast.ClassDef,
     registry: SchemaRegistry,
     aliases: dict[str, str] | None = None,
+    source_file: str | None = None,
 ) -> Schema:
-    """Parse a single ClassDef into a Schema, merging parent fields."""
+    """Parse a single ClassDef into a Schema, merging parent fields.
+
+    ``source_file`` (an absolute path ``str`` or ``None``) and the class
+    header line are recorded as PLY042 quick-fix provenance (Batch B,
+    Request 2)."""
     _aliases = aliases or {}
-    schema = Schema(name=node.name)
+    schema = Schema(name=node.name, source_file=source_file, header_line=node.lineno)
 
     parent_names: list[str] = []
     for base in node.bases:
@@ -989,14 +1028,16 @@ def _merge_imports(
     current_file: Path,
     registry: SchemaRegistry,
     visited: set[Path],
-    imported_trees: list[ast.Module] | None = None,
+    imported_trees: list[tuple[ast.Module, Path]] | None = None,
     sub_registries: dict[Path, SchemaRegistry | None] | None = None,
 ) -> None:
     """Recursively merge schemas from project-local imports into ``registry``.
 
     Each successfully parsed imported tree is appended to
-    ``imported_trees`` (when given) so the cross-file inheritance pass
-    (issue #76) can re-scan it against the fully merged registry.
+    ``imported_trees`` (when given) as a ``(tree, resolved_path)`` pair so the
+    cross-file inheritance pass (issue #76) can re-scan it against the fully
+    merged registry AND stamp newly-recognized subclasses with their defining
+    file (Batch B, Request 2).
     ``sub_registries`` caches each file's pass-1 registry per invocation
     so REPEAT import statements of an already-visited module can still
     register their alias bindings (issue #80); ``None`` marks a file
@@ -1032,8 +1073,8 @@ def _merge_imports(
                 sub_registries[real] = None
                 continue
             if imported_trees is not None:
-                imported_trees.append(sub_tree)
-            sub_registry = collect_schemas(sub_tree)
+                imported_trees.append((sub_tree, resolved))
+            sub_registry = collect_schemas(sub_tree, source_file=resolved)
             sub_registries[real] = sub_registry
             for name, schema in sub_registry.schemas.items():
                 registry.schemas.setdefault(name, schema)
@@ -1116,12 +1157,14 @@ def _merge_module_imports(
             # given, else the full dotted module path (``import pkg.mod``
             # binds ``pkg`` but use sites spell ``pkg.mod.Schema``, which
             # is exactly this key).
-            sub_registry = collect_schemas(sub_tree)
+            sub_registry = collect_schemas(sub_tree, source_file=resolved)
             sub_own = set(sub_registry.schemas)
             sub_visited = {real}
-            sub_trees: list[ast.Module] = []
+            sub_trees: list[tuple[ast.Module, Path]] = []
             _merge_imports(sub_tree, resolved, sub_registry, sub_visited, sub_trees)
-            _collect_inherited_subclasses(sub_tree, sub_trees, sub_registry, sub_own)
+            _collect_inherited_subclasses(
+                sub_tree, sub_trees, sub_registry, sub_own, main_source_file=resolved
+            )
             prefix = alias.asname or alias.name
             for name, schema in sub_registry.schemas.items():
                 registry.schemas.setdefault(f"{prefix}.{name}", schema)
@@ -1171,10 +1214,11 @@ def _bases_resolve(
 
 def _collect_inherited_subclasses(
     main_tree: ast.Module,
-    imported_trees: list[ast.Module],
+    imported_trees: list[tuple[ast.Module, Path]],
     registry: SchemaRegistry,
     own_names: set[str],
     aliases: dict[str, str] | None = None,
+    main_source_file: Path | None = None,
 ) -> None:
     """Second pass for cross-file inheritance (issue #76).
 
@@ -1189,8 +1233,13 @@ def _collect_inherited_subclasses(
     ANALYZED module shadows a same-named schema merged from an import
     (``own_names`` tracks what the analyzed module itself has defined);
     classes from imported trees never overwrite existing entries.
+
+    ``main_source_file`` is the analyzed module's path and each imported
+    tree carries its own path, so newly-recognized subclasses get the
+    correct defining-file provenance (Batch B, Request 2).
     """
     _aliases = aliases or {}
+    main_source = _resolve_source_file(main_source_file)
     changed = True
     while changed:
         changed = False
@@ -1199,17 +1248,22 @@ def _collect_inherited_subclasses(
                 continue
             if not _bases_resolve(node, registry, _aliases):
                 continue
-            registry.schemas[node.name] = _parse_schema(node, registry, _aliases)
+            registry.schemas[node.name] = _parse_schema(
+                node, registry, _aliases, source_file=main_source
+            )
             own_names.add(node.name)
             changed = True
-        for sub_tree in imported_trees:
+        for sub_tree, sub_path in imported_trees:
             sub_aliases = _collect_name_aliases(sub_tree)
+            sub_source = _resolve_source_file(sub_path)
             for node in sub_tree.body:
                 if not isinstance(node, ast.ClassDef) or node.name in registry.schemas:
                     continue
                 if not _bases_resolve(node, registry, sub_aliases):
                     continue
-                registry.schemas[node.name] = _parse_schema(node, registry, sub_aliases)
+                registry.schemas[node.name] = _parse_schema(
+                    node, registry, sub_aliases, source_file=sub_source
+                )
                 changed = True
 
 
