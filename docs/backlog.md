@@ -368,6 +368,36 @@ Status legend: `[ ]` open / `[x]` done / `[-]` deliberately deferred.
     bare param") and rename-aware narrowing need per-expression ranges
     in the JSON output first; design that core change before extension
     work resumes.
+- [x] **D-13: `--rename-targets` capability (Batch C)** — done: a
+  read-only `--rename-targets FILE:LINE:COL` CLI mode + internal
+  `column_index.py`. Given a position on a column-name token it returns
+  every source occurrence (across project-local files) that PROVABLY
+  refers to the SAME column, keyed on the full field identity
+  `(schema_source_file, schema, field)` — never a bare name match.
+  Indexed: schema field declarations; `pl.col("X")`; bare
+  `select`/`drop` strings, `df["X"]`, and `rename` source keys (resolved
+  against the specific receiver's frame state); `rename` targets and
+  `.alias("X")` outputs are recorded `origin=None` (new identity → only
+  the single occurrence). An open/unknown-frame ref falls back to
+  single-occurrence; no token → empty. Soundness boundary: a column
+  renamed/aliased mid-pipeline does not merge old/new; ambiguity (two
+  live schemas) → `origin=None`.
+  - [ ] **D-13a (deferred): keyword-form alias outputs.**
+    `with_columns(X=...)` / `agg(X=...)` name a new output column via a
+    PYTHON KEYWORD, which carries no string-literal AST span the editor
+    can rewrite as a column token, so those output names are not indexed
+    (a query on the `X` identifier returns empty rather than an
+    unrenamable range). Index them only once the editor consumes a
+    keyword-name range; the call-form `.alias("X")` is already covered.
+  - [ ] **D-13b (deferred): origin through schema-derivation chains.**
+    A column referenced AFTER a `select`/`drop` reduction or a
+    `with_columns` add keeps its `(schema, field)` origin only while the
+    follower can prove identity; any unmodeled reassignment drops the
+    binding to `origin=None` (sound under-rename). Deeper lineage
+    (multi-hop joins, groupby aggregation outputs, cross-function frame
+    returns) is out of scope — it would need the full analyzer's
+    dataflow, and a wrong merge here corrupts an edit. Revisit only with
+    a provable lineage source, never a name heuristic.
 - [ ] **D-12: PyPI publication** — `publish.yml` is complete (build +
   Trusted Publishing via OIDC, `pypi` environment, v-tag or manual
   dispatch). The remaining steps are owner actions, not code:
