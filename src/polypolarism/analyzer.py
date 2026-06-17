@@ -7288,6 +7288,36 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 continue
             mapping[old] = new
 
+        # Provable duplicate-output detection (reuses PLY015). polars raises
+        # DuplicateError at runtime when a rename yields two columns of the
+        # same name. Two cases are provable from literal names:
+        #   1. two sources mapped to the SAME target;
+        #   2. a target that is a KNOWN present column NOT itself renamed
+        #      away (a simultaneous swap renames the colliding name out at
+        #      the same time, so it is not a collision).
+        # A target that is not a known column (only maybe among an open
+        # frame's extras) is NOT provable -> stay lenient.
+        targets = list(mapping.values())
+        flagged_dups: set[str] = set()
+        for new in targets:
+            if new in flagged_dups:
+                continue
+            # The existing column named ``new`` survives only if it is not
+            # itself a rename source (``new not in mapping``); a swap renames
+            # it away simultaneously, so there is no collision.
+            collides_with_existing = new in input_frame.columns and new not in mapping
+            duplicate_target = targets.count(new) > 1
+            if collides_with_existing or duplicate_target:
+                flagged_dups.add(new)
+                self.errors.append(
+                    tag(
+                        PLY015,
+                        f"duplicate output column '{new}' in rename — "
+                        f"polars rejects duplicate output names at runtime; "
+                        f"rename one with a distinct name",
+                    )
+                )
+
         result_columns: dict[str, ColumnSpec] = {}
         for col_name, spec in input_frame.columns.items():
             new_name = mapping.get(col_name, col_name)

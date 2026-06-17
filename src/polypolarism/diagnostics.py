@@ -22,7 +22,7 @@ PLY008 = "PLY008"  # filter predicate / when condition dtype is not Boolean
 PLY009 = "PLY009"  # binary operation between incompatible dtypes (arithmetic, comparison, is_in)
 PLY013 = "PLY013"  # cast between structurally incompatible dtypes
 PLY014 = "PLY014"  # unique: subset column not found
-PLY015 = "PLY015"  # duplicate output column name in select/with_columns
+PLY015 = "PLY015"  # duplicate output column name in select/with_columns/rename
 PLY016 = "PLY016"  # numeric-only operation applied to a non-numeric column
 PLY017 = "PLY017"  # list literal mixed with other positional expression arguments
 

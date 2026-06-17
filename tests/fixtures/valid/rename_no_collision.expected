@@ -1,0 +1,4 @@
+rename_swap: OK
+rename_fresh: OK
+with_columns_overwrite: OK
+select_distinct: OK

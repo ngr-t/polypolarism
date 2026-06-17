@@ -10942,6 +10942,84 @@ class TestDuplicateOutputColumns:
         assert "PLY015" in analyzer.errors[0]
 
 
+class TestRenameDuplicateOutput:
+    """rename mappings that PROVABLY yield a duplicate output column.
+
+    polars raises DuplicateError at runtime (probed 1.41.2) when a rename
+    produces two columns of the same name:
+
+    * a target name already present in the frame and NOT itself renamed away
+      (``rename({"a": "b"})`` with ``b`` present);
+    * two sources mapped to the SAME target (``rename({"a": "x", "b": "x"})``).
+
+    A simultaneous swap (``rename({"a": "b", "b": "a"})``) is legal — ``b``
+    is renamed away as ``a`` is renamed in, so there is no collision.
+    Reuses PLY015 (the duplicate-output-column family).
+    """
+
+    def _frame(self) -> FrameType:
+        return FrameType({"a": Int64(), "b": Float64(), "c": Utf8()})
+
+    def test_rename_to_existing_column(self):
+        analyzer = _run_body(self._frame(), "out = df.rename({'a': 'b'})")
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY015" in analyzer.errors[0]
+        assert "'b'" in analyzer.errors[0]
+        assert "rename" in analyzer.errors[0]
+
+    def test_rename_two_sources_one_target(self):
+        analyzer = _run_body(self._frame(), "out = df.rename({'a': 'x', 'b': 'x'})")
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY015" in analyzer.errors[0]
+        assert "'x'" in analyzer.errors[0]
+        assert "rename" in analyzer.errors[0]
+
+    def test_rename_swap_is_legal(self):
+        # b is renamed away (-> a) at the same time a is renamed in (-> b):
+        # no collision, polars applies the mapping simultaneously.
+        analyzer = _run_body(self._frame(), "out = df.rename({'a': 'b', 'b': 'a'})")
+        assert analyzer.errors == [], analyzer.errors
+
+    def test_rename_to_renamed_away_target_is_legal(self):
+        # 'b' is the target of a->b but is itself renamed away (b->z): the
+        # original 'b' is gone before a's value takes the name, and 'z' is
+        # fresh — no collision (probed: rename({'a':'b','b':'z'}) -> b, z, c).
+        analyzer = _run_body(self._frame(), "out = df.rename({'a': 'b', 'b': 'z'})")
+        assert analyzer.errors == [], analyzer.errors
+
+    def test_rename_to_fresh_name_is_legal(self):
+        analyzer = _run_body(self._frame(), "out = df.rename({'a': 'z'})")
+        assert analyzer.errors == [], analyzer.errors
+
+    def test_rename_to_existing_on_open_frame_still_flags(self):
+        # The target is a KNOWN present column, so the collision is provable
+        # regardless of the open extras.
+        frame = FrameType({"a": Int64(), "b": Float64()}, rest=RowVar("r"))
+        analyzer = _run_body(frame, "out = df.rename({'a': 'b'})")
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY015" in analyzer.errors[0]
+
+    def test_rename_dup_target_unknown_source_on_open_frame_still_flags(self):
+        # Two sources -> one target is provable from the args alone, even
+        # when neither source is a known column of the open frame.
+        frame = FrameType({"k": Int64()}, rest=RowVar("r"))
+        analyzer = _run_body(frame, "out = df.rename({'a': 'x', 'b': 'x'})")
+        assert len(analyzer.errors) == 1, analyzer.errors
+        assert "PLY015" in analyzer.errors[0]
+
+    def test_rename_target_among_open_extras_not_flagged(self):
+        # The target 'extra' is not a KNOWN column — it might only be among
+        # the open frame's unknown extras, so the collision is not provable.
+        frame = FrameType({"a": Int64()}, rest=RowVar("r"))
+        analyzer = _run_body(frame, "out = df.rename({'a': 'extra'})")
+        assert analyzer.errors == [], analyzer.errors
+
+    def test_rename_non_literal_target_not_flagged(self):
+        # A dynamic mapping value is unresolvable -> stay lenient.
+        analyzer = _run_body(self._frame(), "out = df.rename({'a': some_name})")
+        assert all("PLY015" not in e for e in analyzer.errors), analyzer.errors
+
+
 class TestPluralColExpansion:
     """Issue #42: a plural ``pl.col("a", "b")`` nested inside an expression
     expands the whole expression per column, matching polars semantics
