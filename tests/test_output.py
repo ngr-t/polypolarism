@@ -572,6 +572,66 @@ class TestPly042FixObjectEndToEnd:
         assert fix["schema_insert_line"] == 6
 
 
+class TestPly042RelaxParamHelper:
+    """Batch B, Request 4 (low priority): the PLY042 diagnostic whose fix is
+    "relax the param" carries ``param_name`` and ``param_annotation_range``
+    ({line, column, end_line, end_column}) sourced from the resolved param
+    annotation AST node, so the editor can offer a "make it a bare
+    pl.DataFrame param" quick fix. Omitted when not cleanly available."""
+
+    def test_param_helper_fields_present(self, tmp_path):
+        from polypolarism.cli import check_file
+
+        (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\n")
+        app = tmp_path / "app.py"
+        app.write_text(
+            textwrap.dedent(
+                """
+                import polars as pl
+                import pandera.polars as pa
+                from pandera.typing.polars import DataFrame
+
+
+                class InputSchema(pa.DataFrameModel):
+                    a: int
+
+                    class Config:
+                        strict = False
+
+
+                def f(df: DataFrame[InputSchema]) -> DataFrame[InputSchema]:
+                    return df.with_columns(b=pl.col("amount") + 1)
+                """
+            ).lstrip("\n")
+        )
+        results = check_file(app)
+        diags = _diagnostics_from_results(results, app)
+        ply042 = [d for d in diags if d.get("code") == "PLY042"]
+        assert ply042, diags
+        d = ply042[0]
+        assert d["param_name"] == "df"
+        rng = d["param_annotation_range"]
+        # ``def f(df: DataFrame[InputSchema])`` is on line 13.
+        assert rng["line"] == 13
+        assert "column" in rng and "end_line" in rng and "end_column" in rng
+        # The range covers ``DataFrame[InputSchema]`` (after ``df: ``).
+        assert rng["column"] > 0
+        # Message unchanged.
+        assert "InputSchema" in d["message"]
+
+    def test_param_fields_omitted_for_non_relax_diag(self):
+        # A PLY040 retype is not a "relax the param" fix — no param fields.
+        result = CheckResult(
+            function_name="process",
+            passed=False,
+            errors=[TypeDifference("c", Int64(), Float64())],
+        )
+        output = format_json([result], "test.py", function_lines={"process": 1})
+        diag = json.loads(output)["diagnostics"][0]
+        assert "param_name" not in diag
+        assert "param_annotation_range" not in diag
+
+
 def _diagnostics_from_results(results, file_path):
     from polypolarism.analyzer import analyze_source
 

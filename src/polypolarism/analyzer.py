@@ -1236,45 +1236,106 @@ def _ply042_fix(
     return fix
 
 
+def _relax_param_fields(
+    frame: FrameType,
+    param_relax_info: dict[str, tuple[str, Span]] | None,
+) -> tuple[str | None, dict | None]:
+    """``(param_name, param_annotation_range)`` for the PLY042 "relax the
+    param" helper (Batch B, Request 4), or ``(None, None)`` when the frame's
+    source parameter can't be cleanly identified.
+
+    The frame's ``schema_name`` keys ``param_relax_info`` — which only holds
+    schemas bound to exactly one frame-typed parameter — so an ambiguous
+    (duplicate-schema) source param soundly yields nothing."""
+    if param_relax_info is None or frame.schema_name is None:
+        return None, None
+    entry = param_relax_info.get(frame.schema_name)
+    if entry is None:
+        return None, None
+    param_name, span = entry
+    return param_name, _span_dict(span)
+
+
+def _span_dict(span: Span) -> dict:
+    """A :class:`Span` as a ``{line, column, end_line?, end_column?}`` dict
+    (1-indexed line, 0-indexed col). ``end_line`` / ``end_column`` are
+    included only when known."""
+    out: dict = {"line": span.line, "column": span.column}
+    if span.end_line is not None:
+        out["end_line"] = span.end_line
+    if span.end_column is not None:
+        out["end_column"] = span.end_column
+    return out
+
+
 def _missing_column_tagged(
     frame: FrameType,
     name: str,
     schema_registry: SchemaRegistry | None = None,
+    param_relax_info: dict[str, tuple[str, Span]] | None = None,
 ) -> TaggedError:
     """:func:`_missing_column_diag` as a structured :class:`TaggedError`.
 
     Same byte-for-byte text as ``tag(*_missing_column_diag(frame, name))``;
     additionally carries the looked-up ``column`` and, for the PLY042 island
     case, the non-strict ``schema`` name (sourced from ``nonstrict_schema``,
-    not parsed from the message) plus the structured ``fix`` quick-fix object
+    not parsed from the message), the structured ``fix`` quick-fix object
     (Batch B, Request 2 — only when ``schema_registry`` resolves the defining
-    file)."""
+    file), and the "relax the param" helper fields (Request 4)."""
     code, msg = _missing_column_diag(frame, name)
     schema = frame.nonstrict_schema if code == PLY042 else None
     fix = None
+    param_name = None
+    param_range = None
     if code == PLY042 and schema is not None:
         fix = _ply042_fix(schema, name, schema_registry)
-    return tagged_error(code, msg, column=name, schema=schema, fix=fix)
+        param_name, param_range = _relax_param_fields(frame, param_relax_info)
+    return tagged_error(
+        code,
+        msg,
+        column=name,
+        schema=schema,
+        fix=fix,
+        param_name=param_name,
+        param_annotation_range=param_range,
+    )
 
 
 def _column_not_found_tagged(
     e: ColumnNotFoundError,
     schema_registry: SchemaRegistry | None = None,
+    param_relax_info: dict[str, tuple[str, Span]] | None = None,
 ) -> TaggedError:
     """Convert a :class:`ColumnNotFoundError` into a structured
     :class:`TaggedError`, preserving the message text exactly while exposing
     the exception's ``column`` / ``schema`` for JSON consumers.
 
-    For the PLY042 island case the structured ``fix`` quick-fix object is
-    attached too (Batch B, Request 2 — only when ``schema_registry`` resolves
-    the defining file)."""
+    For the PLY042 island case the structured ``fix`` quick-fix object (Batch
+    B, Request 2 — only when ``schema_registry`` resolves the defining file)
+    and the "relax the param" helper fields (Request 4 — keyed by the
+    exception's schema) are attached too."""
     code = getattr(e, "code", PLY001)
     column = getattr(e, "column", None)
     schema = getattr(e, "schema", None)
     fix = None
+    param_name = None
+    param_range = None
     if code == PLY042 and schema is not None and column is not None:
         fix = _ply042_fix(schema, column, schema_registry)
-    return tagged_error(code, str(e), column=column, schema=schema, fix=fix)
+        if param_relax_info is not None:
+            entry = param_relax_info.get(schema)
+            if entry is not None:
+                param_name, span = entry
+                param_range = _span_dict(span)
+    return tagged_error(
+        code,
+        str(e),
+        column=column,
+        schema=schema,
+        fix=fix,
+        param_name=param_name,
+        param_annotation_range=param_range,
+    )
 
 
 def _call_result_frame(declared: FrameType | None, source_name: str) -> FrameType | None:
@@ -2794,6 +2855,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         element_dtype: DataType | None = None,
         int_consts: Mapping[str, int] | None = None,
         schema_registry: SchemaRegistry | None = None,
+        param_relax_info: dict[str, tuple[str, Span]] | None = None,
     ):
         self.current_frame = current_frame
         self.errors: list[str] = []
@@ -2801,6 +2863,9 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         # island column-not-found can build its quick-fix object (Batch B,
         # Request 2). ``None`` when standalone — the fix is simply omitted.
         self.schema_registry = schema_registry
+        # Schema name -> (param_name, annotation Span) for the "relax the
+        # param" PLY042 helper (Batch B, Request 4). ``None`` when standalone.
+        self.param_relax_info: dict[str, tuple[str, Span]] = param_relax_info or {}
         # Shared advisory channel (passed in by the body analyzer so warnings
         # bubble up to FunctionAnalysis). New list when used standalone.
         self.warnings: list[str] = warnings if warnings is not None else []
@@ -3510,7 +3575,9 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 output_name = alias if alias else col_name
                 return output_name, col_type
             except ColumnNotFoundError as e:
-                self.errors.append(_column_not_found_tagged(e, self.schema_registry))
+                self.errors.append(
+                    _column_not_found_tagged(e, self.schema_registry, self.param_relax_info)
+                )
                 return None, None
 
         # Check for pl.lit(value)
@@ -3580,7 +3647,9 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 try:
                     fields[col] = infer_col(col, self.current_frame)
                 except ColumnNotFoundError as e:
-                    self.errors.append(_column_not_found_tagged(e, self.schema_registry))
+                    self.errors.append(
+                        _column_not_found_tagged(e, self.schema_registry, self.param_relax_info)
+                    )
             # Keyword args name the fields: ``pl.struct(x=expr)`` → field
             # ``x`` (issue #47). The value can be any expression; an
             # un-inferable one keeps the field as Unknown rather than
@@ -3622,7 +3691,9 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 try:
                     map_groups_fallback = infer_col(first_col, self.current_frame)
                 except ColumnNotFoundError as e:
-                    self.errors.append(_column_not_found_tagged(e, self.schema_registry))
+                    self.errors.append(
+                        _column_not_found_tagged(e, self.schema_registry, self.param_relax_info)
+                    )
             self.warnings.append(
                 tag(
                     PLW001,
@@ -3643,7 +3714,9 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 try:
                     col_type = infer_col(col, self.current_frame)
                 except ColumnNotFoundError as e:
-                    self.errors.append(_column_not_found_tagged(e, self.schema_registry))
+                    self.errors.append(
+                        _column_not_found_tagged(e, self.schema_registry, self.param_relax_info)
+                    )
                     return col, None  # type: ignore[return-value]
                 try:
                     result_type = infer_agg_result_type(
@@ -3750,7 +3823,9 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             try:
                 return s, infer_col(s, self.current_frame)
             except ColumnNotFoundError as e:
-                self.errors.append(_column_not_found_tagged(e, self.schema_registry))
+                self.errors.append(
+                    _column_not_found_tagged(e, self.schema_registry, self.param_relax_info)
+                )
                 return s, None
         return self.analyze_select_expr(node)
 
@@ -3773,6 +3848,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             element_dtype=element_dtype,
             int_consts=self.int_consts,
             schema_registry=self.schema_registry,
+            param_relax_info=self.param_relax_info,
         )
         _, body_dtype = child.analyze_select_expr(call_node.args[0])
         self.errors.extend(child.errors)
@@ -4040,7 +4116,9 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             try:
                 infer_col(s, self.current_frame)
             except ColumnNotFoundError as e:
-                self.errors.append(_column_not_found_tagged(e, self.schema_registry))
+                self.errors.append(
+                    _column_not_found_tagged(e, self.schema_registry, self.param_relax_info)
+                )
             return
         if isinstance(node, (ast.List, ast.Tuple)):
             for elt in node.elts:
@@ -5181,9 +5259,17 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         reported_broken_schemas: set[str] | None = None,
         reported_degraded_schemas: set[str] | None = None,
         trace: list[TraceEvent] | None = None,
+        param_relax_info: dict[str, tuple[str, Span]] | None = None,
     ):
         self.input_types = input_types
         self.errors = errors
+        # Schema name -> (param_name, annotation Span) for the "relax the
+        # param" PLY042 helper (Batch B, Request 4). Only carries schemas
+        # bound to exactly one frame-typed parameter, so a PLY042 on a frame
+        # from that schema can name the parameter and its annotation range.
+        # Empty for nested / probe analyses — the helper fields are then
+        # simply omitted.
+        self.param_relax_info: dict[str, tuple[str, Span]] = param_relax_info or {}
         # Inference trace sink (``--verbose``). ``None`` disables
         # collection entirely so the default path pays no rendering cost.
         self.trace = trace
@@ -6809,6 +6895,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             registry=self.registry,
             int_consts=self._int_consts(),
             schema_registry=self.schema_registry,
+            param_relax_info=self.param_relax_info,
         )
         agg_exprs: list[AggExpr] = []
         # Per-output producing-expression spans (issue #110): the agg keyword
@@ -7022,7 +7109,11 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             if input_frame.nonstrict_schema is not None:
                 # OPEN ISLAND (issues #83/#88): undeclared lookups stay
                 # flagged even though the rest keeps subtyping lenient.
-                self.errors.append(_missing_column_tagged(input_frame, name, self.schema_registry))
+                self.errors.append(
+                    _missing_column_tagged(
+                        input_frame, name, self.schema_registry, self.param_relax_info
+                    )
+                )
                 return None
             # Backward narrowing (ADR-0006 amendment): the assumption
             # "this select succeeded" pins the column INTO the open frame
@@ -7031,7 +7122,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             input_frame.columns[name] = ColumnSpec(dtype=Unknown())
             result_columns[output_name or name] = Unknown()
             return output_name or name
-        self.errors.append(_missing_column_tagged(input_frame, name, self.schema_registry))
+        self.errors.append(
+            _missing_column_tagged(input_frame, name, self.schema_registry, self.param_relax_info)
+        )
         return None
 
     def _track_output_name(self, name: str, seen: set[str], call_name: str) -> None:
@@ -7082,6 +7175,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             registry=self.registry,
             int_consts=self._int_consts(),
             schema_registry=self.schema_registry,
+            param_relax_info=self.param_relax_info,
         )
         result_columns: dict[str, DataType] = {}
         # Per-column producing-expression spans (issue #110) — see
@@ -7124,7 +7218,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                             self._track_output_name(c, seen_outputs, "select")
                             continue
                         self.errors.append(
-                            _missing_column_tagged(input_frame, c, self.schema_registry)
+                            _missing_column_tagged(
+                                input_frame, c, self.schema_registry, self.param_relax_info
+                            )
                         )
                         continue
                     result_columns[c] = spec.dtype
@@ -7239,6 +7335,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             registry=self.registry,
             int_consts=self._int_consts(),
             schema_registry=self.schema_registry,
+            param_relax_info=self.param_relax_info,
         )
         # Output names produced by THIS call — a repeat within the call is a
         # runtime duplicate-name error (issue #36). Collision with a
@@ -7268,7 +7365,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 for c in plural:
                     if c not in input_frame.columns and input_frame.rest is None:
                         self.errors.append(
-                            _missing_column_tagged(input_frame, c, self.schema_registry)
+                            _missing_column_tagged(
+                                input_frame, c, self.schema_registry, self.param_relax_info
+                            )
                         )
                         continue
                     self._track_output_name(c, seen_outputs, "with_columns")
@@ -7286,7 +7385,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 for c in names:
                     if c not in input_frame.columns and input_frame.rest is None:
                         self.errors.append(
-                            _missing_column_tagged(input_frame, c, self.schema_registry)
+                            _missing_column_tagged(
+                                input_frame, c, self.schema_registry, self.param_relax_info
+                            )
                         )
                         continue
                     self._track_output_name(c, seen_outputs, "with_columns")
@@ -7332,7 +7433,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     result_columns[kw.arg] = Unknown()
                 else:
                     self.errors.append(
-                        _missing_column_tagged(input_frame, col_ref, self.schema_registry)
+                        _missing_column_tagged(
+                            input_frame, col_ref, self.schema_registry, self.param_relax_info
+                        )
                     )
                     continue
                 column_spans[kw.arg] = Span.from_node(kw.value)
@@ -8162,6 +8265,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             registry=self.registry,
             int_consts=self._int_consts(),
             schema_registry=self.schema_registry,
+            param_relax_info=self.param_relax_info,
         )
         for arg in node.args:
             dtype: DataType | None
@@ -8212,6 +8316,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             registry=self.registry,
             int_consts=self._int_consts(),
             schema_registry=self.schema_registry,
+            param_relax_info=self.param_relax_info,
         )
         for key_node in key_nodes:
             if _resolve_selector(key_node, input_frame) is not None:
@@ -9116,6 +9221,9 @@ def analyze_function(
                 warnings.append(warning)
 
     # Extract input parameter types
+    # Frame-typed param -> annotation Span (Batch B, Request 4): the
+    # "relax the param" helper location for a PLY042 fix.
+    param_annotation_spans: dict[str, Span] = {}
     for arg in func_node.args.args:
         if arg.annotation:
             if _annotation_declares_frame(arg.annotation, schema_registry):
@@ -9124,6 +9232,8 @@ def analyze_function(
                 frame_type, parse_error = _resolve_declared_type(arg.annotation, schema_registry)
                 if frame_type is not None:
                     input_types[arg.arg] = frame_type
+                    if frame_type.schema_name is not None:
+                        param_annotation_spans[arg.arg] = Span.from_node(arg.annotation)
                 elif parse_error:
                     errors.append(f"Parameter '{arg.arg}': {parse_error}")
             else:
@@ -9143,6 +9253,22 @@ def analyze_function(
                             rest=RowVar(arg.arg),
                             is_lazy=bare_head == "LazyFrame",
                         )
+
+    # "Relax the param" correlation (Batch B, Request 4): map a frame's
+    # ``schema_name`` to the (param_name, annotation Span) of the parameter
+    # it was bound from — but ONLY when exactly one frame-typed parameter
+    # carries that schema. With a duplicate schema across params the source
+    # param is ambiguous, so the helper fields are soundly omitted.
+    relax_counts: dict[str, int] = {}
+    for param_name in param_annotation_spans:
+        schema = input_types[param_name].schema_name
+        if schema is not None:
+            relax_counts[schema] = relax_counts.get(schema, 0) + 1
+    param_relax_info: dict[str, tuple[str, Span]] = {}
+    for param_name, span in param_annotation_spans.items():
+        schema = input_types[param_name].schema_name
+        if schema is not None and relax_counts.get(schema) == 1:
+            param_relax_info[schema] = (param_name, span)
 
     # Extract return type
     if func_node.returns:
@@ -9231,6 +9357,7 @@ def analyze_function(
         reported_broken_schemas=broken_schemas_reported,
         reported_degraded_schemas=degraded_schemas_reported,
         trace=trace_events,
+        param_relax_info=param_relax_info,
     )
     for stmt in func_node.body:
         body_analyzer.visit(stmt)

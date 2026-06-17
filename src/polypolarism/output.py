@@ -78,6 +78,12 @@ class Diagnostic:
     # suggested_dtype?}``. ``None`` when the fix cannot be determined soundly
     # (unknown schema file) → the key is omitted.
     fix: dict | None = None
+    # "Relax the param" helper fields (Batch B, Request 4): the parameter
+    # whose annotation a PLY042 suggests loosening and its annotation
+    # ``{line, column, end_line, end_column}`` range. Both ``None`` when not
+    # cleanly determinable → the keys are omitted.
+    param_name: str | None = None
+    param_annotation_range: dict | None = None
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
@@ -113,6 +119,10 @@ class Diagnostic:
             result["declared_annotation_range"] = self.declared_annotation_range
         if self.fix is not None:
             result["fix"] = self.fix
+        if self.param_name is not None:
+            result["param_name"] = self.param_name
+        if self.param_annotation_range is not None:
+            result["param_annotation_range"] = self.param_annotation_range
         return result
 
 
@@ -315,6 +325,8 @@ def _build_diagnostics(group: FileResults) -> list[dict]:
                     suggested_annotation=suggested_annotation,
                     declared_annotation_range=declared_annotation_range,
                     fix=getattr(error, "fix", None),
+                    param_name=getattr(error, "param_name", None),
+                    param_annotation_range=getattr(error, "param_annotation_range", None),
                 )
                 diagnostics.append(diag.to_dict())
         for warning in result.warnings:

@@ -132,11 +132,20 @@ class TaggedError(str):
     the PLY042 "declare the column on the schema" object
     (``{schema, column, schema_file, schema_insert_line, suggested_dtype?}``).
     ``None`` when no sound fix could be built; the JSON layer omits it.
+
+    ``param_name`` / ``param_annotation_range`` are the "relax the param"
+    helper fields (Batch B, Request 4): the parameter whose annotation the
+    diagnostic suggests loosening (e.g. PLY042's "take a bare pl.DataFrame
+    parameter") and its annotation's ``{line, column, end_line, end_column}``
+    range. Both ``None`` when not cleanly determinable; the JSON layer omits
+    absent ones.
     """
 
     column: str | None
     schema: str | None
     fix: dict | None
+    param_name: str | None
+    param_annotation_range: dict | None
 
 
 def tagged_error(
@@ -146,17 +155,21 @@ def tagged_error(
     column: str | None = None,
     schema: str | None = None,
     fix: dict | None = None,
+    param_name: str | None = None,
+    param_annotation_range: dict | None = None,
 ) -> TaggedError:
     """Build a :class:`TaggedError`: ``tag(code, message)`` text plus fields.
 
     The text is identical to ``tag(code, message)``; ``column`` / ``schema`` /
-    ``fix`` are attached for structured JSON output and left unset (``None``)
-    when not supplied.
+    ``fix`` / ``param_name`` / ``param_annotation_range`` are attached for
+    structured JSON output and left unset (``None``) when not supplied.
     """
     err = TaggedError(tag(code, message))
     err.column = column
     err.schema = schema
     err.fix = fix
+    err.param_name = param_name
+    err.param_annotation_range = param_annotation_range
     return err
 
 
