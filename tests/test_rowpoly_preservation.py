@@ -15,6 +15,7 @@ from polypolarism.checker import check_source
 
 _PRELUDE = """
 import polars as pl
+import polars.selectors as cs
 import pandera.polars as pa
 from pandera.typing.polars import DataFrame
 from polypolarism import rowpoly
@@ -112,3 +113,92 @@ def test_multi_frame_param_helper_is_not_preservation_checked() -> None:
             return o.select("id")
     """)
     assert not _has_ply043(results["joined"])
+
+
+# --- C-14 Tier 5 remainder (1a): no false positive for legitimately-preserving
+# bodies. The skolem sentinel must survive each of these forms. These pin the
+# CURRENT behavior: an audit (2026-06-17) found no false positives among them —
+# the all-columns selectors already include the sentinel in the resolved column
+# set, drop/rename only touch named real columns, branch merge keeps shared
+# columns, and pl.concat unions identical inputs. No new machinery was needed.
+
+
+def test_select_all_pl_preserves_row_variable() -> None:
+    # ``select(pl.all())`` selects every column including the skolem sentinel,
+    # so the all-columns selector preserves the row variable (no PLY043).
+    results = _check("""
+        @rowpoly("R")
+        def add_score(df: DataFrame[InId]) -> DataFrame[OutScore]:
+            return df.select(pl.all()).with_columns(score=pl.col("id").cast(pl.Float64))
+    """)
+    assert results["add_score"].passed
+    assert not _has_ply043(results["add_score"])
+
+
+def test_select_all_cs_preserves_row_variable() -> None:
+    # ``select(cs.all())`` is the selectors-namespace spelling of the same
+    # all-columns selection; it likewise keeps the sentinel.
+    results = _check("""
+        @rowpoly("R")
+        def add_score(df: DataFrame[InId]) -> DataFrame[OutScore]:
+            return df.select(cs.all()).with_columns(score=pl.col("id").cast(pl.Float64))
+    """)
+    assert results["add_score"].passed
+    assert not _has_ply043(results["add_score"])
+
+
+def test_drop_real_column_preserves_row_variable() -> None:
+    # Dropping a NAMED real column leaves the sentinel untouched — the helper
+    # still preserves the caller's arbitrary extras.
+    results = _check("""
+        class OutDropped(pa.DataFrameModel):
+            score: float
+
+            class Config:
+                strict = False
+
+        @rowpoly("R")
+        def reshape(df: DataFrame[InId]) -> DataFrame[OutDropped]:
+            return df.drop("id").with_columns(score=pl.lit(1.0))
+    """)
+    assert not _has_ply043(results["reshape"])
+
+
+def test_rename_real_column_preserves_row_variable() -> None:
+    # Renaming a NAMED real column does not touch the sentinel.
+    results = _check("""
+        class Renamed(pa.DataFrameModel):
+            key: int
+
+            class Config:
+                strict = False
+
+        @rowpoly("R")
+        def reshape(df: DataFrame[InId]) -> DataFrame[Renamed]:
+            return df.rename({"id": "key"})
+    """)
+    assert not _has_ply043(results["reshape"])
+
+
+def test_conditional_early_return_preserves_row_variable() -> None:
+    # Both return points preserve every column, so neither branch drops the
+    # sentinel.
+    results = _check("""
+        @rowpoly("R")
+        def add_score(df: DataFrame[InId]) -> DataFrame[OutScore]:
+            if df.is_empty():
+                return df.with_columns(score=pl.lit(0.0))
+            return df.with_columns(score=pl.col("id").cast(pl.Float64))
+    """)
+    assert not _has_ply043(results["add_score"])
+
+
+def test_pl_concat_preserves_row_variable() -> None:
+    # Concatenating the (skolemized) input with itself keeps the sentinel in
+    # the union, so the row variable survives.
+    results = _check("""
+        @rowpoly("R")
+        def doubled(df: DataFrame[InId]) -> DataFrame[InId]:
+            return pl.concat([df, df])
+    """)
+    assert not _has_ply043(results["doubled"])
