@@ -1187,6 +1187,58 @@ def _call_result_frame(declared: FrameType | None, source_name: str) -> FrameTyp
     )
 
 
+def _thread_row_poly_extras(
+    sig: FunctionSignature,
+    arg_types: list[FrameType | None],
+    base: FrameType,
+) -> FrameType:
+    """Thread a ``@rowpoly`` helper's caller extras into ``base`` (C-14 Tier 3).
+
+    A row-polymorphic helper preserves the caller's columns beyond the
+    declared parameter schema. ``base`` is the declared-return frame from
+    ``_call_result_frame``; this adds each such extra column WITH ITS REAL
+    DTYPE so a downstream read keeps precise typing instead of degrading to
+    the open-frame ``Unknown`` (the gap named in ``_call_result_frame``'s
+    docstring). Trusts the ``@rowpoly`` contract — Tier 4 verifies the body
+    actually preserves the row variable.
+
+    Extras = (argument columns) − (declared parameter columns), unioned over
+    every frame parameter position. Declared-return columns win on a name
+    collision (the helper's explicit output contract). The same extra name
+    arriving from two arguments with differing dtypes unifies, falling back
+    to ``Unknown`` when there is no unifier.
+    """
+    extras: dict[str, ColumnSpec] = {}
+    for idx, arg_type in enumerate(arg_types):
+        if arg_type is None:
+            continue
+        param = sig.get_param_by_position(idx)
+        if param is None:
+            continue
+        _, param_type = param
+        for name, spec in arg_type.columns.items():
+            if name in param_type.columns:
+                continue
+            existing = extras.get(name)
+            if existing is None:
+                extras[name] = spec
+            elif existing.dtype != spec.dtype:
+                try:
+                    unified = unify_types(existing.dtype, spec.dtype)
+                except TypeUnificationError:
+                    unified = Unknown()
+                extras[name] = ColumnSpec(
+                    dtype=unified, required=existing.required and spec.required
+                )
+    # Drop extras the declared return already specifies (its contract wins).
+    new_extras = {n: s for n, s in extras.items() if n not in base.columns}
+    if not new_extras:
+        return base
+    result = copy.copy(base)
+    result.columns = {**base.columns, **new_extras}
+    return result
+
+
 def _is_cast_func(node: ast.expr) -> bool:
     """Recognise ``cast`` (from ``typing import cast``) and ``typing.cast``.
 
@@ -1915,6 +1967,10 @@ class FunctionSignature:
     parameters: dict[str, tuple[int, FrameType]]  # param_name -> (position, type)
     return_type: FrameType | None
     lineno: int
+    # Row-variable name from a ``@rowpoly("R")`` decorator (C-14), else None.
+    # When set, a call site threads the caller's extra columns (beyond the
+    # declared parameter schema) into the result with their real dtypes.
+    row_var: str | None = None
 
     def get_param_by_position(self, position: int) -> tuple[str, FrameType] | None:
         """Get parameter info by position."""
@@ -5960,7 +6016,12 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                                     f"'{col_name}' ({actual_spec.dtype}) but the "
                                     f"parameter schema is strict"
                                 )
-            return _call_result_frame(sig.return_type, func_name)
+            result = _call_result_frame(sig.return_type, func_name)
+            # Row polymorphism (C-14 Tier 3): a @rowpoly helper preserves the
+            # caller's extra columns into the result with their real dtypes.
+            if result is not None and sig.row_var is not None:
+                result = _thread_row_poly_extras(sig, arg_types, result)
+            return result
 
         # Untyped function - analyze body with propagated argument types
         return self._analyze_untyped_function(func_info, arg_types)
@@ -7732,6 +7793,7 @@ def _extract_function_signature(
         parameters=parameters,
         return_type=return_type,
         lineno=func_node.lineno,
+        row_var=_rowpoly_row_var(func_node),
     )
 
 
