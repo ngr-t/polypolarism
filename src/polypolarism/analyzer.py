@@ -1771,6 +1771,52 @@ def _mixed_list_args(args: list[ast.expr]) -> bool:
     return len(args) > 1 and any(isinstance(arg, (ast.List, ast.Tuple)) for arg in args)
 
 
+def _regex_col_pattern(node: ast.expr) -> str | None:
+    """Return the regex pattern of a ``pl.col("^...$")`` regex selector, else None.
+
+    polars treats a SINGLE ``pl.col`` string argument that BOTH starts with
+    ``^`` AND ends with ``$`` as a regex over the input column names (issue
+    #111), expanding to every column whose name matches. A bare ``"a"`` or a
+    one-sided ``"^a"`` / ``"a$"`` is still a literal column name and is NOT a
+    regex — so this returns ``None`` for those. Only the exact-anchored form
+    is recognised; the caller matches it against the known column names with
+    ``re.search`` (polars' own semantics).
+
+    Multi-argument / list ``pl.col("^a$", "b")`` is left to the literal
+    plural path: polars only treats the regex form specially for a SINGLE
+    string argument.
+    """
+    if not isinstance(node, ast.Call):
+        return None
+    if not isinstance(node.func, ast.Attribute) or node.func.attr != "col":
+        return None
+    if not (isinstance(node.func.value, ast.Name) and node.func.value.id == "pl"):
+        return None
+    if len(node.args) != 1 or node.keywords:
+        return None
+    pattern = _str_constant(node.args[0])
+    if pattern is None:
+        return None
+    if pattern.startswith("^") and pattern.endswith("$"):
+        return pattern
+    return None
+
+
+def _regex_matched_columns(pattern: str, frame: FrameType) -> list[str] | None:
+    """Column names of ``frame`` matching ``pattern`` (``re.search`` order).
+
+    Matches polars' regex column-selection semantics: an unanchored
+    ``re.search`` over each known column name, preserving declaration order.
+    Returns ``None`` if the pattern fails to compile (a malformed regex is
+    unresolvable statically — degrade to leniency rather than crash).
+    """
+    try:
+        rx = re.compile(pattern)
+    except re.error:
+        return None
+    return [c for c in frame.columns if rx.search(c) is not None]
+
+
 # polars.selectors return-type predicates by selector name.
 _SELECTOR_NUMERIC = (
     Int8,
@@ -1865,6 +1911,13 @@ def _resolve_selector(node: ast.expr, frame: FrameType) -> list[str] | None:
     # expressions with the same column-set semantics as ``cs.all()`` /
     # ``cs.exclude(...)`` (issue #20).
     if node.func.value.id == "pl":
+        # ``pl.col("^...$")`` is a regex over the input column names (issue
+        # #111) — expand to the matching set, exactly like a ``cs.*``
+        # selector. Only a single ``^...$``-anchored string is a regex; a
+        # literal name / plural form is handled elsewhere.
+        pattern = _regex_col_pattern(node)
+        if pattern is not None:
+            return _regex_matched_columns(pattern, frame)
         if node.func.attr == "all":
             # Only the no-arg form selects columns; ``pl.all("col")`` is the
             # "all values truthy" boolean aggregation — leave it to
@@ -1941,6 +1994,19 @@ def _resolve_selector(node: ast.expr, frame: FrameType) -> list[str] | None:
         if name == "ends_with":
             return [c for c in frame.columns if c.endswith(needle)]
         return [c for c in frame.columns if needle in c]
+
+    if name == "matches":
+        # ``cs.matches(pat)`` always treats ``pat`` as a regex (no ``^...$``
+        # requirement) — select known columns whose name matches it via
+        # ``re.search`` (polars' semantics: ``cs.matches("^a_")`` selects
+        # ``a_x``, ``a_y``). A non-literal / malformed pattern is
+        # unresolvable statically (returns ``None`` -> degrade to leniency).
+        if not node.args:
+            return []
+        pattern = _str_constant(node.args[0])
+        if pattern is None:
+            return None
+        return _regex_matched_columns(pattern, frame)
 
     if name == "exclude":
         # ``cs.exclude("a", "b")``, ``cs.exclude(["a", "b"])``, or
