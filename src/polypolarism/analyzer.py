@@ -1192,8 +1192,9 @@ def _thread_row_poly_extras(
     sig: FunctionSignature,
     arg_types: list[FrameType | None],
     base: FrameType,
+    only_params: set[str] | None = None,
 ) -> FrameType:
-    """Thread a ``@rowpoly`` helper's caller extras into ``base`` (C-14 Tier 3).
+    """Thread a ``@rowpoly`` helper's caller extras into ``base`` (C-14 Tier 3/5).
 
     A row-polymorphic helper preserves the caller's columns beyond the
     declared parameter schema. ``base`` is the declared-return frame from
@@ -1204,10 +1205,12 @@ def _thread_row_poly_extras(
     actually preserves the row variable.
 
     Extras = (argument columns) − (declared parameter columns), unioned over
-    every frame parameter position. Declared-return columns win on a name
-    collision (the helper's explicit output contract). The same extra name
-    arriving from two arguments with differing dtypes unifies, falling back
-    to ``Unknown`` when there is no unifier.
+    every frame parameter position (``@rowpoly("R")``) or only the named
+    parameters when ``only_params`` is given (``@rowpoly(a="R1", b="R2")``,
+    Tier 5). Declared-return columns win on a name collision (the helper's
+    explicit output contract). The same extra name arriving from two arguments
+    with differing dtypes unifies, falling back to ``Unknown`` when there is no
+    unifier.
     """
     extras: dict[str, ColumnSpec] = {}
     for idx, arg_type in enumerate(arg_types):
@@ -1216,7 +1219,9 @@ def _thread_row_poly_extras(
         param = sig.get_param_by_position(idx)
         if param is None:
             continue
-        _, param_type = param
+        param_name, param_type = param
+        if only_params is not None and param_name not in only_params:
+            continue
         for name, spec in arg_type.columns.items():
             if name in param_type.columns:
                 continue
@@ -1968,10 +1973,13 @@ class FunctionSignature:
     parameters: dict[str, tuple[int, FrameType]]  # param_name -> (position, type)
     return_type: FrameType | None
     lineno: int
-    # Row-variable name from a ``@rowpoly("R")`` decorator (C-14), else None.
-    # When set, a call site threads the caller's extra columns (beyond the
-    # declared parameter schema) into the result with their real dtypes.
+    # Row-variable name from a positional ``@rowpoly("R")`` decorator (C-14),
+    # else None. When set, a call site threads the caller's extra columns
+    # (beyond the declared parameter schema) into the result with real dtypes.
     row_var: str | None = None
+    # Per-parameter row variables from ``@rowpoly(a="R1", b="R2")`` (Tier 5):
+    # param name -> row-variable name. Threads each named parameter's extras.
+    param_row_vars: dict[str, str] = field(default_factory=dict)
 
     def get_param_by_position(self, position: int) -> tuple[str, FrameType] | None:
         """Get parameter info by position."""
@@ -6018,10 +6026,17 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                                     f"parameter schema is strict"
                                 )
             result = _call_result_frame(sig.return_type, func_name)
-            # Row polymorphism (C-14 Tier 3): a @rowpoly helper preserves the
-            # caller's extra columns into the result with their real dtypes.
-            if result is not None and sig.row_var is not None:
-                result = _thread_row_poly_extras(sig, arg_types, result)
+            # Row polymorphism: a @rowpoly helper preserves the caller's extra
+            # columns into the result with their real dtypes. Tier 3 (positional
+            # ``@rowpoly("R")``) threads every frame parameter; Tier 5
+            # (``@rowpoly(a="R1", b="R2")``) threads only the named parameters.
+            if result is not None:
+                if sig.param_row_vars:
+                    result = _thread_row_poly_extras(
+                        sig, arg_types, result, only_params=set(sig.param_row_vars)
+                    )
+                elif sig.row_var is not None:
+                    result = _thread_row_poly_extras(sig, arg_types, result)
             return result
 
         # Untyped function - analyze body with propagated argument types
@@ -7645,19 +7660,16 @@ def _is_property_method(node: ast.stmt) -> bool:
     return any(isinstance(d, ast.Name) and d.id == "property" for d in node.decorator_list)
 
 
-def _rowpoly_row_var(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str | None:
-    """Row-variable name from a ``@rowpoly("R")`` decorator, else ``None`` (C-14).
+def _find_rowpoly_decorator(node: ast.FunctionDef | ast.AsyncFunctionDef) -> ast.Call | None:
+    """The first ``@rowpoly(...)`` decorator Call node, else ``None`` (C-14).
 
-    Recognizes the call form with a string-literal argument in both the bare
-    (``@rowpoly("R")``) and attribute (``@pp.rowpoly("R")`` /
-    ``@polypolarism.rowpoly("R")``) spellings. A bare ``@rowpoly`` with no
-    call, or a non-literal argument, is ignored — the row variable needs a
-    statically-known name. The first matching decorator wins (a single row
-    variable per signature today; multiple/positional binding is a later
-    tier). The decorator stays a runtime no-op (see ``polypolarism.rowpoly``).
+    Matches both the bare (``@rowpoly(...)``) and attribute
+    (``@pp.rowpoly(...)`` / ``@polypolarism.rowpoly(...)``) spellings. A bare
+    ``@rowpoly`` with no call is not matched — the row variable needs an
+    argument.
     """
     for deco in node.decorator_list:
-        if not isinstance(deco, ast.Call) or not deco.args:
+        if not isinstance(deco, ast.Call):
             continue
         func = deco.func
         if isinstance(func, ast.Name):
@@ -7666,12 +7678,48 @@ def _rowpoly_row_var(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str | None
             deco_name = func.attr
         else:
             continue
-        if deco_name != "rowpoly":
-            continue
-        arg = deco.args[0]
-        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-            return arg.value
+        if deco_name == "rowpoly":
+            return deco
     return None
+
+
+def _rowpoly_row_var(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str | None:
+    """Shared row-variable name from a positional ``@rowpoly("R")``, else None.
+
+    Only the positional string-literal form binds a single shared row variable
+    (the Tier 2-4 surface). The per-parameter keyword form
+    (``@rowpoly(a="R1", b="R2")``, Tier 5) is read by
+    ``_rowpoly_param_row_vars`` instead and leaves this ``None``. A non-literal
+    argument is ignored — the row variable needs a statically-known name.
+    The decorator stays a runtime no-op (see ``polypolarism.rowpoly``).
+    """
+    deco = _find_rowpoly_decorator(node)
+    if deco is None or not deco.args:
+        return None
+    arg = deco.args[0]
+    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+        return arg.value
+    return None
+
+
+def _rowpoly_param_row_vars(node: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[str, str]:
+    """Per-parameter row variables from ``@rowpoly(a="R1", b="R2")`` (C-14 Tier 5).
+
+    Maps each named parameter to its row-variable name (string-literal values
+    only; non-literal values are skipped). Names a distinct row variable per
+    frame parameter so a join / concat helper can preserve every side's extra
+    columns. Empty when only the positional form (or no decorator) is present.
+    """
+    deco = _find_rowpoly_decorator(node)
+    if deco is None:
+        return {}
+    out: dict[str, str] = {}
+    for kw in deco.keywords:
+        if kw.arg is None:  # ``**kwargs`` spread — not a parameter name
+            continue
+        if isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+            out[kw.arg] = kw.value.value
+    return out
 
 
 def _collect_class_attr_frames(
@@ -7795,19 +7843,21 @@ def _extract_function_signature(
         return_type=return_type,
         lineno=func_node.lineno,
         row_var=_rowpoly_row_var(func_node),
+        param_row_vars=_rowpoly_param_row_vars(func_node),
     )
 
 
-# A sentinel column name that cannot appear as a real source column. Injected
-# into a @rowpoly helper's parameter frame to skolemize the row variable: if
-# the body provably drops it, the body does not preserve arbitrary caller
-# extras (C-14 Tier 4).
-_ROW_SKOLEM = "\x00__rowvar__"
+def _row_skolem(index: int) -> str:
+    """A sentinel column name (per row variable) that cannot appear in real
+    source. Injected into a parameter frame to skolemize its row variable: if
+    the body provably drops it, the body does not preserve that parameter's
+    arbitrary caller extras (C-14 Tier 4/5)."""
+    return f"\x00__rowvar_{index}__"
 
 
 def _check_row_preservation(
     func_node: ast.FunctionDef | ast.AsyncFunctionDef,
-    row_var: str,
+    row_var_by_param: dict[str, str],
     input_types: dict[str, FrameType],
     registry: FunctionRegistry | None,
     schema_registry: SchemaRegistry,
@@ -7815,27 +7865,33 @@ def _check_row_preservation(
     current_class_name: str | None,
     module_consts: dict[str, str | list[str] | int] | None,
 ) -> list[str]:
-    """Verify a ``@rowpoly`` helper body preserves the row variable (C-14 Tier 4).
+    """Verify a ``@rowpoly`` helper preserves each row variable (C-14 Tier 4/5).
 
-    Skolemize ``row_var`` by injecting a sentinel extra column into the single
-    frame parameter, re-analyze the body, and flag PLY043 at the first return
-    point that PROVABLY drops the sentinel (a closed frame without it — e.g. an
-    explicit ``select``/``group_by().agg()``). An open result is not provably a
-    drop, so it stays silent (gradual). Only single-frame-parameter helpers are
-    checked; the multi-frame case is the ``R1 # R2`` scope deferred to Tier 5.
+    For every (parameter -> row variable) in ``row_var_by_param``, skolemize
+    the parameter by injecting a DISTINCT sentinel column, analyze the body
+    once, and flag PLY043 for any row variable whose sentinel is PROVABLY
+    dropped at a return point (a closed frame lacking it — e.g. an explicit
+    ``select`` / ``group_by().agg()``). An open result is not a provable drop,
+    so it stays silent (gradual). Distinct sentinels let a join helper confirm
+    both sides survive, and name exactly which side is dropped.
     """
-    frame_params = [name for name in input_types]
-    if len(frame_params) != 1:
+    targets = {p: rv for p, rv in row_var_by_param.items() if p in input_types}
+    if not targets:
         return []
-    param = frame_params[0]
-    base = input_types[param]
-    # Don't skolemize a frame that already (somehow) carries the sentinel.
-    if _ROW_SKOLEM in base.columns:
-        return []
-    skolem_frame = copy.copy(base)
-    skolem_frame.columns = {**base.columns, _ROW_SKOLEM: ColumnSpec(dtype=Unknown())}
+
     skolem_inputs = dict(input_types)
-    skolem_inputs[param] = skolem_frame
+    skolem_of: dict[str, str] = {}  # param -> its sentinel column name
+    for index, param in enumerate(sorted(targets)):
+        base = input_types[param]
+        sentinel = _row_skolem(index)
+        if sentinel in base.columns:
+            continue
+        frame = copy.copy(base)
+        frame.columns = {**base.columns, sentinel: ColumnSpec(dtype=Unknown())}
+        skolem_inputs[param] = frame
+        skolem_of[param] = sentinel
+    if not skolem_of:
+        return []
 
     # Throwaway pass: its errors/warnings duplicate the real pass and are
     # discarded; we only read the return frames.
@@ -7855,19 +7911,24 @@ def _check_row_preservation(
     return_frames = probe.return_frames
     if not return_frames and probe.return_type is not None:
         return_frames = [(func_node.lineno, probe.return_type)]
-    for lineno, frame in return_frames:
-        if frame is not None and frame.lacks(_ROW_SKOLEM):
-            return [
-                tag(
-                    PLY043,
-                    f"@rowpoly('{row_var}') helper drops the row variable: the frame "
-                    f"returned at line {lineno} does not preserve the caller's extra "
-                    f"columns. A row-polymorphic helper must keep every input column "
-                    f"(use with_columns / pl.all() rather than selecting a fixed set), "
-                    f"or drop the @rowpoly decorator.",
+
+    errors: list[str] = []
+    for param, sentinel in skolem_of.items():
+        row_var = targets[param]
+        for lineno, frame in return_frames:
+            if frame is not None and frame.lacks(sentinel):
+                errors.append(
+                    tag(
+                        PLY043,
+                        f"@rowpoly: helper does not preserve row variable '{row_var}' "
+                        f"(parameter '{param}') — the frame returned at line {lineno} "
+                        f"provably drops it. A row-polymorphic helper must keep every "
+                        f"column of '{param}' (use with_columns / pl.all() rather than "
+                        f"selecting a fixed set), or remove '{row_var}' from @rowpoly.",
+                    )
                 )
-            ]
-    return []
+                break  # one diagnostic per row variable
+    return errors
 
 
 def analyze_function(
@@ -8058,22 +8119,36 @@ def analyze_function(
                 )
             )
 
-    # Row polymorphism (C-14 Tier 4): a @rowpoly helper must preserve the row
-    # variable. Verify the body doesn't provably drop arbitrary caller extras.
-    row_var = _rowpoly_row_var(func_node)
-    if row_var is not None and declared_return is not None:
-        body_analyzer.errors.extend(
-            _check_row_preservation(
-                func_node,
-                row_var,
-                input_types,
-                registry,
-                schema_registry,
-                class_registry,
-                current_class_name,
-                module_consts,
+    # Row polymorphism (C-14 Tier 4/5): a @rowpoly helper must preserve each
+    # row variable. Build the (parameter -> row variable) map to verify:
+    # per-parameter keyword form (Tier 5) names them directly; the positional
+    # form (Tier 4) binds the single shared variable to the sole frame param
+    # (a multi-param positional @rowpoly("R") is the ill-defined R1 # R2 case
+    # and is left unchecked).
+    if declared_return is not None:
+        param_row_vars = _rowpoly_param_row_vars(func_node)
+        if param_row_vars:
+            row_var_by_param = param_row_vars
+        else:
+            shared = _rowpoly_row_var(func_node)
+            row_var_by_param = (
+                {next(iter(input_types)): shared}
+                if shared is not None and len(input_types) == 1
+                else {}
             )
-        )
+        if row_var_by_param:
+            body_analyzer.errors.extend(
+                _check_row_preservation(
+                    func_node,
+                    row_var_by_param,
+                    input_types,
+                    registry,
+                    schema_registry,
+                    class_registry,
+                    current_class_name,
+                    module_consts,
+                )
+            )
 
     # Methods report class-qualified names so two classes' same-named
     # methods stay distinguishable in output and in the name->line

@@ -25,7 +25,11 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from polypolarism.analyzer import _is_frame_subtype
+from polypolarism.analyzer import (
+    FunctionSignature,
+    _is_frame_subtype,
+    _thread_row_poly_extras,
+)
 from polypolarism.checker import _is_subtype
 from polypolarism.expr_infer import (
     TypePromotionError,
@@ -276,3 +280,79 @@ class TestFrameSubtyping:
             for name, spec in columns.items()
         }
         assert _is_frame_subtype(actual, FrameType(widened))
+
+
+# ---------------------------------------------------------------------------
+# _thread_row_poly_extras: row-variable threading laws (C-14 Tier 3/5)
+# ---------------------------------------------------------------------------
+#
+# Threading adds a @rowpoly helper's caller extras (argument columns beyond the
+# declared parameter schema) onto the declared-return frame. The laws the
+# inference relies on: the declared return is never weakened (its columns and
+# their dtypes survive unchanged), and threading only ever ADDS columns.
+
+_EXTRA_NAMES = st.sampled_from(("e1", "e2", "e3", "e4"))
+
+
+def _single_param_sig(param_columns) -> FunctionSignature:
+    """A one-frame-parameter @rowpoly signature for threading tests."""
+    return FunctionSignature(
+        name="helper",
+        parameters={"a": (0, FrameType(dict(param_columns)))},
+        return_type=None,
+        lineno=1,
+        row_var="R",
+    )
+
+
+class TestRowThreading:
+    @given(frame_columns, frame_columns, st.dictionaries(_EXTRA_NAMES, column_specs, max_size=3))
+    def test_declared_return_columns_are_never_weakened(
+        self, param_columns, return_columns, extra_columns
+    ):
+        # Every declared-return column keeps its exact spec after threading —
+        # the helper's output contract wins over any same-named caller extra.
+        sig = _single_param_sig(param_columns)
+        arg = FrameType({**param_columns, **extra_columns})
+        base = FrameType(dict(return_columns))
+        result = _thread_row_poly_extras(sig, [arg], base)
+        for name, spec in base.columns.items():
+            assert result.columns[name] == spec
+
+    @given(frame_columns, frame_columns, st.dictionaries(_EXTRA_NAMES, column_specs, max_size=3))
+    def test_threading_only_adds_columns(self, param_columns, return_columns, extra_columns):
+        # The result is a superset of the declared-return columns (threading
+        # never drops a declared column).
+        sig = _single_param_sig(param_columns)
+        arg = FrameType({**param_columns, **extra_columns})
+        base = FrameType(dict(return_columns))
+        result = _thread_row_poly_extras(sig, [arg], base)
+        assert set(result.columns) >= set(base.columns)
+
+    @given(frame_columns, frame_columns)
+    def test_no_extras_is_identity(self, param_columns, return_columns):
+        # When the argument carries nothing beyond the declared parameter
+        # schema, threading returns the base unchanged.
+        sig = _single_param_sig(param_columns)
+        arg = FrameType(dict(param_columns))
+        base = FrameType(dict(return_columns))
+        result = _thread_row_poly_extras(sig, [arg], base)
+        assert result is base
+
+    @given(
+        frame_columns,
+        frame_columns,
+        st.dictionaries(_EXTRA_NAMES, column_specs, min_size=1, max_size=3),
+    )
+    def test_extras_disjoint_from_return_are_all_present(
+        self, param_columns, return_columns, extra_columns
+    ):
+        # Extras whose names collide with neither the parameter nor the
+        # declared return appear verbatim in the result.
+        sig = _single_param_sig(param_columns)
+        arg = FrameType({**param_columns, **extra_columns})
+        base = FrameType(dict(return_columns))
+        result = _thread_row_poly_extras(sig, [arg], base)
+        for name, spec in extra_columns.items():
+            if name not in param_columns and name not in return_columns:
+                assert result.columns[name] == spec

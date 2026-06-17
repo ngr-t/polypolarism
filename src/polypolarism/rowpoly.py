@@ -33,19 +33,27 @@ __all__ = ["rowpoly"]
 _F = TypeVar("_F", bound=Callable[..., object])
 
 
-def rowpoly(name: str) -> Callable[[_F], _F]:
-    """Tag the decorated function with row variable ``name`` (runtime no-op).
+def rowpoly(*args: str, **kwargs: str) -> Callable[[_F], _F]:
+    """Tag the decorated function with row variable(s) (runtime no-op).
 
-    The polypolarism static analyzer reads the row-variable name from this
-    decorator in the AST; at runtime the decorator returns the function
-    unchanged so Pandera validation and ordinary calls are unaffected.
+    Accepts both surfaces and is inert under each:
+
+    - ``@rowpoly("R")`` — a single shared row variable, and
+    - ``@rowpoly(a="R1", b="R2")`` — one row variable per parameter (C-14
+      Tier 5).
+
+    The polypolarism static analyzer reads the names from this decorator in
+    the AST; at runtime the decorator returns the function unchanged so Pandera
+    validation and ordinary calls are unaffected. It deliberately accepts any
+    arguments (the signature is never enforced at runtime) so neither surface
+    raises at import time.
     """
 
     def decorate(fn: _F) -> _F:
         # Builtins / ``__slots__`` objects reject attribute writes — the
         # AST-level read is what the analyzer relies on, so swallow those.
         with contextlib.suppress(AttributeError, TypeError):
-            fn.__pp_rowpoly__ = name  # type: ignore[attr-defined]
+            fn.__pp_rowpoly__ = args[0] if args else kwargs  # type: ignore[attr-defined]
         return fn
 
     return decorate
