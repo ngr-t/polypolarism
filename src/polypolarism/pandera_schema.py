@@ -890,6 +890,63 @@ def _resolve_module_path(module: str | None, current_file: Path, level: int = 0)
     return None
 
 
+def collect_imported_function_defs(
+    tree: ast.Module, file_path: Path
+) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
+    """Map a name bound by a project-local ``from X import f`` to its def node.
+
+    For each ``from X import f`` / ``from .X import f`` (and aliased
+    ``... import f as g``) in ``tree``, resolves ``X`` to a file on disk
+    via :func:`_resolve_module_path` (same project-local-only rules the
+    schema importer uses — stdlib / third-party / unresolvable imports are
+    skipped), parses it, and records any top-level ``def`` / ``async def``
+    named ``f`` under the binding name (``g`` if aliased, else ``f``).
+
+    Only DIRECT, top-level functions of the imported module are returned —
+    one level of import resolution, mirroring how schemas are followed for
+    a call site. Re-exports (the imported module itself doing
+    ``from base import f``) are NOT chased here; deep transitive helper
+    chains are out of scope (the caller still gets the same-module and
+    one-hop cases, which is the verified gap).
+
+    Reads + ``ast.parse`` only — never imports or executes the target
+    (the no-dynamic-execution invariant). Cycle-safe: each resolved file
+    is parsed at most once.
+    """
+    out: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
+    parsed: dict[Path, dict[str, ast.FunctionDef | ast.AsyncFunctionDef]] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        resolved = _resolve_module_path(node.module, file_path, node.level)
+        if resolved is None:
+            continue
+        try:
+            real = resolved.resolve()
+        except OSError:
+            continue
+        funcs = parsed.get(real)
+        if funcs is None:
+            try:
+                sub_tree = ast.parse(resolved.read_text())
+            except (OSError, UnicodeDecodeError, SyntaxError):
+                parsed[real] = {}
+                continue
+            funcs = {
+                stmt.name: stmt
+                for stmt in sub_tree.body
+                if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef))
+            }
+            parsed[real] = funcs
+        for alias in node.names:
+            if alias.name == "*":
+                continue
+            func_node = funcs.get(alias.name)
+            if func_node is not None:
+                out.setdefault(alias.asname or alias.name, func_node)
+    return out
+
+
 def _merge_imports(
     tree: ast.Module,
     current_file: Path,

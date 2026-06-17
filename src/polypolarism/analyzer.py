@@ -125,6 +125,7 @@ from polypolarism.pandera_annotation import (
 )
 from polypolarism.pandera_schema import (
     SchemaRegistry,
+    collect_imported_function_defs,
     collect_schemas,
     collect_schemas_with_imports,
 )
@@ -8552,6 +8553,35 @@ def analyze_source(
             inferred_returns={},
         )
         class_registry.register_method(class_name, info)
+    # Project-local imported helpers (row-poly follow-up #1): a typed helper
+    # ``from <module> import f`` is registered under the name it's bound as so
+    # a call ``f(...)`` resolves its DataFrame[Schema] return (and threads its
+    # @rowpoly row variables) exactly like a same-module helper, instead of
+    # degrading to PLW003 / "could not infer return type". Only ADDS names a
+    # local def hasn't already claimed — a same-module function shadows the
+    # import (Python name binding). The schema_registry already carries the
+    # imported module's schemas (collect_schemas_with_imports), so the
+    # helper's annotation resolves against real dtypes. Stdlib / third-party /
+    # unresolvable imports never reach here, so they stay on the PLW003 path.
+    if file_path is not None:
+        for bound_name, imported_func in collect_imported_function_defs(tree, file_path).items():
+            if bound_name in registry.functions:
+                continue
+            imported_sig = _extract_function_signature(imported_func, schema_registry)
+            if imported_sig is None:
+                # No frame-typed signature — leave it to the PLW003 path
+                # rather than registering an untyped node whose body lives in
+                # another file (the body analyzer can only inline same-file
+                # nodes safely).
+                continue
+            registry.register(
+                FunctionInfo(
+                    name=bound_name,
+                    node=imported_func,
+                    signature=imported_sig,
+                    inferred_returns={},
+                )
+            )
     # Frame-typed instance attributes declared anywhere in the class body
     # (__init__ assignment, class-level / @dataclass field annotation,
     # @property return) — issues #104/#108.
