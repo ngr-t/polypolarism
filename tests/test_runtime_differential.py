@@ -118,6 +118,16 @@ SKIP: dict[str, str] = {
         "column-membership guard: guarded column is absent from the input schema, "
         "so synthesized inputs can't reach the guarded branch"
     ),
+    # -- @rowpoly preservation (C-14 Tier 4, PLY043): the helper provably drops
+    #    the caller's extra columns, but that property is relative to the
+    #    CALLER — an input synthesized from the parameter schema alone has no
+    #    extras to drop, so the body runs and validates cleanly at runtime
+    #    while the static verdict is FAIL. Static-only by nature (Pandera
+    #    cannot check a caller-relative preservation claim).
+    "invalid/rowpoly_drops_row_variable.py": (
+        "@rowpoly preservation is caller-relative; a schema-synthesized input has no "
+        "extras to drop, so there is no runtime counterpart to the static PLY043"
+    ),
     # -- known modeled divergence: sink_csv(lazy=True) terminates the plan at
     #    runtime (collect() writes the file and yields a 0-column frame);
     #    polypolarism deliberately models sink_* as identity (see fixture).

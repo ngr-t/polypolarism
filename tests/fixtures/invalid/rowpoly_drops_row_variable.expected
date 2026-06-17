@@ -1,0 +1,2 @@
+add_score: FAIL
+  error: [PLY043] @rowpoly('R') helper drops the row variable: the frame returned at line 44 does not preserve the caller's extra columns. A row-polymorphic helper must keep every input column (use with_columns / pl.all() rather than selecting a fixed set), or drop the @rowpoly decorator.

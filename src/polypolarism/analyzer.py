@@ -84,6 +84,7 @@ from polypolarism.diagnostics import (
     PLY033,
     PLY041,
     PLY042,
+    PLY043,
     parse_type_ignore,
     tag,
 )
@@ -7797,6 +7798,78 @@ def _extract_function_signature(
     )
 
 
+# A sentinel column name that cannot appear as a real source column. Injected
+# into a @rowpoly helper's parameter frame to skolemize the row variable: if
+# the body provably drops it, the body does not preserve arbitrary caller
+# extras (C-14 Tier 4).
+_ROW_SKOLEM = "\x00__rowvar__"
+
+
+def _check_row_preservation(
+    func_node: ast.FunctionDef | ast.AsyncFunctionDef,
+    row_var: str,
+    input_types: dict[str, FrameType],
+    registry: FunctionRegistry | None,
+    schema_registry: SchemaRegistry,
+    class_registry: ClassRegistry,
+    current_class_name: str | None,
+    module_consts: dict[str, str | list[str] | int] | None,
+) -> list[str]:
+    """Verify a ``@rowpoly`` helper body preserves the row variable (C-14 Tier 4).
+
+    Skolemize ``row_var`` by injecting a sentinel extra column into the single
+    frame parameter, re-analyze the body, and flag PLY043 at the first return
+    point that PROVABLY drops the sentinel (a closed frame without it — e.g. an
+    explicit ``select``/``group_by().agg()``). An open result is not provably a
+    drop, so it stays silent (gradual). Only single-frame-parameter helpers are
+    checked; the multi-frame case is the ``R1 # R2`` scope deferred to Tier 5.
+    """
+    frame_params = [name for name in input_types]
+    if len(frame_params) != 1:
+        return []
+    param = frame_params[0]
+    base = input_types[param]
+    # Don't skolemize a frame that already (somehow) carries the sentinel.
+    if _ROW_SKOLEM in base.columns:
+        return []
+    skolem_frame = copy.copy(base)
+    skolem_frame.columns = {**base.columns, _ROW_SKOLEM: ColumnSpec(dtype=Unknown())}
+    skolem_inputs = dict(input_types)
+    skolem_inputs[param] = skolem_frame
+
+    # Throwaway pass: its errors/warnings duplicate the real pass and are
+    # discarded; we only read the return frames.
+    probe = FunctionBodyAnalyzer(
+        skolem_inputs,
+        [],
+        registry,
+        schema_registry,
+        warnings=[],
+        class_registry=class_registry,
+        current_class_name=current_class_name,
+        module_consts=module_consts,
+    )
+    for stmt in func_node.body:
+        probe.visit(stmt)
+
+    return_frames = probe.return_frames
+    if not return_frames and probe.return_type is not None:
+        return_frames = [(func_node.lineno, probe.return_type)]
+    for lineno, frame in return_frames:
+        if frame is not None and frame.lacks(_ROW_SKOLEM):
+            return [
+                tag(
+                    PLY043,
+                    f"@rowpoly('{row_var}') helper drops the row variable: the frame "
+                    f"returned at line {lineno} does not preserve the caller's extra "
+                    f"columns. A row-polymorphic helper must keep every input column "
+                    f"(use with_columns / pl.all() rather than selecting a fixed set), "
+                    f"or drop the @rowpoly decorator.",
+                )
+            ]
+    return []
+
+
 def analyze_function(
     func_node: ast.FunctionDef | ast.AsyncFunctionDef,
     registry: FunctionRegistry | None = None,
@@ -7984,6 +8057,23 @@ def analyze_function(
                     f"{actual_kind}[...]; {fix}.",
                 )
             )
+
+    # Row polymorphism (C-14 Tier 4): a @rowpoly helper must preserve the row
+    # variable. Verify the body doesn't provably drop arbitrary caller extras.
+    row_var = _rowpoly_row_var(func_node)
+    if row_var is not None and declared_return is not None:
+        body_analyzer.errors.extend(
+            _check_row_preservation(
+                func_node,
+                row_var,
+                input_types,
+                registry,
+                schema_registry,
+                class_registry,
+                current_class_name,
+                module_consts,
+            )
+        )
 
     # Methods report class-qualified names so two classes' same-named
     # methods stay distinguishable in output and in the name->line
