@@ -159,6 +159,8 @@ polypolarism --no-version-check path/to/file.py
   sub-namespace reference.
 - [Diagnostics](docs/diagnostics.md) — `PLY###` / `PLW###` codes, JSON
   output, and the schema diff block.
+- [Row polymorphism](docs/row-polymorphism.md) — the opt-in `@rowpoly`
+  dialect for column-preserving helpers (threading + `PLY043`).
 - [Leniency](docs/leniency.md) — when a clean run is *not* a proof.
 - [Supported versions](docs/versions.md) — Polars `1.37+` / Pandera
   `0.19+`, lockfile detection, and `[tool.polypolarism]` config.

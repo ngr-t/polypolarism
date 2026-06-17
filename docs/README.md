@@ -13,6 +13,10 @@ quick-start example.
   window/time-series, selectors, and `pl.*` constructors.
 - [Diagnostics](diagnostics.md) — the `PLY###` / `PLW###` code tables,
   apply-style helper warnings, JSON output, and the schema diff block.
+- [Row polymorphism](row-polymorphism.md) — the opt-in `@rowpoly` dialect:
+  threading a column-preserving helper's "rest" row from input to output
+  with real dtypes, the `PLY043` preservation check, and the static-only /
+  Pandera-stays-runtime-authority constraint.
 - [Leniency](leniency.md) — when a clean run is not a proof: the gradual
   rules that let a column pass without a precise check.
 - [Supported versions](versions.md) — the Polars / Pandera support window

@@ -24,6 +24,7 @@ Errors are tagged with a stable `[PLY###]` prefix for IDE/CI consumers:
 | `PLY040` | declared return type does not match the inferred return type — one shared code for the whole family: missing column, extra column, dtype difference, or the return type could not be inferred |
 | `PLY041` | a schema field's `Annotated[pl.<Dtype>, ...]` metadata arity provably crashes pandera — the TypeError fires the first time the schema is used (`validate` / `@pa.check_types`), so every function referencing the schema is dead on arrival |
 | `PLY042` | a column referenced inside a function is not declared in its (non-strict) parameter/validated schema — an undeclared dependency on caller extras ("checked island"), not a provable runtime failure; declare the column, or take a bare `pl.DataFrame` for row-polymorphic helpers |
+| `PLY043` | a `@rowpoly` helper body provably drops its row variable — a return point produces a closed frame that loses the caller's extra columns (e.g. a `select` of a fixed column set), breaking the threading promise. Static-only (the property is relative to the caller). Use `with_columns` / `select(pl.all())`, or remove the row variable from `@rowpoly`. See [Row polymorphism](row-polymorphism.md) |
 
 ## Apply-style helpers and warning codes
 
@@ -73,7 +74,11 @@ The JSON payload also carries a `functions` array — one entry per
 analyzed function with its source span and schema summaries (parameter
 frames, declared/inferred return frames as rendered dtype maps, plus
 `open` / `strict` / `lazy` markers). Editor integrations use it to show
-hovers without re-running the analysis.
+hovers without re-running the analysis. A `@rowpoly` helper additionally
+carries its bound row variable(s) — `"row_var": "R"` for `@rowpoly("R")`
+or `"param_row_vars": {"a": "R1", "b": "R2"}` for the keyword form (added
+only when present, so the payload stays backward-compatible). See
+[Row polymorphism](row-polymorphism.md).
 
 ## Schema diff block
 
