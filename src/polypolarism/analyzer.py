@@ -1138,11 +1138,21 @@ def _lazy_like(result: FrameType | None, source: FrameType | None) -> FrameType 
     if result is None or source is None:
         return result
     result.is_lazy = source.is_lazy
+    # A self-reducing op (select / drop) already stamped its own
+    # ``row_var_dropped`` / ``row_var_drop_node`` (the latter possibly ``None``
+    # when it stacked onto a prior drop — deliberately unattributable). Do NOT
+    # overwrite that: only NON-reducing ops (with_columns / rename / cast / sort
+    # / filter — which leave ``row_var_dropped`` False) inherit from the source.
+    result_self_reduced = result.row_var_dropped
     # Monotonic: once a predicate reduction may have dropped a caller extra,
     # no downstream frame method restores it (add-only / rename / cast / sort /
     # filter all keep the gap), so the mark sticks regardless of open/closed.
-    if source.row_var_dropped:
+    if source.row_var_dropped and not result_self_reduced:
         result.row_var_dropped = True
+        # Carry the originating reduction (node, method) forward so a later
+        # add-only / rename op (e.g. ``df.select(~D).with_columns(...)``) keeps
+        # the @rowpoly ``drops=`` relaxation checkable on the RETURN frame.
+        result.row_var_drop_node = source.row_var_drop_node
     return result
 
 
@@ -1231,9 +1241,19 @@ def _thread_row_poly_extras(
     caller column beyond it, so threading them would claim columns that fail
     at runtime. Such a return is left untouched (a @rowpoly on a strict-return
     helper is a no-op — the surface is only meaningful with an open return).
+
+    A declared ``@rowpoly("R", drops=<selector>)`` restriction excludes the
+    matching caller extras from the threaded set: the helper removes them, so
+    claiming them present would be a false negative (a downstream read of a
+    dropped column would falsely type-check). Extras the declared selector
+    matches over the argument frame are dropped; an unresolvable selector drops
+    EVERY extra for that argument (lenient — prefer omitting a column over
+    falsely keeping it). The dropped extra simply degrades to the open frame's
+    ``Unknown`` / absent, never a precise claim.
     """
     if base.strict:
         return base
+    drops_decl = sig.rowpoly_drops
     extras: dict[str, ColumnSpec] = {}
     for idx, arg_type in enumerate(arg_types):
         if arg_type is None:
@@ -1244,8 +1264,17 @@ def _thread_row_poly_extras(
         param_name, param_type = param
         if only_params is not None and param_name not in only_params:
             continue
+        # Columns the declared ``drops=`` selector removes — never thread them.
+        # ``None`` (unresolvable over this argument frame) means we cannot prove
+        # any extra survives, so drop them all (lenient over a false claim).
+        dropped_extras: set[str] | None = None
+        if drops_decl is not None:
+            matched = _resolve_selector(drops_decl, arg_type)
+            dropped_extras = set(matched) if matched is not None else None
         for name, spec in arg_type.columns.items():
             if name in param_type.columns:
+                continue
+            if drops_decl is not None and (dropped_extras is None or name in dropped_extras):
                 continue
             existing = extras.get(name)
             if existing is None:
@@ -2263,6 +2292,29 @@ def _reduction_drops_unknown_extras(node: ast.Call, method: Literal["select", "d
     return any(c in ("all", "predicate") for c in classes)
 
 
+def _row_var_drop_node(
+    input_frame: FrameType,
+    node: ast.Call,
+    method: Literal["select", "drop"],
+    this_reduces: bool,
+) -> tuple[object, str] | None:
+    """The single ``(reducing-call, method)`` to attribute a row-variable drop to.
+
+    Used by the @rowpoly ``drops=`` relaxation: the preservation check (PLY043)
+    compares the body's reduction against the declared ``drops=`` selector, so
+    it must know WHICH reduction caused the drop. Returns ``(node, method)`` only
+    when THIS ``select`` / ``drop`` is the SOLE reduction — i.e. it reduces and
+    the receiver was not already row-variable-dropped. If a prior reduction
+    already marked the receiver, two stacked predicate reductions are in play and
+    the drop is no longer attributable to one selector: return ``None`` so the
+    relaxation cannot prove containment and conservatively keeps flagging. A
+    non-reducing call returns ``None`` (its receiver's node, if any, is carried
+    forward by ``_lazy_like`` instead)."""
+    if this_reduces and not input_frame.row_var_dropped:
+        return (node, method)
+    return None
+
+
 # =============================================================================
 # Data structures for function registry
 # =============================================================================
@@ -2283,6 +2335,11 @@ class FunctionSignature:
     # Per-parameter row variables from ``@rowpoly(a="R1", b="R2")`` (Tier 5):
     # param name -> row-variable name. Threads each named parameter's extras.
     param_row_vars: dict[str, str] = field(default_factory=dict)
+    # Declared ``drops=`` restriction of a positional ``@rowpoly("R", drops=...)``
+    # (the selector/regex AST node), else None. Names the pattern-class of caller
+    # extras the helper intentionally removes: relaxes the PLY043 preservation
+    # check for that pattern and is excluded from the threaded caller extras.
+    rowpoly_drops: ast.expr | None = None
 
     def get_param_by_position(self, position: int) -> tuple[str, FrameType] | None:
         """Get parameter info by position."""
@@ -2538,6 +2595,10 @@ class FunctionAnalysis:
     # forms. Surfaced (alongside ``row_var``) in the ``--format json`` function
     # entries so editors can show a helper's bound row variable(s) (Tier 6).
     param_row_vars: dict[str, str] = field(default_factory=dict)
+    # Declared ``drops=`` restriction of a positional ``@rowpoly("R", drops=...)``
+    # (the selector/regex AST node), else None. Recorded for parity with the
+    # signature; consumed by the preservation check and call-site threading.
+    rowpoly_drops: ast.expr | None = None
 
     @property
     def has_errors(self) -> bool:
@@ -7051,14 +7112,16 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             # open ``rest`` OR by a skolem sentinel column) not matching it is
             # dropped — preservation is no longer provable. Sticky: carry a
             # prior drop forward.
+            this_reduces = _reduction_drops_unknown_extras(node, "select")
             row_var_dropped = _row_var_may_be_dropped(input_frame) and (
-                input_frame.row_var_dropped or _reduction_drops_unknown_extras(node, "select")
+                input_frame.row_var_dropped or this_reduces
             )
             return FrameType(
                 columns=result_columns,
                 rest=RowVar("name") if has_opaque_outputs else None,
                 column_spans=column_spans,
                 row_var_dropped=row_var_dropped,
+                row_var_drop_node=_row_var_drop_node(input_frame, node, "select", this_reduces),
             )
         return None
 
@@ -7261,8 +7324,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         # predicate's matches, so a caller extra (open ``rest`` OR a skolem
         # sentinel) that matches is dropped. ``drop("name")`` removes only
         # named columns (unknown extras survive) and never sets this. Sticky.
+        this_reduces = _reduction_drops_unknown_extras(node, "drop")
         row_var_dropped = _row_var_may_be_dropped(input_frame) and (
-            input_frame.row_var_dropped or _reduction_drops_unknown_extras(node, "drop")
+            input_frame.row_var_dropped or this_reduces
         )
         return FrameType(
             columns=result_columns,
@@ -7272,6 +7336,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             nonstrict_schema=input_frame.nonstrict_schema,
             schema_name=input_frame.schema_name,
             row_var_dropped=row_var_dropped,
+            row_var_drop_node=_row_var_drop_node(input_frame, node, "drop", this_reduces),
         )
 
     def _infer_rename_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
@@ -8224,9 +8289,53 @@ def _rowpoly_param_row_vars(node: ast.FunctionDef | ast.AsyncFunctionDef) -> dic
     for kw in deco.keywords:
         if kw.arg is None:  # ``**kwargs`` spread — not a parameter name
             continue
+        if kw.arg == "drops":  # the declared row-variable restriction, not a param
+            continue
         if isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
             out[kw.arg] = kw.value.value
     return out
+
+
+def _rowpoly_drops(node: ast.FunctionDef | ast.AsyncFunctionDef) -> ast.expr | None:
+    """The declared ``drops=`` selector of a positional ``@rowpoly("R", drops=...)``.
+
+    ``drops=`` lets a helper DECLARE that it intentionally removes a
+    pattern-class of the caller's extras (a sanitizer stripping every
+    ``_internal_*`` column) while preserving everything else. The declared
+    selector relaxes the PLY043 preservation check for exactly that pattern and
+    is excluded from the threaded caller extras at the call site.
+
+    Returns the selector/regex AST node when ``drops=`` is a RECOGNISED
+    selector form (``cs.starts_with(...)``, ``cs.matches(...)``,
+    ``cs.numeric()``, ``pl.exclude("^re$")``, ``pl.col("^re$")``, selector
+    algebra over those, ...). A non-selector / unresolvable value is ignored
+    (lenient — treated as if ``drops=`` were absent) so a typo cannot silently
+    widen the relaxation. Only the positional ``@rowpoly("R", drops=...)`` form
+    is read here; combining ``drops=`` with the per-parameter keyword surface
+    (``@rowpoly(a="R1", b="R2", drops=...)``) is deferred — the per-param form
+    leaves this ``None``.
+
+    The decorator stays a runtime no-op: ``drops=cs.starts_with("_")`` passes a
+    real selector object to ``polypolarism.rowpoly``, whose ``*args, **kwargs``
+    signature accepts and discards it (see ``polypolarism.rowpoly``).
+    """
+    deco = _find_rowpoly_decorator(node)
+    if deco is None:
+        return None
+    # Defer the per-parameter keyword form: a ``drops=`` alongside
+    # ``@rowpoly(a="R1", b="R2")`` is ambiguous (which row variable does it
+    # restrict?) and out of scope for now — leave it None.
+    if any(kw.arg is not None and kw.arg != "drops" for kw in deco.keywords):
+        return None
+    for kw in deco.keywords:
+        if kw.arg != "drops":
+            continue
+        # Only a recognised selector/regex shape arms the relaxation; anything
+        # else is ignored (lenient — behave as if ``drops=`` were absent).
+        if _classify_selector(kw.value) is not None:
+            return kw.value
+        return None
+    return None
 
 
 def _collect_class_attr_frames(
@@ -8351,6 +8460,7 @@ def _extract_function_signature(
         lineno=func_node.lineno,
         row_var=_rowpoly_row_var(func_node),
         param_row_vars=_rowpoly_param_row_vars(func_node),
+        rowpoly_drops=_rowpoly_drops(func_node),
     )
 
 
@@ -8391,6 +8501,250 @@ def _row_var_may_be_dropped(frame: FrameType) -> bool:
     return frame.rest is not None or _frame_has_row_skolem(frame)
 
 
+# Synthetic probe-column name a declared ``drops=`` selector is guaranteed to
+# match (a stand-in caller extra that DOES fall in the declared pattern). Like
+# the skolem sentinel its name cannot collide with real source.
+_DROP_PROBE_PREFIX = "\x00__drop_probe_"
+
+
+def _declared_drop_probe_columns(drops_node: ast.expr) -> dict[str, ColumnSpec]:
+    """Synthetic columns a declared ``drops=`` selector MATCHES, for the
+    containment test in ``_reduction_within_declared_drop``.
+
+    The relaxation accepts a body whose reduction removes only columns the
+    declared selector matches. Resolving both selectors against the bare skolem
+    frame proves the canonical ``df.select(~D)`` / ``df.drop(D)`` (identical
+    selectors -> identical match sets), but gives the subset test no teeth for a
+    body selector that is merely NARROWER than the declaration. Adding a column
+    the DECLARED selector matches makes "removed ⊆ declared_matched" meaningful:
+    a body that removes that probe must itself match the declared pattern.
+
+    Synthesises a name for the recognisable NAME-pattern forms
+    (``starts_with`` / ``ends_with`` / ``contains`` / ``matches`` / a
+    ``pl.col``/``pl.exclude`` regex) and a dtype for the dtype selectors
+    (``cs.numeric()`` ...). Selector algebra recurses into operands so each
+    contributes its own probe. Unrecognised shapes contribute nothing — the
+    test then leans on the identical-selector path only (sound: fewer probes
+    just means the relaxation accepts a narrower set of bodies, never a
+    broader one). All probe names are NUL-prefixed so they never collide with
+    real or sentinel columns."""
+    probes: dict[str, ColumnSpec] = {}
+
+    def _walk(node: ast.expr) -> None:
+        if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.BitOr, ast.BitAnd, ast.Sub)):
+            _walk(node.left)
+            _walk(node.right)
+            return
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Invert):
+            _walk(node.operand)
+            return
+        # ``pl.col("^re$")`` / ``pl.exclude("^re$")`` regex and ``cs.matches``
+        # patterns: pick a name the regex matches via ``re.search``.
+        pattern = _regex_col_pattern(node)
+        if pattern is not None:
+            name = _name_matching_regex(pattern)
+            if name is not None:
+                probes[name] = ColumnSpec(dtype=Unknown())
+            return
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            return
+        if not isinstance(node.func.value, ast.Name):
+            return
+        attr = node.func.attr
+        idx = len(probes)
+        base = f"{_DROP_PROBE_PREFIX}{idx}__"
+        if attr in ("starts_with", "ends_with", "contains"):
+            needle = _str_constant(node.args[0]) if node.args else None
+            if needle is None:
+                return
+            if attr == "starts_with":
+                probes[f"{needle}{base}"] = ColumnSpec(dtype=Unknown())
+            elif attr == "ends_with":
+                probes[f"{base}{needle}"] = ColumnSpec(dtype=Unknown())
+            else:  # contains
+                probes[f"{base}{needle}__"] = ColumnSpec(dtype=Unknown())
+            return
+        if attr == "matches":
+            pat = _str_constant(node.args[0]) if node.args else None
+            if pat is not None:
+                name = _name_matching_regex(pat)
+                if name is not None:
+                    probes[name] = ColumnSpec(dtype=Unknown())
+            return
+        dtype = _probe_dtype_for_selector(attr)
+        if dtype is not None:
+            probes[base] = ColumnSpec(dtype=dtype)
+
+    _walk(drops_node)
+    return probes
+
+
+def _name_matching_regex(pattern: str) -> str | None:
+    """A synthetic column name matched by ``pattern`` (``re.search`` semantics),
+    or ``None`` when one cannot be cheaply produced. Tries the NUL-prefixed
+    probe base and a small spread of plausible names; returns the first that
+    ``re.search``-matches so the declared-drop probe is a genuine match."""
+    try:
+        rx = re.compile(pattern)
+    except re.error:
+        return None
+    candidates = (
+        f"{_DROP_PROBE_PREFIX}re__",
+        "tmp_junk",
+        "_internal_x",
+        "internal_x",
+        "a",
+        "x_1",
+    )
+    for cand in candidates:
+        if rx.search(cand) is not None:
+            return cand
+    return None
+
+
+def _probe_dtype_for_selector(name: str) -> DataType | None:
+    """A representative dtype a ``cs.<name>()`` dtype-selector matches, for a
+    declared-drop probe column. ``None`` for non-dtype selectors."""
+    mapping: dict[str, DataType] = {
+        "numeric": Int64(),
+        "integer": Int64(),
+        "float": Float64(),
+        "string": Utf8(),
+        "boolean": Boolean(),
+        "temporal": Date(),
+    }
+    return mapping.get(name)
+
+
+def _reduction_within_declared_drop(
+    drop_node: tuple[object, str] | None,
+    drops_decl: ast.expr,
+    skolem_frame: FrameType,
+    sentinel: str,
+) -> bool:
+    """True when a body reduction provably drops ONLY columns the declared
+    ``@rowpoly(..., drops=...)`` selector matches — the precise relaxation of
+    PLY043 (C-14 follow-up).
+
+    ``drop_node`` is the ``(select|drop call, method)`` that caused the
+    row-variable drop (``None`` when the drop is not attributable to one
+    resolvable reduction — then this returns ``False`` and the caller keeps
+    flagging). The body must, over a frame augmented with a column the DECLARED
+    selector matches:
+
+    1. KEEP the skolem sentinel (an arbitrary caller extra NOT matching the
+       declaration must survive), AND
+    2. remove ONLY columns the declared selector matches
+       (``removed ⊆ declared_matched``).
+
+    Resolving both selectors against the same augmented frame proves the
+    canonical ``df.select(~D)`` / ``df.drop(D)`` and any body whose removed set
+    is a subset of the declaration's. Anything it cannot resolve (a kwarg /
+    expression select arg, an unresolvable selector) returns ``False`` — fall
+    back to flagging rather than silently accept. Soundness: the only accepted
+    relaxation is "drops a subset of the declared pattern, keeps everything
+    else"; a broader/other drop (the sentinel falls in ``removed``, or
+    ``removed`` escapes ``declared_matched``) still flags."""
+    if drop_node is None:
+        return False
+    node, method = drop_node
+    if not isinstance(node, ast.Call):
+        return False
+
+    # Augment with synthetic columns each selector matches so "removed ⊆
+    # declared_matched" actually bites. Probes from the DECLARED selector let a
+    # NARROWER body drop pass; probes from the BODY's reduction args expose a
+    # BROADER body drop — a column the body removes that the declaration does
+    # NOT match falls outside ``declared_matched`` and flags. Walking the body
+    # args reuses the same recursion (``~D`` recurses into ``D``), so e.g.
+    # ``select(~cs.starts_with("_"))`` contributes a ``_*`` probe that
+    # ``cs.starts_with("_internal_")`` does not match.
+    probes = _declared_drop_probe_columns(drops_decl)
+    for arg in node.args:
+        probes.update(_declared_drop_probe_columns(arg))
+    augmented = copy.copy(skolem_frame)
+    augmented.columns = {**skolem_frame.columns, **probes}
+    # Drop any stale open ``rest`` so resolution is over a fixed, known set —
+    # the relaxation reasons about the enumerable probe + sentinel columns.
+    augmented.rest = None
+    augmented.absent = frozenset()
+
+    declared_matched = _resolve_selector(drops_decl, augmented)
+    if declared_matched is None:
+        return False
+    declared_set = set(declared_matched)
+    # The declaration must not claim to match the sentinel (a non-declared
+    # extra) — if it did, the declared pattern is effectively match-all and the
+    # relaxation would silence real drops.
+    if sentinel in declared_set:
+        return False
+
+    all_cols = set(augmented.columns)
+    if method == "drop":
+        # ``drop(args)`` removes the matched/named set.
+        removed = _resolve_drop_targets(node, augmented)
+        if removed is None:
+            return False
+    else:  # select
+        # ``select(args)`` keeps the matched/named set; everything else is
+        # removed. Only fully-selector/name positional args are resolvable;
+        # a kwarg / expression arg makes the kept set uncertain -> bail.
+        kept = _resolve_select_kept(node, augmented)
+        if kept is None:
+            return False
+        removed = all_cols - kept
+        if sentinel not in kept:
+            return False
+    if sentinel in removed:
+        return False
+    return removed <= declared_set
+
+
+def _resolve_drop_targets(node: ast.Call, frame: FrameType) -> set[str] | None:
+    """The column-name set a ``drop(...)`` call removes, or ``None`` if any arg
+    is not a resolvable selector / literal name (then the caller bails)."""
+    removed: set[str] = set()
+    for arg in node.args:
+        sel = _resolve_selector(arg, frame)
+        if sel is not None:
+            removed.update(sel)
+            continue
+        single = _str_constant(arg)
+        multi = _str_list_or_tuple(arg)
+        if single is not None:
+            removed.add(single)
+        elif multi is not None:
+            removed.update(multi)
+        else:
+            return None
+    if node.keywords:
+        return None
+    return removed
+
+
+def _resolve_select_kept(node: ast.Call, frame: FrameType) -> set[str] | None:
+    """The column-name set a ``select(...)`` call keeps, or ``None`` if any arg
+    is not a resolvable selector / literal name (a kwarg / expression makes the
+    kept set uncertain -> bail so the relaxation does not over-accept)."""
+    if node.keywords:
+        return None
+    kept: set[str] = set()
+    for arg in _flatten_column_args(node.args):
+        sel = _resolve_selector(arg, frame)
+        if sel is not None:
+            kept.update(sel)
+            continue
+        single = _str_constant(arg)
+        multi = _str_list_or_tuple(arg)
+        if single is not None:
+            kept.add(single)
+        elif multi is not None:
+            kept.update(multi)
+        else:
+            return None
+    return kept
+
+
 def _check_row_preservation(
     func_node: ast.FunctionDef | ast.AsyncFunctionDef,
     row_var_by_param: dict[str, str],
@@ -8400,6 +8754,7 @@ def _check_row_preservation(
     class_registry: ClassRegistry,
     current_class_name: str | None,
     module_consts: dict[str, str | list[str] | int] | None,
+    rowpoly_drops: ast.expr | None = None,
 ) -> list[str]:
     """Verify a ``@rowpoly`` helper preserves each row variable (C-14 Tier 4/5).
 
@@ -8464,6 +8819,27 @@ def _check_row_preservation(
                 continue
             dropped_by_name = frame.lacks(sentinel)
             dropped_by_pattern = frame.row_var_dropped
+            # @rowpoly ``drops=`` relaxation (C-14 follow-up): a PATTERN drop
+            # the helper explicitly DECLARED is accepted when the body's
+            # reduction provably removes only columns matching the declaration
+            # (and keeps the sentinel). A by-name drop (closed frame missing the
+            # sentinel) is NOT relaxed — ``drops=`` declares a pattern, not a
+            # licence to drop everything. Soundness lives in
+            # ``_reduction_within_declared_drop``: a broader/other drop still
+            # flags, and an unattributable / unresolvable reduction bails to
+            # flagging.
+            if (
+                rowpoly_drops is not None
+                and dropped_by_pattern
+                and not dropped_by_name
+                and _reduction_within_declared_drop(
+                    frame.row_var_drop_node,
+                    rowpoly_drops,
+                    skolem_inputs[param],
+                    sentinel,
+                )
+            ):
+                continue
             if dropped_by_name or dropped_by_pattern:
                 if dropped_by_pattern and not dropped_by_name:
                     detail = (
@@ -8535,6 +8911,9 @@ def _imported_rowpoly_preservation(
     param_row_vars = _rowpoly_param_row_vars(func_node)
     if param_row_vars:
         row_var_by_param = param_row_vars
+        # ``drops=`` with the per-param keyword form is deferred (see
+        # ``_rowpoly_drops``); only the positional form arms the relaxation.
+        drops_decl: ast.expr | None = None
     else:
         shared = _rowpoly_row_var(func_node)
         if shared is None:
@@ -8546,6 +8925,7 @@ def _imported_rowpoly_preservation(
             # is nothing to gate.
             return None
         row_var_by_param = {frame_params[0]: shared}
+        drops_decl = _rowpoly_drops(func_node)
 
     # input_types are the imported helper's OWN declared parameter schemas,
     # resolved against the merged schema_registry (which already carries the
@@ -8577,6 +8957,7 @@ def _imported_rowpoly_preservation(
         ClassRegistry(),
         None,
         None,
+        rowpoly_drops=drops_decl,
     )
 
 
@@ -8778,6 +9159,9 @@ def analyze_function(
         param_row_vars = _rowpoly_param_row_vars(func_node)
         if param_row_vars:
             row_var_by_param = param_row_vars
+            # ``drops=`` with the per-param keyword form is deferred; only the
+            # positional ``@rowpoly("R", drops=...)`` arms the relaxation.
+            drops_decl: ast.expr | None = None
         else:
             shared = _rowpoly_row_var(func_node)
             row_var_by_param = (
@@ -8785,6 +9169,7 @@ def analyze_function(
                 if shared is not None and len(input_types) == 1
                 else {}
             )
+            drops_decl = _rowpoly_drops(func_node)
         if row_var_by_param:
             body_analyzer.errors.extend(
                 _check_row_preservation(
@@ -8796,6 +9181,7 @@ def analyze_function(
                     class_registry,
                     current_class_name,
                     module_consts,
+                    rowpoly_drops=drops_decl,
                 )
             )
 
@@ -8820,6 +9206,7 @@ def analyze_function(
         return_frames=body_analyzer.return_frames,
         row_var=_rowpoly_row_var(func_node),
         param_row_vars=_rowpoly_param_row_vars(func_node),
+        rowpoly_drops=_rowpoly_drops(func_node),
     )
 
 

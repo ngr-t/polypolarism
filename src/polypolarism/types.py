@@ -690,6 +690,16 @@ class FrameType:
     # add-only / rename ops (with_columns, rename) — once the row variable's
     # extras could have been dropped, a downstream add does not restore them.
     row_var_dropped: bool
+    # @rowpoly ``drops=`` provenance (no semantic effect, excluded from
+    # ``__eq__``): when ``row_var_dropped`` was set by a SINGLE column-reducing
+    # ``select`` / ``drop`` over this frame, the ``(node, method)`` of that
+    # reduction — so the @rowpoly preservation check (PLY043) can compare the
+    # body's reduction against a declared ``drops=`` selector and accept a drop
+    # the helper explicitly declared. ``None`` when the drop is not attributable
+    # to one resolvable reduction (e.g. two stacked predicate reductions, or an
+    # inherited/sticky drop); the preservation check then cannot prove
+    # containment and conservatively keeps flagging.
+    row_var_drop_node: tuple[object, str] | None
 
     def __init__(
         self,
@@ -703,6 +713,7 @@ class FrameType:
         schema_name: str | None = None,
         column_spans: Mapping[str, Span] | None = None,
         row_var_dropped: bool = False,
+        row_var_drop_node: tuple[object, str] | None = None,
     ) -> None:
         normalized: dict[str, ColumnSpec] = {}
         if columns:
@@ -730,6 +741,7 @@ class FrameType:
         # stays closed but the reduction could still have dropped a caller
         # extra). Never consulted by ``__eq__``.
         self.row_var_dropped = row_var_dropped
+        self.row_var_drop_node = row_var_drop_node
         # A pinned column trumps a stale absence mark; absence is only
         # meaningful while the frame is open.
         if absent and rest is not None:

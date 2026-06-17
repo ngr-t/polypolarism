@@ -8,6 +8,8 @@ validating. The pandera-interaction half of this guarantee is pinned in
 inertness without needing pandera installed.
 """
 
+import pytest
+
 from polypolarism import rowpoly
 
 
@@ -56,6 +58,37 @@ def test_keyword_form_is_runtime_inert() -> None:
 
     assert g(1, 2) == (1, 2)
     assert g.__pp_rowpoly__ == {"a": "R1", "b": "R2"}
+
+
+def test_drops_keyword_is_runtime_inert() -> None:
+    # ``@rowpoly("R", drops=<selector>)`` passes a real selector object to the
+    # no-op decorator. The decorator's ``*args, **kwargs`` signature accepts and
+    # discards it, so it must not raise at import / definition and must leave the
+    # function unchanged. The ``drops=`` restriction is a STATIC-only declaration
+    # read from the AST by the analyzer.
+    cs = pytest.importorskip("polars.selectors")
+
+    @rowpoly("R", drops=cs.starts_with("_internal_"))
+    def sanitize(df):
+        return df
+
+    assert sanitize(123) == 123
+    # The positional row variable is still stamped for introspection; the
+    # ``drops=`` keyword does not perturb that.
+    assert sanitize.__pp_rowpoly__ == "R"
+
+
+def test_drops_keyword_inert_without_polars() -> None:
+    # Inertness must not depend on polars: ``drops=`` is just an arbitrary
+    # keyword to the runtime decorator. Any object passes through unchanged.
+    sentinel = object()
+
+    @rowpoly("R", drops=sentinel)
+    def f(x):
+        return x
+
+    assert f(7) == 7
+    assert f.__pp_rowpoly__ == "R"
 
 
 def test_does_not_crash_on_unwritable_target() -> None:

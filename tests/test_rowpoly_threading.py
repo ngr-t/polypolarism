@@ -189,3 +189,100 @@ def test_threaded_result_carries_extra_column_in_inferred_type() -> None:
     rt = analyses["use"].inferred_return_type
     assert "region" in rt.columns
     assert str(rt.columns["region"].dtype) == "Utf8"
+
+
+# --- @rowpoly("R", drops=<selector>): the threaded caller extras EXCLUDE the
+# columns the helper declares it drops. A downstream reference to a dropped
+# caller extra must NOT be precisely claimed (that would be a false negative).
+
+_DROPS_PRELUDE = """
+import polars as pl
+import polars.selectors as cs
+import pandera.polars as pa
+from pandera.typing.polars import DataFrame
+from polypolarism import rowpoly
+
+
+class InId(pa.DataFrameModel):
+    id: int
+
+    class Config:
+        strict = False
+
+
+@rowpoly("R", drops=cs.starts_with("_internal_"))
+def sanitize(df: DataFrame[InId]) -> DataFrame[InId]:
+    return df.select(~cs.starts_with("_internal_"))
+
+
+class CallerWithInternal(pa.DataFrameModel):
+    id: int
+    region: str
+    _internal_secret: int
+
+    class Config:
+        strict = False
+"""
+
+
+def _check_drops(body: str) -> dict:
+    src = textwrap.dedent(_DROPS_PRELUDE) + textwrap.dedent(body)
+    return {r.function_name: r for r in check_source(src)}
+
+
+def _analyze_drops(body: str) -> dict:
+    src = textwrap.dedent(_DROPS_PRELUDE) + textwrap.dedent(body)
+    return {a.name: a for a in analyze_source(src)}
+
+
+def test_drops_dropped_column_is_not_precisely_claimed() -> None:
+    # Declaring the DROPPED `_internal_secret` with a WRONG dtype must PASS:
+    # it is not threaded (degrades to Unknown leniency), so the false dtype is
+    # not caught — proving the dropped column is NOT precisely claimed present.
+    results = _check_drops("""
+        class ResultDropped(pa.DataFrameModel):
+            id: int
+            _internal_secret: str
+
+            class Config:
+                strict = False
+
+        def use_dropped(c: DataFrame[CallerWithInternal]) -> DataFrame[ResultDropped]:
+            out = sanitize(c)
+            return out.select("id", "_internal_secret")
+    """)
+    assert results["use_dropped"].passed, [str(e) for e in results["use_dropped"].errors]
+
+
+def test_drops_surviving_extra_is_still_precisely_threaded() -> None:
+    # The NON-dropped `region` is still threaded precisely: declaring it with a
+    # wrong dtype (int, really Utf8) FAILS. Contrast the dropped column above,
+    # which is leniently accepted — the relaxation excludes only the declared
+    # pattern, not every extra.
+    results = _check_drops("""
+        class ResultRegionWrong(pa.DataFrameModel):
+            id: int
+            region: int
+
+            class Config:
+                strict = False
+
+        def use_region(c: DataFrame[CallerWithInternal]) -> DataFrame[ResultRegionWrong]:
+            out = sanitize(c)
+            return out.select("id", "region")
+    """)
+    assert not results["use_region"].passed
+    assert any("PLY040" in str(e) for e in results["use_region"].errors)
+
+
+def test_drops_surviving_extra_present_dropped_absent_in_inferred() -> None:
+    analyses = _analyze_drops("""
+        def use(c: DataFrame[CallerWithInternal]) -> DataFrame[InId]:
+            return sanitize(c)
+    """)
+    rt = analyses["use"].inferred_return_type
+    # `region` survived the declared drop -> threaded precisely as Utf8.
+    assert "region" in rt.columns
+    assert str(rt.columns["region"].dtype) == "Utf8"
+    # `_internal_secret` is declared dropped -> NOT precisely threaded.
+    assert "_internal_secret" not in rt.columns

@@ -395,3 +395,144 @@ def test_rename_still_preserves_row_variable() -> None:
             return df.rename({"id": "key"})
     """)
     assert not _has_ply043(results["reshape"])
+
+
+# --- C-14 follow-up: @rowpoly("R", drops=<selector>) declares an INTENTIONAL
+# pattern-restriction of the row variable. A body whose only reduction matches
+# the declared selector is accepted (the user declared it); a broader/other
+# drop still flags. ``drops=`` never becomes a blanket "preserve nothing"
+# escape — only the declared pattern is exempt.
+
+
+def test_drops_select_complement_of_declared_is_accepted() -> None:
+    # The canonical sanitizer: declare drops=cs.starts_with("_internal_") and
+    # the body select(~cs.starts_with("_internal_")) — drops EXACTLY the
+    # declared pattern, keeps everything else => accepted (no PLY043).
+    results = _check("""
+        @rowpoly("R", drops=cs.starts_with("_internal_"))
+        def sanitize(df: DataFrame[InId]) -> DataFrame[InId]:
+            return df.select(~cs.starts_with("_internal_"))
+    """)
+    assert not _has_ply043(results["sanitize"])
+
+
+def test_drops_drop_declared_selector_is_accepted() -> None:
+    # The ``drop`` spelling of the same declaration: drop(cs.starts_with(...))
+    # removes exactly the declared pattern => accepted.
+    results = _check("""
+        @rowpoly("R", drops=cs.starts_with("_internal_"))
+        def sanitize(df: DataFrame[InId]) -> DataFrame[InId]:
+            return df.drop(cs.starts_with("_internal_"))
+    """)
+    assert not _has_ply043(results["sanitize"])
+
+
+def test_drops_with_trailing_with_columns_is_accepted() -> None:
+    # The reduction is followed by an add-only with_columns; the drop node must
+    # still be attributable to the declared selector on the RETURN frame.
+    results = _check("""
+        @rowpoly("R", drops=cs.starts_with("_internal_"))
+        def sanitize(df: DataFrame[OutScore]) -> DataFrame[OutScore]:
+            return df.select(~cs.starts_with("_internal_")).with_columns(
+                score=pl.col("id").cast(pl.Float64)
+            )
+    """)
+    assert not _has_ply043(results["sanitize"])
+
+
+def test_drops_regex_matches_matching_body_is_accepted() -> None:
+    # Declared drops as a cs.matches regex (the columns REMOVED match it); body
+    # keeps the complement via select(~cs.matches(...)) — drops exactly the
+    # declared regex pattern => accepted.
+    results = _check("""
+        @rowpoly("R", drops=cs.matches("^tmp_.*$"))
+        def sanitize(df: DataFrame[OutScore]) -> DataFrame[OutScore]:
+            return df.select(~cs.matches("^tmp_.*$")).with_columns(
+                score=pl.col("id").cast(pl.Float64)
+            )
+    """)
+    assert not _has_ply043(results["sanitize"])
+
+
+def test_drops_narrower_than_declared_is_accepted() -> None:
+    # Body drops a STRICTER subset (cs.starts_with("_internal_secret")) of the
+    # declared pattern (cs.starts_with("_internal_")) => still within the
+    # declaration, accepted.
+    results = _check("""
+        @rowpoly("R", drops=cs.starts_with("_internal_"))
+        def sanitize(df: DataFrame[InId]) -> DataFrame[InId]:
+            return df.select(~cs.starts_with("_internal_secret"))
+    """)
+    assert not _has_ply043(results["sanitize"])
+
+
+def test_drops_broader_than_declared_still_ply043() -> None:
+    # Declared drops=cs.starts_with("_internal_") but the body drops the BROADER
+    # cs.starts_with("_") (every underscore-prefixed column). That removes
+    # caller extras OUTSIDE the declared pattern (e.g. "_other") => still
+    # PLY043.
+    results = _check("""
+        @rowpoly("R", drops=cs.starts_with("_internal_"))
+        def sanitize(df: DataFrame[InId]) -> DataFrame[InId]:
+            return df.select(~cs.starts_with("_"))
+    """)
+    assert _has_ply043(results["sanitize"])
+
+
+def test_drops_different_pattern_still_ply043() -> None:
+    # Declared drops a name pattern; the body drops by DTYPE (cs.numeric()).
+    # A non-numeric caller extra outside the declared name pattern is dropped
+    # => still PLY043.
+    results = _check("""
+        @rowpoly("R", drops=cs.starts_with("_internal_"))
+        def sanitize(df: DataFrame[InId]) -> DataFrame[InId]:
+            return df.drop(cs.numeric())
+    """)
+    assert _has_ply043(results["sanitize"])
+
+
+def test_drops_does_not_relax_fixed_name_select() -> None:
+    # ``drops=`` declares a PATTERN, not a licence to drop everything: a fixed
+    # select("id") closes the frame and drops every caller extra by name =>
+    # still PLY043 (not a pattern drop the declaration covers).
+    results = _check("""
+        @rowpoly("R", drops=cs.starts_with("_internal_"))
+        def sanitize(df: DataFrame[InId]) -> DataFrame[OutScore]:
+            return df.select("id").with_columns(score=pl.col("id").cast(pl.Float64))
+    """)
+    assert _has_ply043(results["sanitize"])
+
+
+def test_without_drops_pattern_drop_still_ply043_no_regression() -> None:
+    # The SAME body as the accepted sanitizer, but WITHOUT drops= => no
+    # declaration, so the pattern drop is rejected exactly as today.
+    results = _check("""
+        @rowpoly("R")
+        def sanitize(df: DataFrame[InId]) -> DataFrame[InId]:
+            return df.select(~cs.starts_with("_internal_"))
+    """)
+    assert _has_ply043(results["sanitize"])
+
+
+def test_drops_non_selector_value_is_ignored() -> None:
+    # A non-selector drops= value (a string literal) is unrecognised and
+    # ignored — behaves as if drops= were absent => the pattern drop still
+    # flags (lenient: a typo cannot silence a real drop).
+    results = _check("""
+        @rowpoly("R", drops="_internal_")
+        def sanitize(df: DataFrame[InId]) -> DataFrame[InId]:
+            return df.select(~cs.starts_with("_internal_"))
+    """)
+    assert _has_ply043(results["sanitize"])
+
+
+def test_drops_stacked_reductions_still_ply043() -> None:
+    # Two stacked predicate reductions: the drop is no longer attributable to a
+    # single selector, so containment cannot be proven => still PLY043 even
+    # though the first reduction alone is within the declaration.
+    results = _check("""
+        @rowpoly("R", drops=cs.starts_with("_internal_"))
+        def sanitize(df: DataFrame[InId]) -> DataFrame[InId]:
+            return df.select(~cs.starts_with("_internal_")).select(~cs.ends_with("_tmp"))
+    """)
+    assert _has_ply043(results["sanitize"])

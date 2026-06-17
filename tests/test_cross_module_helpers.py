@@ -280,6 +280,16 @@ def bad_pattern_drop(df: DataFrame[InId]) -> DataFrame[OutScore]:
     return df.select(pl.exclude("^tmp_.*$")).with_columns(
         score=pl.col("id").cast(pl.Float64)
     )
+
+
+import polars.selectors as cs
+
+
+# Declares its intended drop via drops= — PRESERVING for everything else,
+# so it threads precisely (minus the declared pattern).
+@rowpoly("R", drops=cs.starts_with("_internal_"))
+def sanitize(df: DataFrame[InId]) -> DataFrame[InId]:
+    return df.select(~cs.starts_with("_internal_"))
 """
 
 
@@ -408,6 +418,54 @@ class TestImportedRowpolyHelperPreservation:
         results = check_file(tmp_path / "app.py")
         use = next(r for r in results if r.function_name == "use_wrong")
         # Still threaded precisely -> wrong dtype is PLY040, and no PLW014.
+        assert not use.passed
+        assert any("PLY040" in str(e) for e in use.errors), use.errors
+
+    def test_imported_drops_helper_threads_excluding_declared_drop(self, tmp_path: Path) -> None:
+        # An imported @rowpoly("R", drops=...) helper provably preserves the
+        # row variable (modulo the declared pattern), so it is NOT gated by
+        # PLW014 and threads the SURVIVING extra precisely — but the declared-
+        # dropped column is excluded. A wrong-dtype declaration of the surviving
+        # `region` is a precise PLY040; the dropped `_internal_secret` is not
+        # precisely claimed (would degrade to leniency).
+        _project_marker(tmp_path)
+        _write(tmp_path / "helpers.py", _HELPERS_DROP)
+        _write(
+            tmp_path / "app.py",
+            """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+            from helpers import sanitize
+
+
+            class Wide(pa.DataFrameModel):
+                id: int
+                region: str
+                _internal_secret: int
+
+                class Config:
+                    strict = False
+
+
+            class ResultRegionWrong(pa.DataFrameModel):
+                id: int
+                region: int
+
+                class Config:
+                    strict = False
+
+
+            def use_region(c: DataFrame[Wide]) -> DataFrame[ResultRegionWrong]:
+                out = sanitize(c)
+                return out.select("id", "region")
+            """,
+        )
+        results = check_file(tmp_path / "app.py")
+        use = next(r for r in results if r.function_name == "use_region")
+        # Preserving (modulo the declared drop) -> no PLW014 gate.
+        assert not any("PLW014" in str(w) for w in use.warnings), use.warnings
+        # `region` threaded precisely -> wrong dtype is a precise PLY040.
         assert not use.passed
         assert any("PLY040" in str(e) for e in use.errors), use.errors
         assert not any("PLW014" in str(w) for w in use.warnings), use.warnings

@@ -36,15 +36,23 @@ _F = TypeVar("_F", bound=Callable[..., object])
 @overload
 def rowpoly(fn: _F, /) -> _F: ...  # bare ``@rowpoly`` (no parens)
 @overload
-def rowpoly(*args: str, **kwargs: str) -> Callable[[_F], _F]: ...  # @rowpoly("R") / (a="R1")
-def rowpoly(*args: object, **kwargs: str) -> object:
+def rowpoly(
+    *args: str, **kwargs: object
+) -> Callable[[_F], _F]: ...  # @rowpoly("R") / (a="R1") / (drops=<selector>)
+def rowpoly(*args: object, **kwargs: object) -> object:
     """Tag the decorated function with row variable(s) (runtime no-op).
 
-    Accepts both surfaces and is inert under each:
+    Accepts every surface and is inert under each:
 
-    - ``@rowpoly("R")`` — a single shared row variable, and
+    - ``@rowpoly("R")`` — a single shared row variable,
     - ``@rowpoly(a="R1", b="R2")`` — one row variable per parameter (C-14
-      Tier 5).
+      Tier 5), and
+    - ``@rowpoly("R", drops=<selector>)`` — declares an intended pattern
+      restriction of the row variable (the helper removes the matching caller
+      extras). ``drops=`` is a STATIC-only declaration the analyzer reads from
+      the AST; the selector object passed here is accepted and discarded at
+      runtime (the ``**kwargs: object`` signature is what keeps a real
+      ``cs.starts_with(...)`` selector import-inert).
 
     The polypolarism static analyzer reads the names from this decorator in
     the AST; at runtime the decorator returns the function unchanged so Pandera
