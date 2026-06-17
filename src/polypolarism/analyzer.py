@@ -58,6 +58,7 @@ from polypolarism.diagnostics import (
     PLW011,
     PLW012,
     PLW013,
+    PLW014,
     PLY001,
     PLY002,
     PLY003,
@@ -2299,6 +2300,18 @@ class FunctionInfo:
     node: ast.FunctionDef | ast.AsyncFunctionDef  # AST node for body analysis
     signature: FunctionSignature | None  # None if untyped
     inferred_returns: dict[tuple, FrameType] = field(default_factory=dict)
+    # True for a helper resolved from a project-local ``from X import f``
+    # import (issue #112). The helper's own file is where its @rowpoly
+    # preservation (PLY043) fires; analyzing ONLY the caller never runs that
+    # check, so the call site must not trust the @rowpoly marker blindly.
+    imported: bool = False
+    # For an imported @rowpoly helper, the result of running the preservation
+    # check on its (cross-module) def at registration time. ``None`` means it
+    # was not checked (not an imported rowpoly helper, or it has no row
+    # variable to verify); an EMPTY list means it provably preserves; a
+    # NON-EMPTY list holds the PLY043 strings of the drops found — the call
+    # site must NOT thread such a helper and surfaces PLW014 instead.
+    rowpoly_preservation: list[str] | None = None
 
 
 @dataclass
@@ -6374,6 +6387,31 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                                     f"parameter schema is strict"
                                 )
             result = _call_result_frame(sig.return_type, func_name)
+            # Issue #112: an IMPORTED @rowpoly helper's preservation (PLY043)
+            # is only checked in its own file. We established it at
+            # registration (FunctionInfo.rowpoly_preservation); a non-empty
+            # result means the body provably drops the row variable (or its
+            # schema didn't resolve cross-module). Threading would then claim
+            # caller extras the helper deletes at runtime — a soundness false
+            # negative. Refuse to thread (degrade to today's non-rowpoly
+            # result) and surface PLW014 so the caller isn't silent. A
+            # genuinely-preserving import (empty list) still threads precisely.
+            if (
+                func_info.imported
+                and func_info.rowpoly_preservation
+                and (sig.param_row_vars or sig.row_var is not None)
+            ):
+                self.warnings.append(
+                    tag(
+                        PLW014,
+                        f"call to imported @rowpoly helper '{func_name}': it does not "
+                        f"provably preserve its row variable across modules, so its "
+                        f"caller extras are NOT threaded (downstream references to "
+                        f"those columns are not tracked). Analyze the helper's own "
+                        f"module to see the PLY043 reason and fix the helper.",
+                    )
+                )
+                return result
             # Row polymorphism: a @rowpoly helper preserves the caller's extra
             # columns into the result with their real dtypes. Tier 3 (positional
             # ``@rowpoly("R")``) threads every frame parameter; Tier 5
@@ -8424,6 +8462,94 @@ def _check_row_preservation(
     return errors
 
 
+def _imported_rowpoly_preservation(
+    func_node: ast.FunctionDef | ast.AsyncFunctionDef,
+    signature: FunctionSignature,
+    registry: FunctionRegistry,
+    schema_registry: SchemaRegistry,
+) -> list[str] | None:
+    """Establish the PLY043 preservation guarantee for an IMPORTED @rowpoly
+    helper at registration time (issue #112).
+
+    A same-module @rowpoly helper's preservation is verified when its own file
+    is analyzed; an imported helper is parsed for its signature only, so the
+    call site would otherwise trust the @rowpoly marker without ever checking
+    that the body keeps the row variable. This runs that check once, on the
+    imported def, reusing ``_check_row_preservation`` (never reimplementing the
+    drop logic).
+
+    Returns:
+        ``None``         — not a row-poly helper / nothing to verify, so the
+                           call site behaves as before (no gating).
+        ``[]``           — provably preserves: thread precisely (no regression
+                           to the c318e03 win).
+        non-empty ``[]`` — the PLY043 drop strings: the call site must NOT
+                           thread and surfaces PLW014 instead.
+
+    Soundness: if preservation can't be ESTABLISHED (the helper has a row
+    variable but its parameter schemas don't resolve to frame types, so the
+    skolem probe can't run), return a non-empty marker so the call site
+    DEGRADES rather than trusting — favouring a false negative's absence over a
+    false claim. A genuinely-preserving helper whose schemas DO resolve still
+    returns ``[]`` and threads (bounded false-positive risk).
+
+    Runs a single, non-recursive skolem probe over the imported body. The
+    caller memoizes the result on ``FunctionInfo`` (computed once per import),
+    and the probe shares ``registry`` whose ``analyzing`` re-entrancy set
+    guards any helper-of-helper inlining against cycles.
+    """
+    # Build the (parameter -> row variable) map exactly as analyze_function
+    # does: the keyword form (Tier 5) names them; the positional form (Tier 4)
+    # binds the single shared variable to the sole frame parameter (a
+    # multi-param positional @rowpoly is the unchecked R1 # R2 case).
+    param_row_vars = _rowpoly_param_row_vars(func_node)
+    if param_row_vars:
+        row_var_by_param = param_row_vars
+    else:
+        shared = _rowpoly_row_var(func_node)
+        if shared is None:
+            return None  # not @rowpoly — no threading to gate
+        frame_params = list(signature.parameters)
+        if len(frame_params) != 1:
+            # Positional @rowpoly with !=1 frame parameter is never threaded
+            # at the call site (mirrors _infer_function_call_type), so there
+            # is nothing to gate.
+            return None
+        row_var_by_param = {frame_params[0]: shared}
+
+    # input_types are the imported helper's OWN declared parameter schemas,
+    # resolved against the merged schema_registry (which already carries the
+    # imported module's schemas).
+    input_types: dict[str, FrameType] = {
+        name: frame for name, (_idx, frame) in signature.parameters.items()
+    }
+    if not any(p in input_types for p in row_var_by_param):
+        # The row-variable parameter's schema didn't resolve to a frame type,
+        # so the skolem probe can't establish preservation. DEGRADE: do not
+        # trust the marker.
+        return [
+            tag(
+                PLW014,
+                f"@rowpoly: could not verify that imported helper '{func_node.name}' "
+                f"preserves its row variable (its parameter schema did not resolve "
+                f"to a frame type across modules).",
+            )
+        ]
+
+    # No class context: imported helpers resolved here are top-level module
+    # functions (collect_imported_function_defs only follows top-level defs).
+    return _check_row_preservation(
+        func_node,
+        row_var_by_param,
+        input_types,
+        registry,
+        schema_registry,
+        ClassRegistry(),
+        None,
+        None,
+    )
+
+
 def analyze_function(
     func_node: ast.FunctionDef | ast.AsyncFunctionDef,
     registry: FunctionRegistry | None = None,
@@ -8871,12 +8997,23 @@ def analyze_source(
                 # another file (the body analyzer can only inline same-file
                 # nodes safely).
                 continue
+            # Issue #112: threading an imported @rowpoly helper requires the
+            # PLY043 preservation guarantee, which only fires in the helper's
+            # OWN file. Establish it here, on the imported def, so the call
+            # site can refuse to thread a helper that provably drops the row
+            # variable (rather than trusting the marker). Memoized once per
+            # import on FunctionInfo.
+            preservation = _imported_rowpoly_preservation(
+                imported_func, imported_sig, registry, schema_registry
+            )
             registry.register(
                 FunctionInfo(
                     name=bound_name,
                     node=imported_func,
                     signature=imported_sig,
                     inferred_returns={},
+                    imported=True,
+                    rowpoly_preservation=preservation,
                 )
             )
     # Frame-typed instance attributes declared anywhere in the class body

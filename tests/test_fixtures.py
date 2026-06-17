@@ -41,6 +41,11 @@ DIAGNOSTIC_CODE = re.compile(r"PL[YW]\d{3}")
 # file. Each entry must name the unit test that covers it instead.
 FIXTURE_EXEMPT_CODES = {
     "PLW010",  # environment version floor — covered by test_version_check.py
+    # imported @rowpoly helper that doesn't provably preserve its row variable
+    # (#112): can only fire from a CROSS-MODULE import resolved on disk, not a
+    # self-contained single-file fixture. Covered by
+    # tests/test_cross_module_helpers.py::TestImportedRowpolyHelperPreservation.
+    "PLW014",
 }
 
 
