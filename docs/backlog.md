@@ -236,10 +236,45 @@ Status legend: `[ ]` open / `[x]` done / `[-]` deliberately deferred.
   5. [x] *Row algebra + relations — partial.* Done 2026-06-17 (`b2e5a69`):
      per-parameter row variables `@rowpoly(a="R1", b="R2")` (multi-frame
      threading + per-variable preservation, so a join helper preserves both
-     sides), plus threading-law property tests in `test_properties.py`. **Still
-     deferred:** explicit `R1 # R2` disjointness *diagnostics*, and row
-     add / drop / rename *tracking* through the body (`lacks` promoted to a
-     polymorphic constraint). Open as a Tier-5 remainder.
+     sides), plus threading-law property tests in `test_properties.py`.
+     **Tier-5 remainder, 2026-06-17:**
+     - [x] *Row add/drop/rename tracking — no false positive.* Audited
+       whether `_check_row_preservation` (PLY043) wrongly flags
+       legitimately-preserving bodies (`with_columns`, `drop("realcol")`,
+       `rename({"realcol": ...})`, `select(pl.all())`, `select(cs.all())`,
+       conditional/early-return, `pl.concat([df, df])`). **No false positive
+       exists today** — the skolem sentinel survives all of them (the
+       all-columns selectors resolve to the full column set including the
+       sentinel; drop/rename only touch named real columns). Pinned by tests
+       in `test_rowpoly_preservation.py` and the
+       `valid/rowpoly_select_all_preserves` fixture. No new machinery was
+       needed, so the `lacks`-as-polymorphic-constraint tracking is NOT
+       built — it would be infrastructure with no defect to fix.
+     - [-] *Explicit `R1 # R2` disjointness diagnostic — DEFERRED (cannot be
+       made sound/useful).* The proposal was a definition-time warning when
+       two `@rowpoly(a="R1", b="R2")` params' declared schemas share a
+       "non-key" column name. It is dropped for three reasons:
+       1. **No key signal at definition time.** `ColumnSpec` carries no
+          key/unique marker and the body's join keys are not consulted by a
+          schema-only check, so a shared column cannot be classified as key
+          vs non-key. Every join helper shares its key (e.g. `id` in
+          `rowpoly_multivar_join`), so any "shared column" warning is a
+          **false positive** on the most common, correct case.
+       2. **Shared declared columns are not row-variable extras.** `R1`/`R2`
+          capture `arg.columns − param.columns` (`_thread_row_poly_extras`),
+          i.e. columns *beyond* the declared schema. A column present in
+          *both* declared schemas is excluded from both extras by
+          construction, so it can never cause an `R1 # R2` collision — the
+          premise of the check is conceptually wrong.
+       3. **The real collision is already covered.** A genuine non-key
+          overlap surfaces at the join (polars suffixes the right side,
+          `tag` → `tag_right`) and is checked against the declared return by
+          the existing PLY040 return-type comparison. A separate
+          definition-time warning would be redundant where it is right and a
+          false positive where it is not. A type checker must not flag
+          correct code; this diagnostic stays deferred. Revive only if a
+          schema-level key marker lands AND threading is extended so that
+          row-variable extras (not declared columns) can provably collide.
   6. [ ] *Ergonomics / tooling.* Optional inference of `R` for untyped
      helpers; JSON output exposes bound row vars; golden fixtures
      (valid / invalid / warning) + docs documenting the dialect.
