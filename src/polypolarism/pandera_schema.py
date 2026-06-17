@@ -184,6 +184,43 @@ class SchemaRegistry:
         return name in self.schemas
 
 
+def _is_type_checking_test(test: ast.expr) -> bool:
+    """True for ``TYPE_CHECKING`` / ``typing.TYPE_CHECKING`` as an ``if`` test.
+
+    Only the bare ``Name`` and single ``Attribute`` spellings are recognized
+    — the canonical annotation-only-import guard. Arbitrary boolean
+    expressions are NOT evaluated (C-13 soundness): we never guess the truth
+    of a condition we don't understand.
+    """
+    if isinstance(test, ast.Name):
+        return test.id == "TYPE_CHECKING"
+    if isinstance(test, ast.Attribute):
+        return test.attr == "TYPE_CHECKING"
+    return False
+
+
+def _import_statements(tree: ast.Module) -> list[ast.stmt]:
+    """Top-level statements, plus those nested directly under ``if
+    TYPE_CHECKING:`` at module level (C-13 gap 1).
+
+    Static-analysis convention is to treat ``TYPE_CHECKING`` as True, so the
+    canonical annotation-only import (``if TYPE_CHECKING: from m import S``)
+    is followed like a real top-level import. Only the ``body`` of such a
+    block is included — the ``orelse`` is the runtime branch and out of
+    scope. Other ``if`` blocks (unrecognized conditions) are left alone.
+
+    Returns a flat list preserving source order; callers filter for the
+    import node types they care about. Non-import statements under a
+    ``TYPE_CHECKING`` block are harmless to the import-only consumers.
+    """
+    stmts: list[ast.stmt] = []
+    for node in tree.body:
+        stmts.append(node)
+        if isinstance(node, ast.If) and _is_type_checking_test(node.test):
+            stmts.extend(node.body)
+    return stmts
+
+
 def collect_schemas_with_imports(tree: ast.Module, file_path: Path) -> SchemaRegistry:
     """Like ``collect_schemas`` but also resolves project-local imports.
 
@@ -460,11 +497,11 @@ def _scan_frame_aliases(tree: ast.Module, registry: SchemaRegistry) -> None:
     its canonical name (``"DataFrame"`` or ``"LazyFrame"``) so the annotation
     parser can resolve it (issue #96).
 
-    Only top-level ``from``-imports of the file under analysis are scanned;
-    aliases in imported modules do not propagate (consistent with Python
-    semantics).
+    Only top-level ``from``-imports of the file under analysis are scanned
+    (plus ones nested under ``if TYPE_CHECKING:`` — C-13 gap 1); aliases in
+    imported modules do not propagate (consistent with Python semantics).
     """
-    for node in tree.body:
+    for node in _import_statements(tree):
         if not isinstance(node, ast.ImportFrom):
             continue
         for alias in node.names:
@@ -915,7 +952,7 @@ def collect_imported_function_defs(
     """
     out: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
     parsed: dict[Path, dict[str, ast.FunctionDef | ast.AsyncFunctionDef]] = {}
-    for node in tree.body:
+    for node in _import_statements(tree):
         if not isinstance(node, ast.ImportFrom):
             continue
         resolved = _resolve_module_path(node.module, file_path, node.level)
@@ -967,7 +1004,7 @@ def _merge_imports(
     """
     if sub_registries is None:
         sub_registries = {}
-    for node in tree.body:
+    for node in _import_statements(tree):
         if not isinstance(node, ast.ImportFrom):
             continue
         resolved = _resolve_module_path(node.module, current_file, node.level)
@@ -1054,7 +1091,7 @@ def _merge_module_imports(
         current_real = current_file.resolve()
     except OSError:
         current_real = current_file
-    for node in tree.body:
+    for node in _import_statements(tree):
         if not isinstance(node, ast.Import):
             continue
         for alias in node.names:

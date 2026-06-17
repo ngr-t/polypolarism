@@ -14,6 +14,31 @@ from polypolarism.pandera_schema import SchemaRegistry
 from polypolarism.types import FrameType
 
 
+def _unwrap_string_annotation(annotation: ast.expr) -> ast.expr:
+    """Parse a string (forward-ref) annotation into the expression it spells.
+
+    ``def f(df: "DataFrame[S]")`` carries the annotation as an
+    ``ast.Constant(str)`` rather than the ``ast.Subscript`` the detectors
+    expect (C-13 gap 2). This is forced whenever ``from __future__ import
+    annotations`` or a ``TYPE_CHECKING`` import is in play on Python < 3.12.
+    Parse the string in ``eval`` mode and return the resulting expression
+    node so the existing annotation detection applies unchanged.
+
+    Soundness: if the string does not ``ast.parse`` as a single expression
+    (genuinely malformed, or not an annotation at all) the original node is
+    returned untouched — the caller then sees a non-frame annotation and
+    skips it, exactly as today. ``ast.parse`` only builds a tree; nothing is
+    evaluated (the no-dynamic-execution invariant). Non-string nodes pass
+    through unchanged, so already-working annotations are not affected.
+    """
+    if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+        try:
+            return ast.parse(annotation.value, mode="eval").body
+        except (SyntaxError, ValueError):
+            return annotation
+    return annotation
+
+
 def frame_annotation_schema_name(
     annotation: ast.expr,
     frame_aliases: dict[str, str] | None = None,
@@ -31,6 +56,7 @@ def frame_annotation_schema_name(
     names (``"DataFrame"``/``"LazyFrame"``) so ``DF[Schema]`` is recognised
     the same as ``DataFrame[Schema]`` (issue #96).
     """
+    annotation = _unwrap_string_annotation(annotation)
     if not isinstance(annotation, ast.Subscript):
         return None
     if _dataframe_head_name(annotation.value, frame_aliases) is None:
@@ -62,7 +88,11 @@ def extract_dataframe_annotation(
 
     Returns ``None`` if the annotation is not in a recognised form or the
     schema name is unknown to the registry.
+
+    String forward-ref annotations (``"DataFrame[Schema]"``) are unwrapped
+    first (C-13 gap 2) so quoted annotations resolve like the bare form.
     """
+    annotation = _unwrap_string_annotation(annotation)
     if not isinstance(annotation, ast.Subscript):
         return None
 
@@ -110,7 +140,11 @@ def bare_frame_annotation(annotation: ast.expr) -> str | None:
     parameter binds an empty OPEN frame: nothing is known about its
     columns, but everything the function body itself determines is
     checked.
+
+    String forward-ref annotations (``"pl.DataFrame"``) are unwrapped first
+    (C-13 gap 2) so quoted bare-frame annotations resolve like the bare form.
     """
+    annotation = _unwrap_string_annotation(annotation)
     if (
         isinstance(annotation, ast.Attribute)
         and isinstance(annotation.value, ast.Name)

@@ -903,3 +903,211 @@ class TestUnresolvedImportDiagnostic:
         results = check_file(tmp_path / "app.py")
         joined = "\n".join(str(w) for w in results[0].warnings)
         assert "import it from a project-local module" in joined
+
+
+class TestTypeCheckingImport:
+    """C-13 gap 1: a schema imported under ``if TYPE_CHECKING:`` is the
+    canonical annotation-only import — static analysis treats TYPE_CHECKING
+    as True, so it must resolve like a real top-level import (no PLW006)."""
+
+    def _write_schemas(self, tmp_path: Path) -> None:
+        _project_marker(tmp_path)
+        _write(
+            tmp_path / "schemas.py",
+            """
+            import pandera.polars as pa
+
+
+            class Users(pa.DataFrameModel):
+                user_id: int
+                name: str
+            """,
+        )
+
+    def test_type_checking_import_resolves(self, tmp_path: Path):
+        self._write_schemas(tmp_path)
+        _write(
+            tmp_path / "app.py",
+            """
+            from typing import TYPE_CHECKING
+            import polars as pl
+            from pandera.typing.polars import DataFrame
+
+            if TYPE_CHECKING:
+                from schemas import Users
+
+
+            def take_users(df: DataFrame[Users]) -> DataFrame[Users]:
+                return df.select(pl.col("user_id"), pl.col("name"))
+            """,
+        )
+        results = check_file(tmp_path / "app.py")
+        assert len(results) == 1, [r.errors for r in results]
+        # Schema resolved: no "not found" PLW006.
+        joined = "\n".join(str(w) for w in results[0].warnings)
+        assert "PLW006" not in joined, joined
+        assert results[0].passed, results[0].errors
+
+    def test_type_checking_import_catches_body_error(self, tmp_path: Path):
+        self._write_schemas(tmp_path)
+        _write(
+            tmp_path / "app.py",
+            """
+            from typing import TYPE_CHECKING
+            import polars as pl
+            from pandera.typing.polars import DataFrame
+
+            if TYPE_CHECKING:
+                from schemas import Users
+
+
+            def take_users(df: DataFrame[Users]) -> DataFrame[Users]:
+                return df.select(pl.col("user_id"), pl.col("missing_col"))
+            """,
+        )
+        results = check_file(tmp_path / "app.py")
+        assert len(results) == 1
+        assert not results[0].passed
+        joined = "\n".join(str(e) for e in results[0].errors)
+        assert "missing_col" in joined
+
+    def test_typing_dot_type_checking_resolves(self, tmp_path: Path):
+        """``if typing.TYPE_CHECKING:`` (the attribute spelling) too."""
+        self._write_schemas(tmp_path)
+        _write(
+            tmp_path / "app.py",
+            """
+            import typing
+            import polars as pl
+            from pandera.typing.polars import DataFrame
+
+            if typing.TYPE_CHECKING:
+                from schemas import Users
+
+
+            def take_users(df: DataFrame[Users]) -> DataFrame[Users]:
+                return df.select(pl.col("user_id"), pl.col("name"))
+            """,
+        )
+        results = check_file(tmp_path / "app.py")
+        assert len(results) == 1, [r.errors for r in results]
+        joined = "\n".join(str(w) for w in results[0].warnings)
+        assert "PLW006" not in joined, joined
+        assert results[0].passed, results[0].errors
+
+    def test_else_branch_import_not_followed(self, tmp_path: Path):
+        """The ``else:`` of a TYPE_CHECKING block is the runtime branch —
+        out of scope. The import there must NOT resolve (PLW006)."""
+        self._write_schemas(tmp_path)
+        _write(
+            tmp_path / "app.py",
+            """
+            from typing import TYPE_CHECKING
+            import polars as pl
+            from pandera.typing.polars import DataFrame
+
+            if TYPE_CHECKING:
+                pass
+            else:
+                from schemas import Users
+
+
+            def take_users(df: DataFrame[Users]) -> DataFrame[Users]:
+                return df
+            """,
+        )
+        results = check_file(tmp_path / "app.py")
+        assert len(results) == 1
+        joined = "\n".join(str(w) for w in results[0].warnings)
+        assert "PLW006" in joined, joined
+
+    def test_non_type_checking_condition_not_followed(self, tmp_path: Path):
+        """An arbitrary ``if`` condition is never evaluated — its imports
+        are not followed (PLW006), so we don't guess condition truth."""
+        self._write_schemas(tmp_path)
+        _write(
+            tmp_path / "app.py",
+            """
+            import sys
+            import polars as pl
+            from pandera.typing.polars import DataFrame
+
+            if sys.version_info >= (3, 12):
+                from schemas import Users
+
+
+            def take_users(df: DataFrame[Users]) -> DataFrame[Users]:
+                return df
+            """,
+        )
+        results = check_file(tmp_path / "app.py")
+        assert len(results) == 1
+        joined = "\n".join(str(w) for w in results[0].warnings)
+        assert "PLW006" in joined, joined
+
+    def test_unresolvable_type_checking_import_warns(self, tmp_path: Path):
+        """A TYPE_CHECKING import of a non-project module degrades gracefully
+        (PLW006), never crashes and never invents a resolution."""
+        _project_marker(tmp_path)
+        _write(
+            tmp_path / "app.py",
+            """
+            from typing import TYPE_CHECKING
+            from pandera.typing.polars import DataFrame
+
+            if TYPE_CHECKING:
+                from nonexistent_pkg.schemas import Users
+
+
+            def take_users(df: DataFrame[Users]) -> DataFrame[Users]:
+                return df
+            """,
+        )
+        results = check_file(tmp_path / "app.py")
+        assert len(results) == 1
+        joined = "\n".join(str(w) for w in results[0].warnings)
+        assert "PLW006" in joined, joined
+
+
+class TestCombinedTypeCheckingAndQuotedAnnotation:
+    """C-13 reproducer: ``from __future__ import annotations`` (forcing
+    quoted annotations) + a TYPE_CHECKING schema import + ``DataFrame[S]``
+    annotations. Both gaps must combine: the schema resolves AND the quoted
+    annotation is parsed, so the function is analyzed and body errors fire."""
+
+    def test_combined_reproducer_analyzed(self, tmp_path: Path):
+        _project_marker(tmp_path)
+        _write(
+            tmp_path / "schemas.py",
+            """
+            import pandera.polars as pa
+
+
+            class Users(pa.DataFrameModel):
+                user_id: int
+                name: str
+            """,
+        )
+        _write(
+            tmp_path / "app.py",
+            """
+            from __future__ import annotations
+            from typing import TYPE_CHECKING
+            import polars as pl
+            from pandera.typing.polars import DataFrame
+
+            if TYPE_CHECKING:
+                from schemas import Users
+
+
+            def take_users(df: DataFrame[Users]) -> DataFrame[Users]:
+                return df.select(pl.col("user_id"), pl.col("missing_col"))
+            """,
+        )
+        results = check_file(tmp_path / "app.py")
+        assert len(results) == 1, [r.errors for r in results]
+        joined_w = "\n".join(str(w) for w in results[0].warnings)
+        assert "PLW006" not in joined_w, joined_w
+        assert not results[0].passed
+        joined_e = "\n".join(str(e) for e in results[0].errors)
+        assert "missing_col" in joined_e

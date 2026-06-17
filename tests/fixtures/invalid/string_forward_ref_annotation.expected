@@ -1,0 +1,3 @@
+take_users: FAIL
+  error: [PLY042] column 'missing_col' is not declared in schema 'InSchema' — the (non-strict) schema admits extra columns at runtime, but this function's declaration does not promise it. Declare the column on the schema, or take a bare pl.DataFrame parameter for row-polymorphic helpers
+  error: [PLY040] Missing column 'name' of type Utf8

@@ -164,18 +164,39 @@ Status legend: `[ ]` open / `[x]` done / `[-]` deliberately deferred.
      plus validate-narrowing cover the gap. Revival conditions recorded
      in the ADR.
 
-- [ ] **C-13: import/annotation recognition gaps** (found while
-  isolating the 2026-06-12 dotted-import report; both reproduce):
-  1. Imports nested under `if TYPE_CHECKING:` are not followed —
-     `_merge_imports` / `_merge_module_imports` only scan `tree.body`,
-     so the canonical annotation-only schema import hits PLW006.
-     Static-analysis convention is to treat `TYPE_CHECKING` as True.
-  2. String annotations (`def f(df: "DataFrame[S]")`) are not parsed —
-     the function is **silently skipped** (no functions found), which
-     combines badly with (1) since TYPE_CHECKING imports force quoted
-     annotations on Python < 3.12 without `from __future__ import
-     annotations`. Parse `ast.Constant(str)` annotations via
-     `ast.parse(..., mode="eval")` at the detection sites.
+- [x] **C-13: import/annotation recognition gaps** (found while
+  isolating the 2026-06-12 dotted-import report; both reproduced).
+  DONE (2026-06-17):
+  1. Imports nested directly under `if TYPE_CHECKING:` /
+     `if typing.TYPE_CHECKING:` at module top level are now followed.
+     `pandera_schema._import_statements` flattens such blocks' `body`
+     into the iteration of `_merge_imports`, `_merge_module_imports`,
+     `collect_imported_function_defs`, and `_scan_frame_aliases` —
+     treating `TYPE_CHECKING` as True per static-analysis convention.
+     Only the bare `Name`/`Attribute` `TYPE_CHECKING` test is recognized;
+     `else:` (runtime) branches and arbitrary `if` conditions are NOT
+     evaluated (no false resolution). Resolution stays bounded by the
+     existing `_resolve_module_path` project-local rules; reads + parse
+     only.
+  2. String (forward-ref) annotations (`def f(df: "DataFrame[S]")`) are
+     now parsed: `pandera_annotation._unwrap_string_annotation` runs
+     `ast.parse(value, mode="eval").body` at the entry of
+     `extract_dataframe_annotation`, `frame_annotation_schema_name`, and
+     `bare_frame_annotation`, so every detection caller — both parameter
+     and return, in both `analyze_function` and
+     `_extract_function_signature` — sees the underlying expression. A
+     string that fails to parse is returned untouched (graceful skip, no
+     crash, no FP). The combined reproducer (`from __future__ import
+     annotations` + TYPE_CHECKING import + quoted annotations) now
+     analyzes and catches body errors.
+  Tests: `tests/test_cross_module_schemas.py::TestTypeCheckingImport`,
+  `::TestCombinedTypeCheckingAndQuotedAnnotation`; golden fixtures
+  `tests/fixtures/{valid,invalid}/string_forward_ref_annotation.py`.
+  Deferred edge case: a TYPE_CHECKING-imported *aliased* base
+  (`if TYPE_CHECKING: from base import WithId as W` + `class C(W)`) is
+  not aliased through `_collect_name_aliases` (still scans `tree.body`);
+  the unaliased name resolves, the rename does not — narrow, out of the
+  two reported gaps.
 
 - [-] **C-15: Class-body statements unanalyzed (issue #110 remainder).**
   Issue #110 extended provable-error checking (missing-column references,
