@@ -41,6 +41,7 @@ def frame_annotation_schema_name(
 def extract_dataframe_annotation(
     annotation: ast.expr,
     registry: SchemaRegistry,
+    with_field_spans: bool = False,
 ) -> FrameType | None:
     """Return the FrameType from a ``DataFrame[Schema]`` / ``LazyFrame[Schema]`` annotation.
 
@@ -73,7 +74,16 @@ def extract_dataframe_annotation(
     if schema_name is None:
         return None
 
-    base = registry.to_frame_type(schema_name)
+    # ``with_field_spans`` carries the declared-field ``column_spans`` for the
+    # SECONDARY ("declared here") mismatch location — used ONLY for the
+    # function declared-RETURN binding (issue #110). Parameter / local /
+    # validate bindings stay span-free so an input schema's field spans never
+    # masquerade as a body-producing PRIMARY span on a pass-through column.
+    base = (
+        registry.declared_return_frame(schema_name)
+        if with_field_spans
+        else registry.to_frame_type(schema_name)
+    )
     if base is None:
         return None
     # Stamp the laziness onto a copy so the registry's cached value stays neutral.
@@ -85,6 +95,7 @@ def extract_dataframe_annotation(
         coerce=base.coerce,
         nonstrict_schema=base.nonstrict_schema,
         schema_name=base.schema_name,
+        column_spans=base.column_spans,
     )
 
 

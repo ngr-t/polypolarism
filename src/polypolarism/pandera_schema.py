@@ -24,7 +24,7 @@ from polypolarism.pandera_dtype import (
     parse_field_annotation,
     unrecognized_field_spec,
 )
-from polypolarism.types import ColumnSpec, FrameType, Nullable, RowVar, Unknown
+from polypolarism.types import ColumnSpec, FrameType, Nullable, RowVar, Span, Unknown
 
 
 @dataclass
@@ -67,6 +67,12 @@ class Schema:
     # frame (no island lint — nothing is declared to lint against) and
     # PLW011 surfaces the degrade via ``definition_warnings``.
     unresolved: bool = False
+    # Per-field source ``Span`` for the ``AnnAssign`` that declared the
+    # column (issue #110): used as the SECONDARY ("declared here") location
+    # of a return-type-mismatch diagnostic. Diagnostic provenance only —
+    # threaded into the bound frame's ``column_spans`` side map. Inherited
+    # fields keep the parent's span until a child re-declares the field.
+    field_spans: dict[str, Span] = field(default_factory=dict)
 
     def to_frame_type(self) -> FrameType:
         # Checked-island semantics (issue #83, user-approved): a
@@ -97,6 +103,20 @@ class Schema:
             nonstrict_schema=self.name,
             schema_name=self.name,
         )
+
+    def declared_return_frame(self) -> FrameType:
+        """Like :meth:`to_frame_type` but with the declared-field ``column_
+        spans`` attached (issue #110).
+
+        Used ONLY for the function's declared-RETURN binding, where the field
+        spans are the SECONDARY ("declared here") location of a mismatch.
+        Parameter / validate-narrowing bindings deliberately use the
+        span-free :meth:`to_frame_type` so an input schema's field spans never
+        masquerade as a body-producing PRIMARY span on a pass-through column.
+        """
+        ft = self.to_frame_type()
+        ft.column_spans = dict(self.field_spans)
+        return ft
 
     def validate_result_frame(self) -> FrameType:
         """The FrameType a ``schema.validate(df)`` RESULT binds (issue #88).
@@ -142,6 +162,15 @@ class SchemaRegistry:
         if schema is None:
             return None
         return schema.to_frame_type()
+
+    def declared_return_frame(self, name: str) -> FrameType | None:
+        """Like :meth:`to_frame_type` but carrying the declared-field
+        ``column_spans`` — for the function declared-RETURN binding only
+        (issue #110)."""
+        schema = self.schemas.get(name)
+        if schema is None:
+            return None
+        return schema.declared_return_frame()
 
     def validate_result_frame(self, name: str) -> FrameType | None:
         """Binding for a ``schema.validate(df)`` RESULT (issue #88) —
@@ -695,6 +724,8 @@ def _parse_schema(
             schema.definition_errors.setdefault(col_name, detail)
         for col_name, detail in parent.definition_warnings.items():
             schema.definition_warnings.setdefault(col_name, detail)
+        for col_name, span in parent.field_spans.items():
+            schema.field_spans.setdefault(col_name, span)
         if parent.strict:
             schema.strict = True
         if parent.coerce:
@@ -704,6 +735,10 @@ def _parse_schema(
     for stmt in node.body:
         if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
             field_name = stmt.target.id
+            # Issue #110: pinpoint the declared field for mismatch
+            # diagnostics. The span covers the whole ``name: ann`` line; a
+            # child re-declaring an inherited field overrides the span.
+            schema.field_spans[field_name] = Span.from_node(stmt)
             # Issue #69: a wrong-arity ``Annotated`` form deterministically
             # crashes pandera at runtime. Record it; a healthy re-declaration
             # shadows (and thereby repairs) an inherited broken one.

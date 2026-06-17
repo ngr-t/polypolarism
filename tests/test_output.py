@@ -3,6 +3,8 @@
 import json
 import textwrap
 
+import pytest
+
 from polypolarism.checker import (
     CheckResult,
     ExtraColumn,
@@ -406,3 +408,206 @@ class TestJsonFunctionsArray:
         assert fn["name"] == "merge"
         assert fn["param_row_vars"] == {"a": "R1", "b": "R2"}
         assert "row_var" not in fn
+
+
+class TestColumnMismatchSpans:
+    """Per-column / per-expression source spans on return-type mismatch
+    diagnostics (issue #110): the editor plugin can point at the offending
+    column instead of underlining the whole function."""
+
+    def _diagnostics(self, source: str):
+        from polypolarism.analyzer import analyze_source
+        from polypolarism.checker import check_function
+
+        analyses = analyze_source(textwrap.dedent(source))
+        results = [check_function(a) for a in analyses]
+        function_lines = {a.name: a.lineno for a in analyses}
+        function_end_lines = {a.name: a.end_lineno for a in analyses}
+        output = format_json(
+            results,
+            "pipeline.py",
+            function_lines=function_lines,
+            function_end_lines=function_end_lines,
+        )
+        return json.loads(output)["diagnostics"]
+
+    def test_return_mismatch_anchors_to_return_line_not_def(self):
+        """Step 1: a return-type mismatch points at the return statement,
+        not the ``def`` line, even before any finer expression span."""
+        diagnostics = self._diagnostics(
+            """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+
+            class Src(pa.DataFrameModel):
+                a: int
+
+            class Out(pa.DataFrameModel):
+                a: int
+                missing: str
+
+            def f(df: DataFrame[Src]) -> DataFrame[Out]:
+                return df
+            """
+        )
+        assert len(diagnostics) == 1
+        diag = diagnostics[0]
+        # ``def f`` is on line 13; ``return df`` is on line 14.
+        assert diag["line"] == 14
+
+    @pytest.mark.xfail(
+        reason="step 3 (inferred-side expression stamping) not yet implemented",
+        strict=True,
+    )
+    def test_type_difference_primary_points_at_agg_expr(self):
+        """Step 3: the PRIMARY span points at the agg keyword expression
+        that produced the wrong dtype, not the whole function."""
+        diagnostics = self._diagnostics(
+            """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+
+            class Sales(pa.DataFrameModel):
+                region: str
+                revenue: float
+
+            class RevenueByRegion(pa.DataFrameModel):
+                region: str
+                total_revenue: int
+
+            def compute(sales: DataFrame[Sales]) -> DataFrame[RevenueByRegion]:
+                return (
+                    sales
+                    .group_by("region")
+                    .agg(total_revenue=pl.col("revenue").sum())
+                )
+            """
+        )
+        assert len(diagnostics) == 1
+        diag = diagnostics[0]
+        assert "total_revenue" in diag["message"]
+        # The ``.agg(total_revenue=...)`` keyword value is on line 18.
+        assert diag["line"] == 18
+        # The squiggle covers the producing expression, not column 0.
+        assert diag["column"] > 0
+        assert diag["end_line"] == 18
+
+    def test_type_difference_related_points_at_schema_field(self):
+        """Step 2: the SECONDARY (related) location points at the declared
+        schema field (``total_revenue: int``)."""
+        diagnostics = self._diagnostics(
+            """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+
+            class Sales(pa.DataFrameModel):
+                region: str
+                revenue: float
+
+            class RevenueByRegion(pa.DataFrameModel):
+                region: str
+                total_revenue: int
+
+            def compute(sales: DataFrame[Sales]) -> DataFrame[RevenueByRegion]:
+                return (
+                    sales
+                    .group_by("region")
+                    .agg(total_revenue=pl.col("revenue").sum())
+                )
+            """
+        )
+        diag = diagnostics[0]
+        assert "related" in diag
+        related = diag["related"]
+        assert isinstance(related, list) and len(related) == 1
+        # ``total_revenue: int`` is on line 12.
+        assert related[0]["line"] == 12
+        assert "declared" in related[0]["message"].lower()
+
+    def test_missing_column_related_points_at_schema_field(self):
+        """A MissingColumn mismatch also carries the declared-field related
+        location."""
+        diagnostics = self._diagnostics(
+            """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+
+            class Src(pa.DataFrameModel):
+                a: int
+
+                class Config:
+                    strict = True
+
+            class Out(pa.DataFrameModel):
+                a: int
+                missing: str
+
+                class Config:
+                    strict = True
+
+            def f(df: DataFrame[Src]) -> DataFrame[Out]:
+                return df.select("a")
+            """
+        )
+        missing = [d for d in diagnostics if "missing" in d["message"].lower()]
+        assert missing
+        related = missing[0].get("related")
+        assert related
+        # ``missing: str`` is on line 14.
+        assert related[0]["line"] == 14
+
+    @pytest.mark.xfail(
+        reason="step 3 (inferred-side expression stamping) not yet implemented",
+        strict=True,
+    )
+    def test_with_columns_expr_span_is_primary(self):
+        """Step 3: a ``with_columns(name=expr)`` mismatch points at the
+        keyword expression."""
+        diagnostics = self._diagnostics(
+            """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+
+            class Src(pa.DataFrameModel):
+                a: int
+
+            class Out(pa.DataFrameModel):
+                a: int
+                b: int
+
+            def f(df: DataFrame[Src]) -> DataFrame[Out]:
+                return df.with_columns(b=pl.col("a") * 1.5)
+            """
+        )
+        diag = [d for d in diagnostics if "'b'" in d["message"]][0]
+        # ``b=pl.col("a") * 1.5`` is on line 14 (the with_columns line).
+        assert diag["line"] == 14
+        assert diag["column"] > 0
+
+    def test_unstamped_column_falls_back_to_return_line(self):
+        """A column with no stamped inferred span (here the receiver ``df``
+        flows straight through) still anchors at the return statement."""
+        diagnostics = self._diagnostics(
+            """
+            import polars as pl
+            import pandera.polars as pa
+            from pandera.typing.polars import DataFrame
+
+            class Src(pa.DataFrameModel):
+                a: int
+
+            class Out(pa.DataFrameModel):
+                a: str
+
+            def f(df: DataFrame[Src]) -> DataFrame[Out]:
+                return df
+            """
+        )
+        diag = [d for d in diagnostics if "'a'" in d["message"]][0]
+        # ``return df`` is on line 13.
+        assert diag["line"] == 13

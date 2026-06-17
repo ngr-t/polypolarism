@@ -555,6 +555,37 @@ class Struct(DataType):
 
 
 @dataclass(frozen=True)
+class Span:
+    """A source-code range, 1-indexed lines / 0-indexed columns (the shape
+    Python's ``ast`` nodes expose: ``lineno`` / ``col_offset`` /
+    ``end_lineno`` / ``end_col_offset``).
+
+    Used to pinpoint per-column / per-expression diagnostics (issue #110):
+    the inferred-side span is the body expression that produced a column's
+    dtype (e.g. the ``agg(total_revenue=...)`` keyword), the declared-side
+    span is the schema field's ``AnnAssign``. Purely diagnostic provenance —
+    it never participates in type equality or inference and is threaded
+    through side maps (``FrameType.column_spans``) so it cannot perturb
+    frame-shape comparisons or branch merges.
+    """
+
+    line: int
+    column: int
+    end_line: int | None = None
+    end_column: int | None = None
+
+    @classmethod
+    def from_node(cls, node) -> Span:
+        """Build a Span from any ``ast`` node carrying position attributes."""
+        return cls(
+            line=node.lineno,
+            column=node.col_offset,
+            end_line=getattr(node, "end_lineno", None),
+            end_column=getattr(node, "end_col_offset", None),
+        )
+
+
+@dataclass(frozen=True)
 class ColumnSpec:
     """Per-column metadata: dtype + presence semantics.
 
@@ -631,6 +662,15 @@ class FrameType:
     absent: frozenset[str]
     nonstrict_schema: str | None
     # Diagnostic provenance only (no semantic effect, excluded from
+    # ``__eq__``): per-column source ``Span`` for the expression/field that
+    # produced (inferred frame) or declared (schema frame) the column
+    # (issue #110). Lets return-type-mismatch diagnostics point an editor at
+    # the offending column instead of underlining the whole function. Only a
+    # high-value subset of inferred columns are stamped (with_columns / agg /
+    # alias keyword expressions); unstamped columns fall back to the
+    # return-statement line at the diagnostic layer.
+    column_spans: dict[str, Span]
+    # Diagnostic provenance only (no semantic effect, excluded from
     # ``__eq__``): the pandera schema this frame was bound from, kept
     # through the same column-ops that keep ``nonstrict_schema`` so
     # column-not-found messages can name the violated contract
@@ -648,6 +688,7 @@ class FrameType:
         absent: frozenset[str] | set[str] | None = None,
         nonstrict_schema: str | None = None,
         schema_name: str | None = None,
+        column_spans: Mapping[str, Span] | None = None,
     ) -> None:
         normalized: dict[str, ColumnSpec] = {}
         if columns:
@@ -668,6 +709,7 @@ class FrameType:
         self.coerce = coerce
         self.nonstrict_schema = nonstrict_schema
         self.schema_name = schema_name
+        self.column_spans = dict(column_spans) if column_spans else {}
         # A pinned column trumps a stale absence mark; absence is only
         # meaningful while the frame is open.
         if absent and rest is not None:

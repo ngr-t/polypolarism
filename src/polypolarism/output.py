@@ -6,8 +6,9 @@ import json
 from dataclasses import dataclass, field
 from enum import Enum
 
-from polypolarism.checker import CheckResult
+from polypolarism.checker import CheckResult, TypeMismatch
 from polypolarism.diagnostics import extract_code
+from polypolarism.types import Span
 
 
 class DiagnosticSeverity(Enum):
@@ -35,6 +36,12 @@ class Diagnostic:
     # consumers don't have to regex the message prefix (issue #70). ``None``
     # for untagged diagnostics (parse / read failures).
     code: str | None = None
+    # Secondary "declared here" location(s) for column mismatches (issue
+    # #110): each entry is ``{line, column, end_line?, end_column?,
+    # message}`` (1-indexed lines / 0-indexed columns, like the primary
+    # range), shaped to map onto LSP ``relatedInformation``. Empty list →
+    # the ``related`` key is omitted, keeping the JSON additive.
+    related: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
@@ -52,6 +59,8 @@ class Diagnostic:
             result["end_line"] = self.end_line
         if self.end_column is not None:
             result["end_column"] = self.end_column
+        if self.related:
+            result["related"] = self.related
         return result
 
 
@@ -123,6 +132,26 @@ def function_summaries(analyses) -> list[dict]:
     return [_function_summary(analysis) for analysis in analyses]
 
 
+def _span_range(span: Span) -> tuple[int, int, int | None, int | None]:
+    """Unpack a :class:`Span` into ``(line, column, end_line, end_column)``."""
+    return (span.line, span.column, span.end_line, span.end_column)
+
+
+def _related_from_declared(span: Span) -> dict:
+    """LSP-``relatedInformation``-shaped secondary location for a declared
+    schema field (issue #110)."""
+    related = {
+        "line": span.line,
+        "column": span.column,
+        "message": "declared here",
+    }
+    if span.end_line is not None:
+        related["end_line"] = span.end_line
+    if span.end_column is not None:
+        related["end_column"] = span.end_column
+    return related
+
+
 def _build_diagnostics(group: FileResults) -> list[dict]:
     diagnostics: list[dict] = []
     for result in group.results:
@@ -131,15 +160,30 @@ def _build_diagnostics(group: FileResults) -> list[dict]:
         if not result.passed:
             for error in result.errors:
                 message = _error_to_message(error)
+                # Per-column / per-expression span (issue #110): a typed
+                # column mismatch carries the inferred-side PRIMARY span and
+                # the declared-side SECONDARY span. Fall back to the whole-
+                # function range for untyped / span-less errors.
+                diag_line, diag_col = line, 0
+                diag_end_line, diag_end_col = end_line, 0
+                related: list[dict] = []
+                if isinstance(error, TypeMismatch):
+                    primary = getattr(error, "primary", None)
+                    if primary is not None:
+                        diag_line, diag_col, diag_end_line, diag_end_col = _span_range(primary)
+                    declared = getattr(error, "declared_span", None)
+                    if declared is not None:
+                        related.append(_related_from_declared(declared))
                 diag = Diagnostic(
                     file=group.file_path,
-                    line=line,
-                    column=0,
+                    line=diag_line,
+                    column=diag_col,
                     message=message,
                     severity=DiagnosticSeverity.ERROR,
-                    end_line=end_line,
-                    end_column=0,
+                    end_line=diag_end_line,
+                    end_column=diag_end_col,
                     code=extract_code(message),
+                    related=related,
                 )
                 diagnostics.append(diag.to_dict())
         for warning in result.warnings:

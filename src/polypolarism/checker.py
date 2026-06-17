@@ -17,6 +17,7 @@ from polypolarism.types import (
     FrameType,
     List,
     Nullable,
+    Span,
     Struct,
     Unknown,
 )
@@ -27,9 +28,20 @@ class TypeMismatch:
 
     The whole declared-vs-inferred return-type family shares one diagnostic
     code, ``PLY040`` (issue #70); the message distinguishes the kind.
+
+    ``primary`` / ``declared_span`` are per-column source spans (issue #110),
+    excluded from equality so they never perturb the error comparisons the
+    test suite relies on. ``primary`` is the body expression that produced
+    the offending column (with_columns / agg / alias keyword, else ``None``
+    → the diagnostic layer falls back to the return-statement line);
+    ``declared_span`` is the schema field it was checked against. Set by
+    ``_check_one_frame`` from the two frames' ``column_spans`` side maps.
     """
 
     code = PLY040
+
+    # Declared here (not as dataclass fields) so the subclasses can attach
+    # them with ``compare=False`` without each restating the contract.
 
 
 @dataclass
@@ -38,6 +50,8 @@ class MissingColumn(TypeMismatch):
 
     column: str
     expected_type: DataType
+    primary: Span | None = field(default=None, compare=False)
+    declared_span: Span | None = field(default=None, compare=False)
 
     def __str__(self) -> str:
         return tag(self.code, f"Missing column '{self.column}' of type {self.expected_type}")
@@ -49,6 +63,8 @@ class ExtraColumn(TypeMismatch):
 
     column: str
     inferred_type: DataType
+    primary: Span | None = field(default=None, compare=False)
+    declared_span: Span | None = field(default=None, compare=False)
 
     def __str__(self) -> str:
         return tag(
@@ -65,6 +81,8 @@ class TypeDifference(TypeMismatch):
     column: str
     declared: DataType
     inferred: DataType
+    primary: Span | None = field(default=None, compare=False)
+    declared_span: Span | None = field(default=None, compare=False)
 
     def __str__(self) -> str:
         return tag(
@@ -311,13 +329,35 @@ def _is_coercible_difference(inferred: DataType, declared: DataType) -> bool:
 def _check_one_frame(
     declared: FrameType,
     inferred: FrameType,
+    return_line: int | None = None,
 ) -> tuple[list[CheckError], list[str]]:
     """Check one return frame against the declared type.
 
     Returns ``(errors, leniency)`` for that single frame.
+
+    ``return_line`` is the source line of the return statement this frame
+    came from; it is the PRIMARY-span fallback for any column whose
+    producing expression we did not stamp (issue #110) — so even a
+    pass-through column underlines the ``return`` line rather than the whole
+    function.
     """
     errors: list[CheckError] = []
     leniency: list[str] = []
+
+    def primary_span(col_name: str) -> Span | None:
+        """The inferred-side expression span for ``col_name`` (the column's
+        producing ``with_columns`` / ``agg`` / ``alias`` keyword), falling
+        back to the return statement line when the column was not stamped."""
+        stamped = inferred.column_spans.get(col_name)
+        if stamped is not None:
+            return stamped
+        if return_line is not None:
+            return Span(line=return_line, column=0)
+        return None
+
+    def declared_span(col_name: str) -> Span | None:
+        """The declared schema-field span for ``col_name`` (SECONDARY)."""
+        return declared.column_spans.get(col_name)
 
     # Eager/lazy mismatch on the return type.
     if declared.is_lazy != inferred.is_lazy:
@@ -341,14 +381,28 @@ def _check_one_frame(
                 # the column, or an open frame that removed it via
                 # drop/rename (negative knowledge, issue #78).
                 if inferred.lacks(col_name):
-                    errors.append(MissingColumn(col_name, declared_spec.dtype))
+                    errors.append(
+                        MissingColumn(
+                            col_name,
+                            declared_spec.dtype,
+                            primary=primary_span(col_name),
+                            declared_span=declared_span(col_name),
+                        )
+                    )
                 else:
                     leniency.append(f"column '{col_name}': not provably absent (open frame)")
             continue
         # Inferred frame may have the column as optional (may be absent);
         # if declared expects it always-present, that's a mismatch.
         if declared_spec.required and not inferred_spec.required:
-            errors.append(MissingColumn(col_name, declared_spec.dtype))
+            errors.append(
+                MissingColumn(
+                    col_name,
+                    declared_spec.dtype,
+                    primary=primary_span(col_name),
+                    declared_span=declared_span(col_name),
+                )
+            )
             continue
         # Presence-only column (issue #109): a guard proved the column EXISTS
         # but not its dtype. The blanket ``Unknown`` leniency would wrongly
@@ -365,7 +419,14 @@ def _check_one_frame(
                     f"to {declared_spec.dtype}"
                 )
             else:
-                errors.append(MissingColumn(col_name, declared_spec.dtype))
+                errors.append(
+                    MissingColumn(
+                        col_name,
+                        declared_spec.dtype,
+                        primary=primary_span(col_name),
+                        declared_span=declared_span(col_name),
+                    )
+                )
             continue
         verdict = _subtype_verdict(inferred_spec.dtype, declared_spec.dtype)
         if verdict.ok:
@@ -378,7 +439,15 @@ def _check_one_frame(
                 f"column '{col_name}': {inferred_spec.dtype} -> {declared_spec.dtype} via coerce"
             )
         else:
-            errors.append(TypeDifference(col_name, declared_spec.dtype, inferred_spec.dtype))
+            errors.append(
+                TypeDifference(
+                    col_name,
+                    declared_spec.dtype,
+                    inferred_spec.dtype,
+                    primary=primary_span(col_name),
+                    declared_span=declared_span(col_name),
+                )
+            )
 
     # Extra columns (only flagged for strict declared schemas). An
     # OPTIONAL (required=False) inferred column may be absent at runtime —
@@ -387,7 +456,15 @@ def _check_one_frame(
         for col_name, inferred_spec in inferred.columns.items():
             if col_name not in declared.columns:
                 if inferred_spec.required:
-                    errors.append(ExtraColumn(col_name, inferred_spec.dtype))
+                    # An extra column has no declared field; its primary span
+                    # is still the producing expression (else return line).
+                    errors.append(
+                        ExtraColumn(
+                            col_name,
+                            inferred_spec.dtype,
+                            primary=primary_span(col_name),
+                        )
+                    )
                 else:
                     leniency.append(
                         f"column '{col_name}': optional extra vs strict schema "
@@ -468,7 +545,7 @@ def check_function(analysis: FunctionAnalysis) -> CheckResult:
     if analysis.return_frames:
         # Validate every recorded return point (issues #94, #95).
         for lineno, inferred in analysis.return_frames:
-            frame_errors, frame_leniency = _check_one_frame(declared, inferred)
+            frame_errors, frame_leniency = _check_one_frame(declared, inferred, return_line=lineno)
             if frame_errors:
                 mismatch_frames.append(
                     (lineno if multi else None, inferred.render(), declared.render())

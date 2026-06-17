@@ -2238,14 +2238,24 @@ class FunctionAnalysis:
 def _resolve_declared_type(
     annotation: ast.expr,
     schema_registry: SchemaRegistry,
+    with_field_spans: bool = False,
 ) -> tuple[FrameType | None, str | None]:
     """Resolve a declared FrameType from a Pandera ``DataFrame[Schema]`` annotation.
 
     Returns ``(frame_type, error)``. Both are ``None`` when the annotation
     doesn't declare a Pandera-backed frame type. ``error`` is reserved for
     future schema-resolution errors; currently always ``None``.
+
+    ``with_field_spans`` carries the schema's declared-field ``column_spans``
+    (issue #110) — set ONLY for the declared-RETURN binding, where they are
+    the SECONDARY ("declared here") mismatch location. Parameter / local /
+    validate bindings leave it ``False`` so an input schema's field spans
+    never masquerade as a body-producing PRIMARY span on a pass-through
+    column.
     """
-    pandera_ft = extract_dataframe_annotation(annotation, schema_registry)
+    pandera_ft = extract_dataframe_annotation(
+        annotation, schema_registry, with_field_spans=with_field_spans
+    )
     if pandera_ft is not None:
         return pandera_ft, None
     return None, None
@@ -5220,6 +5230,8 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             self.var_consts.pop(var_name, None)
             self.var_alt_types.pop(var_name, None)
             # Try to get type from a Pandera DataFrame[Schema] annotation
+            # (no field spans: a local annotation is not a body-producing
+            # PRIMARY span — issue #110).
             frame_type, _ = _resolve_declared_type(node.annotation, self.schema_registry)
             if frame_type is not None:
                 annotated_schema = frame_annotation_schema_name(
@@ -8031,7 +8043,7 @@ def analyze_function(
             has_df_annotation = True
             _note_schema_reference(func_node.returns)
             declared_return, parse_error = _resolve_declared_type(
-                func_node.returns, schema_registry
+                func_node.returns, schema_registry, with_field_spans=True
             )
             if parse_error:
                 errors.append(f"Return type: {parse_error}")
