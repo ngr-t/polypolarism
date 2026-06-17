@@ -1211,7 +1211,15 @@ def _thread_row_poly_extras(
     explicit output contract). The same extra name arriving from two arguments
     with differing dtypes unifies, falling back to ``Unknown`` when there is no
     unifier.
+
+    A ``strict`` declared return cannot carry extras: ``@pa.check_types``
+    validates the helper's return against the strict schema and rejects any
+    caller column beyond it, so threading them would claim columns that fail
+    at runtime. Such a return is left untouched (a @rowpoly on a strict-return
+    helper is a no-op — the surface is only meaningful with an open return).
     """
+    if base.strict:
+        return base
     extras: dict[str, ColumnSpec] = {}
     for idx, arg_type in enumerate(arg_types):
         if arg_type is None:
@@ -6035,7 +6043,12 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     result = _thread_row_poly_extras(
                         sig, arg_types, result, only_params=set(sig.param_row_vars)
                     )
-                elif sig.row_var is not None:
+                elif sig.row_var is not None and len(sig.parameters) == 1:
+                    # Positional @rowpoly("R") binds the single frame parameter
+                    # — the only case Tier 4 preservation-checks. A multi-frame
+                    # positional helper is NOT checked, so it must NOT thread
+                    # either (else it would precisely claim extras the body may
+                    # drop); such helpers must use the keyword form to opt in.
                     result = _thread_row_poly_extras(sig, arg_types, result)
             return result
 

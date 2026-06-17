@@ -112,6 +112,72 @@ def test_without_decorator_extra_degrades_to_unknown() -> None:
     assert results["use_plain_wrong"].passed, [str(e) for e in results["use_plain_wrong"].errors]
 
 
+def test_strict_return_does_not_thread_extras() -> None:
+    # Soundness: a strict return schema rejects extras at runtime
+    # (@pa.check_types), so threading them would be a false claim. A strict
+    # return is left untouched; a downstream read of a non-declared caller
+    # extra is correctly rejected rather than silently accepted.
+    results = _check("""
+        class OutStrict(pa.DataFrameModel):
+            id: int
+            score: float
+
+            class Config:
+                strict = True
+
+        @rowpoly("R")
+        def add_score_strict(df: DataFrame[InId]) -> DataFrame[OutStrict]:
+            return df.with_columns(score=pl.col("id").cast(pl.Float64))
+
+        class Result(pa.DataFrameModel):
+            id: int
+            score: float
+            region: str
+
+        def use_strict(c: DataFrame[Caller]) -> DataFrame[Result]:
+            return add_score_strict(c).select("id", "score", "region")
+    """)
+    assert not results["use_strict"].passed
+
+
+def test_multi_frame_positional_rowpoly_does_not_thread_precisely() -> None:
+    # Soundness: positional @rowpoly("R") only threads (and is only
+    # preservation-checked) for a SINGLE frame parameter. A multi-frame
+    # positional helper must not precisely claim a caller extra (the body may
+    # drop a side, unchecked). It degrades to the open-frame Unknown leniency
+    # instead, so a wrong-dtype declaration passes rather than being precisely
+    # — and falsely — accepted/rejected.
+    results = _check("""
+        class Other(pa.DataFrameModel):
+            id: int
+
+            class Config:
+                strict = False
+
+        @rowpoly("R")
+        def two(a: DataFrame[InId], b: DataFrame[Other]) -> DataFrame[OutScore]:
+            return a.with_columns(score=pl.col("id").cast(pl.Float64))
+
+        class CallerB(pa.DataFrameModel):
+            id: int
+            extra: int
+
+        class ResultWrong(pa.DataFrameModel):
+            id: int
+            score: float
+            extra: str
+
+            class Config:
+                strict = False
+
+        def use_two(c: DataFrame[Caller], d: DataFrame[CallerB]) -> DataFrame[ResultWrong]:
+            return two(c, d).select("id", "score", "extra")
+    """)
+    # Not precisely threaded -> `extra` is Unknown -> wrong dtype passes
+    # (gradual leniency), NOT a precise false dtype claim.
+    assert results["use_two"].passed, [str(e) for e in results["use_two"].errors]
+
+
 def test_threaded_result_carries_extra_column_in_inferred_type() -> None:
     analyses = _analyze("""
         def use(c: DataFrame[Caller]) -> DataFrame[Caller]:

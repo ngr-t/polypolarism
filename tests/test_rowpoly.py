@@ -36,6 +36,28 @@ def test_is_importable_from_package_root() -> None:
     assert "rowpoly" in polypolarism.__all__
 
 
+def test_bare_decorator_without_parens_returns_function_unchanged() -> None:
+    # ``@rowpoly`` (no parens) applies the decorator directly: rowpoly(fn).
+    # It must return fn unchanged, not rebind the name to the inner closure.
+    def f(x):
+        return x + 1
+
+    decorated = rowpoly(f)
+    assert decorated is f
+    assert decorated(41) == 42
+
+
+def test_keyword_form_is_runtime_inert() -> None:
+    # The Tier 5 surface @rowpoly(a="R1", b="R2") must not raise at import or
+    # alter the function (it carries the kwargs as metadata).
+    @rowpoly(a="R1", b="R2")
+    def g(a, b):
+        return (a, b)
+
+    assert g(1, 2) == (1, 2)
+    assert g.__pp_rowpoly__ == {"a": "R1", "b": "R2"}
+
+
 def test_does_not_crash_on_unwritable_target() -> None:
     # An object whose attributes cannot be set must still pass through; the
     # analyzer reads the name from the AST, not from a runtime attribute.

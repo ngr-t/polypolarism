@@ -47,7 +47,14 @@ def rowpoly(*args: str, **kwargs: str) -> Callable[[_F], _F]:
     validation and ordinary calls are unaffected. It deliberately accepts any
     arguments (the signature is never enforced at runtime) so neither surface
     raises at import time.
+
+    A bare ``@rowpoly`` (no parentheses) applies the decorator directly to the
+    function, i.e. ``rowpoly(fn)`` — return ``fn`` unchanged so the function is
+    not silently rebound to the inner closure. (The analyzer ignores a bare
+    ``@rowpoly`` anyway; this only keeps the runtime behavior inert.)
     """
+    if len(args) == 1 and not kwargs and callable(args[0]):
+        return args[0]  # type: ignore[return-value]
 
     def decorate(fn: _F) -> _F:
         # Builtins / ``__slots__`` objects reject attribute writes — the
