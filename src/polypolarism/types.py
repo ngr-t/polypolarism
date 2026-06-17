@@ -677,6 +677,19 @@ class FrameType:
     # ("... in frame from schema 'Sales'"). Unlike ``nonstrict_schema``
     # it is set for strict bindings too.
     schema_name: str | None
+    # Diagnostic provenance only (no semantic effect, excluded from
+    # ``__eq__``): set when this OPEN frame was produced by a column-reducing
+    # ``select`` / ``drop`` keyed by a PREDICATE (regex / dtype / name-pattern
+    # selector) rather than an explicit set of known column names. The
+    # reduction could have dropped an unknown caller extra, so the frame's
+    # ``rest`` no longer faithfully represents "every caller column survived"
+    # — it is row-variable-NOT-provably-preserved. The @rowpoly preservation
+    # check (PLY043) reads this on a return frame; nothing else consults it,
+    # and like ``is_lazy`` / ``absent`` it never perturbs ``__eq__`` so frame
+    # comparisons and branch merges are untouched. Sticky across later
+    # add-only / rename ops (with_columns, rename) — once the row variable's
+    # extras could have been dropped, a downstream add does not restore them.
+    row_var_dropped: bool
 
     def __init__(
         self,
@@ -689,6 +702,7 @@ class FrameType:
         nonstrict_schema: str | None = None,
         schema_name: str | None = None,
         column_spans: Mapping[str, Span] | None = None,
+        row_var_dropped: bool = False,
     ) -> None:
         normalized: dict[str, ColumnSpec] = {}
         if columns:
@@ -710,6 +724,12 @@ class FrameType:
         self.nonstrict_schema = nonstrict_schema
         self.schema_name = schema_name
         self.column_spans = dict(column_spans) if column_spans else {}
+        # Diagnostic-only; the analyzer decides when a predicate-keyed
+        # reduction set this. Stored verbatim (it can ride on a closed frame
+        # too — e.g. a skolemized {id, sentinel} frame after a regex select
+        # stays closed but the reduction could still have dropped a caller
+        # extra). Never consulted by ``__eq__``.
+        self.row_var_dropped = row_var_dropped
         # A pinned column trumps a stale absence mark; absence is only
         # meaningful while the frame is open.
         if absent and rest is not None:

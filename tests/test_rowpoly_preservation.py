@@ -202,3 +202,196 @@ def test_pl_concat_preserves_row_variable() -> None:
             return pl.concat([df, df])
     """)
     assert not _has_ply043(results["doubled"])
+
+
+# --- C-14 follow-up #3: pattern/selector reductions that DROP the row variable.
+# The sentinel probe is blind to a reduction keyed by a PREDICATE (regex / dtype
+# / name-pattern selector) that doesn't happen to match the sentinel name: the
+# sentinel survives, so the probe says "preserved", but a real caller extra that
+# DOES match the predicate would be dropped at runtime. The structural
+# pattern-drop guard catches these; the boundary below pins exactly which forms
+# flag (predicate-based reductions over the open frame) and which stay OK
+# (explicit known-name reductions / all-columns forms). A false positive here is
+# worse than the residual false negative, so the OK guards are load-bearing.
+
+
+def test_select_exclude_regex_drops_row_variable() -> None:
+    # select(pl.exclude("^tmp_.*$")) keeps every column NOT matching the regex.
+    # A caller extra named tmp_junk would be excluded -> not preserved. The
+    # sentinel \x00__rowvar_0__ does not match ^tmp_.*$, so it survives the
+    # exclude -> the probe alone would miss this; the pattern guard catches it.
+    results = _check("""
+        @rowpoly("R")
+        def add_score(df: DataFrame[InId]) -> DataFrame[OutScore]:
+            return df.select(
+                pl.exclude("^tmp_.*$")
+            ).with_columns(score=pl.col("id").cast(pl.Float64))
+    """)
+    assert _has_ply043(results["add_score"])
+
+
+def test_select_cs_starts_with_drops_row_variable() -> None:
+    # select(cs.starts_with("id")) keeps only id-prefixed columns; a caller
+    # extra with a different prefix is dropped -> not preserved.
+    results = _check("""
+        @rowpoly("R")
+        def add_score(df: DataFrame[InId]) -> DataFrame[OutScore]:
+            return df.select(
+                cs.starts_with("id")
+            ).with_columns(score=pl.col("id").cast(pl.Float64))
+    """)
+    assert _has_ply043(results["add_score"])
+
+
+def test_select_cs_numeric_drops_row_variable() -> None:
+    # select(cs.numeric()) keeps only numeric columns; a caller extra of a
+    # non-numeric dtype is dropped -> not preserved.
+    results = _check("""
+        @rowpoly("R")
+        def add_score(df: DataFrame[InId]) -> DataFrame[OutScore]:
+            return df.select(
+                cs.numeric()
+            ).with_columns(score=pl.col("id").cast(pl.Float64))
+    """)
+    assert _has_ply043(results["add_score"])
+
+
+def test_select_narrowing_regex_drops_row_variable() -> None:
+    # select(pl.col("^id$")) is an anchored regex that is NOT match-all; a
+    # caller extra not matching ^id$ is dropped -> not preserved.
+    results = _check("""
+        @rowpoly("R")
+        def add_score(df: DataFrame[InId]) -> DataFrame[OutScore]:
+            return df.select(
+                pl.col("^id$")
+            ).with_columns(score=pl.col("id").cast(pl.Float64))
+    """)
+    assert _has_ply043(results["add_score"])
+
+
+def test_drop_cs_predicate_drops_row_variable() -> None:
+    # drop(cs.numeric()) removes every numeric column; a caller extra of a
+    # numeric dtype would be removed -> not preserved.
+    results = _check("""
+        class OutTag(pa.DataFrameModel):
+            tag: str
+
+            class Config:
+                strict = False
+
+        @rowpoly("R")
+        def reshape(df: DataFrame[InId]) -> DataFrame[OutTag]:
+            return df.drop(cs.numeric()).with_columns(tag=pl.lit("x"))
+    """)
+    assert _has_ply043(results["reshape"])
+
+
+def test_drop_regex_drops_row_variable() -> None:
+    # drop(pl.col("^tmp_.*$")) removes every column matching the regex; a
+    # caller extra named tmp_junk would be removed -> not preserved.
+    results = _check("""
+        class OutTag(pa.DataFrameModel):
+            id: int
+
+            class Config:
+                strict = False
+
+        @rowpoly("R")
+        def reshape(df: DataFrame[InId]) -> DataFrame[OutTag]:
+            return df.drop(pl.col("^tmp_.*$"))
+    """)
+    assert _has_ply043(results["reshape"])
+
+
+# --- Boundary: PRESERVING forms below must stay silent (no false PLY043). ---
+
+
+def test_select_match_all_regex_preserves_row_variable() -> None:
+    # select(pl.col("^.*$")) is the match-everything regex (#111): it keeps
+    # every column, including the caller's extras -> preserved.
+    results = _check("""
+        @rowpoly("R")
+        def add_score(df: DataFrame[InId]) -> DataFrame[OutScore]:
+            return df.select(
+                pl.col("^.*$")
+            ).with_columns(score=pl.col("id").cast(pl.Float64))
+    """)
+    assert not _has_ply043(results["add_score"])
+
+
+def test_select_exclude_literal_name_preserves_row_variable() -> None:
+    # select(pl.exclude("id")) excludes a single KNOWN name; every OTHER column
+    # (including unknown extras) is kept -> preserved.
+    results = _check("""
+        class OutDropped(pa.DataFrameModel):
+            score: float
+
+            class Config:
+                strict = False
+
+        @rowpoly("R")
+        def reshape(df: DataFrame[InId]) -> DataFrame[OutDropped]:
+            return df.select(pl.exclude("id")).with_columns(score=pl.lit(1.0))
+    """)
+    assert not _has_ply043(results["reshape"])
+
+
+def test_drop_literal_name_preserves_row_variable() -> None:
+    # drop("id") removes a single KNOWN name; unknown extras survive -> OK.
+    results = _check("""
+        class OutDropped(pa.DataFrameModel):
+            score: float
+
+            class Config:
+                strict = False
+
+        @rowpoly("R")
+        def reshape(df: DataFrame[InId]) -> DataFrame[OutDropped]:
+            return df.drop("id").with_columns(score=pl.lit(1.0))
+    """)
+    assert not _has_ply043(results["reshape"])
+
+
+def test_select_pl_all_still_preserves_row_variable() -> None:
+    # Re-pin the all-columns forms now that the pattern guard exists: pl.all()
+    # must not be misclassified as a predicate reduction.
+    results = _check("""
+        @rowpoly("R")
+        def add_score(df: DataFrame[InId]) -> DataFrame[OutScore]:
+            return df.select(pl.all()).with_columns(score=pl.col("id").cast(pl.Float64))
+    """)
+    assert not _has_ply043(results["add_score"])
+
+
+def test_select_cs_all_still_preserves_row_variable() -> None:
+    results = _check("""
+        @rowpoly("R")
+        def add_score(df: DataFrame[InId]) -> DataFrame[OutScore]:
+            return df.select(cs.all()).with_columns(score=pl.col("id").cast(pl.Float64))
+    """)
+    assert not _has_ply043(results["add_score"])
+
+
+def test_with_columns_still_preserves_row_variable() -> None:
+    # with_columns only ADDS — it is never a reduction.
+    results = _check("""
+        @rowpoly("R")
+        def add_score(df: DataFrame[InId]) -> DataFrame[OutScore]:
+            return df.with_columns(score=pl.col("id").cast(pl.Float64))
+    """)
+    assert not _has_ply043(results["add_score"])
+
+
+def test_rename_still_preserves_row_variable() -> None:
+    results = _check("""
+        class Renamed(pa.DataFrameModel):
+            key: int
+
+            class Config:
+                strict = False
+
+        @rowpoly("R")
+        def reshape(df: DataFrame[InId]) -> DataFrame[Renamed]:
+            return df.rename({"id": "key"})
+    """)
+    assert not _has_ply043(results["reshape"])

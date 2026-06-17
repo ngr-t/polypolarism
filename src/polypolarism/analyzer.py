@@ -1127,10 +1127,21 @@ def _lazy_like(result: FrameType | None, source: FrameType | None) -> FrameType 
     ``ops/{join,groupby,reshape}.py`` build new FrameTypes without knowing
     about laziness — the analyser post-processes their output through this
     helper so the eager/lazy distinction is preserved across the operation.
+
+    Also propagates the @rowpoly ``row_var_dropped`` flag (PLY043): once a
+    predicate-keyed reduction may have dropped an unknown caller extra, no
+    downstream frame method restores it, so the diagnostic mark is sticky
+    across the chain. Only meaningful while the frame stays OPEN — a closed
+    result already has an exact pinned set the sentinel probe checks directly.
     """
     if result is None or source is None:
         return result
     result.is_lazy = source.is_lazy
+    # Monotonic: once a predicate reduction may have dropped a caller extra,
+    # no downstream frame method restores it (add-only / rename / cast / sort /
+    # filter all keep the gap), so the mark sticks regardless of open/closed.
+    if source.row_var_dropped:
+        result.row_var_dropped = True
     return result
 
 
@@ -2034,6 +2045,221 @@ def _resolve_selector(node: ast.expr, frame: FrameType) -> list[str] | None:
         return [cols[0]] if name == "first" else [cols[-1]]
 
     return None
+
+
+def _is_match_all_regex(pattern: str) -> bool:
+    """True when a ``pl.col`` regex pattern matches EVERY column name.
+
+    ``^.*$`` (and trivial equivalents like ``^.*?$`` / ``^[\\s\\S]*$``) select
+    every column, so a ``select`` of one preserves the row variable (issue
+    #111). We answer conservatively: only a literally match-everything pattern
+    counts as match-all. A pattern that fails to compile is NOT treated as
+    match-all (it could narrow), and any anchored pattern that rejects even one
+    synthetic probe name is a narrowing regex.
+    """
+    try:
+        rx = re.compile(pattern)
+    except re.error:
+        return False
+    # ``fullmatch`` is wrong here — polars uses ``re.search``; a pattern that
+    # searches-matches every conceivable name is match-all. Probe a spread of
+    # names a caller extra could plausibly carry; if any is NOT matched the
+    # pattern narrows. (The empty string guards anchored ``^...$`` patterns
+    # that still require at least one char.)
+    probes = ("", "a", "id", "tmp_junk", "x_1", "COL", "a.b", "\x00__rowvar_0__")
+    return all(rx.search(p) is not None for p in probes)
+
+
+# A selector/regex classification used by the @rowpoly preservation check
+# (PLY043). ``select`` / ``drop`` reductions are sound to leave UNFLAGGED only
+# when they touch an explicit set of KNOWN column names — an unknown caller
+# extra can never fall on the dropped side. A reduction keyed by a PREDICATE
+# (regex / dtype / name-pattern selector) could match (drop, for ``drop``) or
+# miss (drop, for ``select``) an unknown extra, so it is not provably
+# preserving. ``"all"`` = selects every column; ``"literal"`` = an enumerable
+# set of explicit names; ``"predicate"`` = a property-based match an unknown
+# extra could satisfy/fail; ``None`` = not a recognised selector/regex form.
+_SelectorClass = Literal["all", "literal", "predicate"]
+_PREDICATE_SELECTOR_NAMES = frozenset(
+    {
+        "numeric",
+        "integer",
+        "float",
+        "string",
+        "boolean",
+        "temporal",
+        "by_dtype",
+        "starts_with",
+        "ends_with",
+        "contains",
+        "matches",
+        "first",
+        "last",
+    }
+)
+
+
+def _classify_selector(node: ast.expr) -> _SelectorClass | None:
+    """Classify a single ``select`` / ``drop`` argument for the PLY043 guard.
+
+    Frame-independent on purpose: the question is whether the argument's
+    SHAPE could touch an unknown caller extra, not which known columns it
+    happens to hit. ``pl.all()`` / ``cs.all()`` / the ``^.*$`` regex are
+    match-all (``"all"``); an exclude/by_name over explicit literal names is
+    ``"literal"``; every dtype / name-pattern / non-match-all-regex selector is
+    ``"predicate"``. Returns ``None`` for anything not recognised as a selector
+    or regex (a plain literal name, an arbitrary expression) — the caller maps
+    that to the conservative default for the method.
+    """
+    # Selector algebra: union/intersection/difference/complement. Each operator
+    # composes the operand classes by what the RESULT set can be, not by a
+    # blanket "any predicate -> predicate" (that would mis-flag ``cs.x |
+    # cs.all()``, which is still all-columns).
+    if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.BitOr, ast.BitAnd, ast.Sub)):
+        left = _classify_selector(node.left)
+        right = _classify_selector(node.right)
+        if left is None or right is None:
+            return None
+        if isinstance(node.op, ast.BitOr):
+            # Union: superset of both. With ``all`` it is all-columns; else a
+            # predicate operand makes the union predicate-shaped; two literal
+            # name sets union to a literal name set.
+            if "all" in (left, right):
+                return "all"
+            return "predicate" if "predicate" in (left, right) else "literal"
+        if isinstance(node.op, ast.BitAnd):
+            # Intersection: subset of both. Bounded by an enumerable name set
+            # if EITHER operand is literal; else predicate; else all & all.
+            if "literal" in (left, right):
+                return "literal"
+            return "predicate" if "predicate" in (left, right) else "all"
+        # Difference (left - right): subset of ``left``, so the result's
+        # character follows the left operand. ``all - literal`` is a literal
+        # exclude (keeps every other column incl. unknowns); ``all - predicate``
+        # drops the predicate's (possibly-unknown) matches.
+        if left == "literal":
+            return "literal"
+        if left == "all":
+            return "literal" if right == "literal" else "predicate"
+        return "predicate"
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Invert):
+        sub = _classify_selector(node.operand)
+        if sub is None:
+            return None
+        # ``~cs.all()`` selects nothing (drops everything -> predicate); the
+        # complement of a literal name set keeps every OTHER column incl.
+        # unknown extras -> literal; the complement of a predicate is a
+        # predicate.
+        if sub == "all":
+            return "predicate"
+        return sub
+
+    if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+        return None
+    if not isinstance(node.func.value, ast.Name):
+        return None
+    ns = node.func.value.id
+    attr = node.func.attr
+
+    if ns == "pl":
+        # ``pl.col("^...$")``: match-all regex preserves; any other anchored
+        # regex narrows.
+        pattern = _regex_col_pattern(node)
+        if pattern is not None:
+            return "all" if _is_match_all_regex(pattern) else "predicate"
+        if attr == "all" and not node.args:
+            return "all"
+        if attr == "exclude":
+            return _classify_exclude_args(node.args)
+        return None
+
+    if ns != "cs":
+        return None
+    if attr == "all":
+        return "all"
+    if attr in _PREDICATE_SELECTOR_NAMES:
+        return "predicate"
+    if attr == "by_name":
+        # An explicit set of literal names (or a nested selector arg). Pure
+        # literal-name args are ``"literal"``; a nested selector promotes.
+        return _classify_exclude_args(node.args)
+    if attr == "exclude":
+        return _classify_exclude_args(node.args)
+    return None
+
+
+def _classify_exclude_args(args: list[ast.expr]) -> _SelectorClass | None:
+    """Classify the args of an ``exclude`` / ``by_name`` form for PLY043.
+
+    All args are explicit literal column names -> ``"literal"``. Any arg is an
+    anchored ``^...$`` regex string, or a nested predicate selector ->
+    ``"predicate"`` (it could match an unknown extra). An unresolvable arg (a
+    variable, an unexpected node) -> ``None`` (caller defaults conservatively).
+    """
+    if not args:
+        # ``pl.exclude()`` / ``cs.by_name()`` with no args: nothing excluded /
+        # selected — treat as not-recognised so the caller defaults.
+        return None
+    result: _SelectorClass = "literal"
+    for arg in args:
+        single = _str_constant(arg)
+        multi = _str_list_or_tuple(arg)
+        names: list[str] = []
+        if single is not None:
+            names = [single]
+        elif multi is not None:
+            names = list(multi)
+        else:
+            # A nested selector argument (``cs.exclude(cs.numeric())``) or an
+            # unresolvable expression.
+            nested = _classify_selector(arg)
+            if nested is None:
+                return None
+            if nested != "literal":
+                result = "predicate"
+            continue
+        for nm in names:
+            # polars treats a ``^...$``-anchored string as a regex in
+            # exclude/col; a plain string is an exact column name.
+            if nm.startswith("^") and nm.endswith("$"):
+                result = "predicate"
+    return result
+
+
+def _reduction_drops_unknown_extras(node: ast.Call, method: Literal["select", "drop"]) -> bool:
+    """True when a ``select``/``drop`` call could drop an unknown caller extra.
+
+    The @rowpoly preservation guard (PLY043): a reduction is provably
+    preserving ONLY when it touches an explicit set of KNOWN column names.
+
+    - ``select(<predicate>)`` keeps only the predicate's matches, so any
+      unknown extra NOT matching it is dropped -> not preserving. A literal
+      ``select`` (named columns / ``pl.exclude("name")``) either produces a
+      closed frame the sentinel probe already catches, or (the literal exclude)
+      keeps every OTHER column incl. unknown extras -> preserving here.
+    - ``drop(<predicate>)`` removes the predicate's matches, so an unknown
+      extra that DOES match is dropped -> not preserving. ``drop("name")``
+      removes only the named column -> preserving.
+    - An all-columns form (``pl.all()`` / ``cs.all()`` / ``^.*$``) keeps
+      everything under ``select`` (preserving) but drops everything under
+      ``drop`` (not preserving).
+
+    Multi-arg ``select(cs.numeric(), "id")`` keeps numeric + id; a non-numeric
+    unknown extra is still dropped, so ANY predicate arg flags — UNLESS some
+    arg is an all-columns form (``select(cs.numeric(), pl.all())`` keeps all).
+    Conservative on uncertainty: an unrecognised arg form does NOT flag (we
+    cannot prove a drop), which keeps the residual false negative over a false
+    positive.
+    """
+    classes: list[_SelectorClass | None] = [_classify_selector(arg) for arg in node.args]
+    if method == "select":
+        # An all-columns arg subsumes the rest -> keeps everything.
+        if any(c == "all" for c in classes):
+            return False
+        return any(c == "predicate" for c in classes)
+    # drop: an all-columns form drops everything; a predicate form drops its
+    # (possibly-unknown) matches.
+    return any(c in ("all", "predicate") for c in classes)
 
 
 # =============================================================================
@@ -6782,10 +7008,19 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         self._stamp_positional_alias_spans(node, column_spans)
 
         if result_columns or has_opaque_outputs:
+            # @rowpoly preservation (PLY043): a predicate-keyed select keeps
+            # only the predicate's matches, so a caller extra (modeled by the
+            # open ``rest`` OR by a skolem sentinel column) not matching it is
+            # dropped — preservation is no longer provable. Sticky: carry a
+            # prior drop forward.
+            row_var_dropped = _row_var_may_be_dropped(input_frame) and (
+                input_frame.row_var_dropped or _reduction_drops_unknown_extras(node, "select")
+            )
             return FrameType(
                 columns=result_columns,
                 rest=RowVar("name") if has_opaque_outputs else None,
                 column_spans=column_spans,
+                row_var_dropped=row_var_dropped,
             )
         return None
 
@@ -6984,6 +7219,13 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         # afterwards — even targets that were never pinned (they may have
         # existed among the extras; either way the name is gone).
         absent = input_frame.absent | set(targets) if input_frame.rest is not None else None
+        # @rowpoly preservation (PLY043): a predicate-keyed drop removes the
+        # predicate's matches, so a caller extra (open ``rest`` OR a skolem
+        # sentinel) that matches is dropped. ``drop("name")`` removes only
+        # named columns (unknown extras survive) and never sets this. Sticky.
+        row_var_dropped = _row_var_may_be_dropped(input_frame) and (
+            input_frame.row_var_dropped or _reduction_drops_unknown_extras(node, "drop")
+        )
         return FrameType(
             columns=result_columns,
             strict=input_frame.strict,
@@ -6991,6 +7233,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             absent=absent,
             nonstrict_schema=input_frame.nonstrict_schema,
             schema_name=input_frame.schema_name,
+            row_var_dropped=row_var_dropped,
         )
 
     def _infer_rename_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
@@ -8043,12 +8286,41 @@ def _extract_function_signature(
     )
 
 
+# Sentinel column-name prefix for skolemized row variables. The NUL byte
+# cannot appear in real source, so a column whose name starts with this is
+# always a probe sentinel (never a caller column).
+_ROW_SKOLEM_PREFIX = "\x00__rowvar_"
+
+
 def _row_skolem(index: int) -> str:
     """A sentinel column name (per row variable) that cannot appear in real
     source. Injected into a parameter frame to skolemize its row variable: if
     the body provably drops it, the body does not preserve that parameter's
     arbitrary caller extras (C-14 Tier 4/5)."""
-    return f"\x00__rowvar_{index}__"
+    return f"{_ROW_SKOLEM_PREFIX}{index}__"
+
+
+def _frame_has_row_skolem(frame: FrameType) -> bool:
+    """True when ``frame`` carries a skolemized row-variable sentinel column.
+
+    The preservation probe models a row variable as a single CLOSED sentinel
+    column (``\\x00__rowvar_i__``) — a stand-in for an arbitrary caller extra.
+    A predicate-keyed reduction over such a frame could drop a DIFFERENT
+    arbitrary extra even when this specific sentinel survives the predicate
+    (the regex/dtype/name-pattern can't tell one caller extra from another), so
+    its presence — not just the open ``rest`` — is what licenses the PLY043
+    pattern-drop mark."""
+    return any(name.startswith(_ROW_SKOLEM_PREFIX) for name in frame.columns)
+
+
+def _row_var_may_be_dropped(frame: FrameType) -> bool:
+    """Gate for the PLY043 pattern-drop mark: this frame admits a caller extra
+    that a predicate reduction could silently drop — either an OPEN ``rest``
+    (genuine unknown extras) or a skolemized row-variable sentinel (the probe's
+    stand-in for one). Closed frames with no sentinel have an exact pinned set,
+    so there is nothing a predicate could drop that the sentinel ``lacks``
+    probe doesn't already catch by name."""
+    return frame.rest is not None or _frame_has_row_skolem(frame)
 
 
 def _check_row_preservation(
@@ -8108,19 +8380,44 @@ def _check_row_preservation(
     if not return_frames and probe.return_type is not None:
         return_frames = [(func_node.lineno, probe.return_type)]
 
+    # A predicate-keyed reduction (regex / dtype / name-pattern select|drop)
+    # over the open frame is invisible to the sentinel probe — the sentinel
+    # need not match the predicate, so it survives while a real caller extra
+    # that DOES match is dropped. ``row_var_dropped`` flags that structurally
+    # (set in ``_infer_select_call`` / ``_infer_drop_call``, sticky via
+    # ``_lazy_like``). Such a return is a provable non-preservation for EVERY
+    # row variable: the reduction predicate can't tell one caller's extras from
+    # another's, so any param's extras could fall on the dropped side.
     errors: list[str] = []
     for param, sentinel in skolem_of.items():
         row_var = targets[param]
         for lineno, frame in return_frames:
-            if frame is not None and frame.lacks(sentinel):
+            if frame is None:
+                continue
+            dropped_by_name = frame.lacks(sentinel)
+            dropped_by_pattern = frame.row_var_dropped
+            if dropped_by_name or dropped_by_pattern:
+                if dropped_by_pattern and not dropped_by_name:
+                    detail = (
+                        f"the frame returned at line {lineno} is produced by a "
+                        f"column-reducing select/drop keyed by a pattern or selector "
+                        f"(regex / dtype / name-pattern), which could drop a caller "
+                        f"extra that happens to match. Keep every column (an "
+                        f"all-columns form like pl.all() / cs.all(), or reduce by "
+                        f"explicit known names only)"
+                    )
+                else:
+                    detail = (
+                        f"the frame returned at line {lineno} provably drops it. A "
+                        f"row-polymorphic helper must keep every column of '{param}' "
+                        f"(use with_columns / pl.all() rather than selecting a fixed set)"
+                    )
                 errors.append(
                     tag(
                         PLY043,
                         f"@rowpoly: helper does not preserve row variable '{row_var}' "
-                        f"(parameter '{param}') — the frame returned at line {lineno} "
-                        f"provably drops it. A row-polymorphic helper must keep every "
-                        f"column of '{param}' (use with_columns / pl.all() rather than "
-                        f"selecting a fixed set), or remove '{row_var}' from @rowpoly.",
+                        f"(parameter '{param}') — {detail}, or remove '{row_var}' "
+                        f"from @rowpoly.",
                     )
                 )
                 break  # one diagnostic per row variable
