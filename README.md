@@ -157,7 +157,7 @@ polypolarism --no-version-check path/to/file.py
   form, `Optional[T]` vs `pa.Field(nullable=True)`, validation-as-narrowing.
 - [Supported operations](docs/operations.md) — the full operation and
   sub-namespace reference.
-- [Diagnostics](docs/diagnostics.md) — `PLY###` / `PLW###` codes, JSON
+- [Diagnostics](docs/diagnostics.md) — `pple-*` / `pplw-*` codes, JSON
   output, and the schema diff block.
 - [Row polymorphism](docs/row-polymorphism.md) — the opt-in `@rowpoly`
   dialect for column-preserving helpers (threading + `pple-rowpoly-not-preserved`).

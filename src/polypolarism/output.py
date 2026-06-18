@@ -38,7 +38,7 @@ class Diagnostic:
     end_line: int | None = None
     end_column: int | None = None
     source: str = "polypolarism"
-    # Stable ``PLY###`` / ``PLW###`` code, exposed structurally so JSON
+    # Stable ``pple-*`` / ``pplw-*`` code, exposed structurally so JSON
     # consumers don't have to regex the message prefix (issue #70). ``None``
     # for untagged diagnostics (parse / read failures).
     code: str | None = None

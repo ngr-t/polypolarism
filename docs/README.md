@@ -11,7 +11,7 @@ quick-start example.
 - [Supported operations](operations.md) — join, group-by/agg, select,
   reshape, sub-namespaces (`.str`/`.dt`/`.list`/…), restructuring,
   window/time-series, selectors, and `pl.*` constructors.
-- [Diagnostics](diagnostics.md) — the `PLY###` / `PLW###` code tables,
+- [Diagnostics](diagnostics.md) — the `pple-*` / `pplw-*` code tables,
   apply-style helper warnings, JSON output, and the schema diff block.
 - [Row polymorphism](row-polymorphism.md) — the opt-in `@rowpoly` dialect:
   threading a column-preserving helper's "rest" row from input to output

@@ -9814,8 +9814,9 @@ def _analyze_out_of_function_scopes(
       empty seed so only statically-known receivers are checked.
 
     **Errors only.** These scopes surface the PROVABLE-runtime-error subset the
-    issue targets (missing-column references, dtype misuse — all PLY codes the
-    in-function analyzer already emits on a CLOSED frame). Advisory PLW warnings
+    issue targets (missing-column references, dtype misuse — all `pple-*` codes
+    the in-function analyzer already emits on a CLOSED frame). Advisory `pplw-*`
+    warnings
     (unknown-function-return, unmodeled-method, ...) are intentionally NOT
     propagated from here: they are imprecision notes, not provable failures, and
     raising them on every file's top-level driver statements would be noise

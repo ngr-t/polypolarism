@@ -4193,7 +4193,7 @@ class TestM6Selectors:
 
 
 class TestM6DiagnosticCodes:
-    """Errors carry a stable PLY### prefix for IDE / CI consumption."""
+    """Errors carry a stable `pple-*` code prefix for IDE / CI consumption."""
 
     def test_column_not_found_has_code(self):
         source = textwrap.dedent(

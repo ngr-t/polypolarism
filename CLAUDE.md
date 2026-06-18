@@ -101,7 +101,8 @@ The suite combines unit tests with two compiler-style layers
   POLYPOLARISM_UPDATE_EXPECTED=1 uv run pytest tests/test_fixtures.py
   ```
 
-- Every `PLY###`/`PLW###` code in `diagnostics.py` must appear in at least
+- Every diagnostic code (`pple-*` errors / `pplw-*` warnings, registered in
+  `diagnostics.ALL_CODES`) must appear in at least
   one golden file (coverage gate). When adding a new diagnostic code, add a
   minimal fixture demonstrating it; only codes that cannot fire from a
   self-contained file go in `FIXTURE_EXEMPT_CODES` with a pointer to their

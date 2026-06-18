@@ -190,7 +190,7 @@ class TestCheckWarningFixtures:
         assert all(r.passed for r in results)
         # Every function carries at least one warning
         assert all(r.warnings for r in results)
-        # PLW codes show up
+        # pplw-* codes show up
         all_warnings = [w for r in results for w in r.warnings]
         assert any("pplw-missing-return-dtype" in w for w in all_warnings)
         assert any("pplw-unknown-function" in w for w in all_warnings)

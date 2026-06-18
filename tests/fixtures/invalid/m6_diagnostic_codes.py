@@ -1,4 +1,4 @@
-"""ensure errors carry [PLY###] codes."""
+"""ensure errors carry [pple-*] codes."""
 
 import pandera.polars as pa
 import polars as pl

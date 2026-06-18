@@ -67,7 +67,7 @@ catch some real issues.** In a soundness-first checker a false positive
 ignore or suppress diagnostics and erodes trust in every other one. When a
 property cannot be *proven* from the statically-available facts, the
 checker stays silent (or degrades to `Unknown` / an open frame), optionally
-emitting a `PLW###` advisory that names a concrete source change which would
+emitting a `pplw-*` advisory that names a concrete source change which would
 make precise checking possible — never a hard error on unprovable ground.
 
 Concretely:
@@ -86,7 +86,7 @@ Concretely:
   suffix) are not errors. `strict` and `FrameType.absent` cover the real
   needs.
 
-This ADR generalizes the rule already applied piecemeal: PLW-advisories
+This ADR generalizes the rule already applied piecemeal: warning advisories
 over hard errors under uncertainty (`docs/diagnostics.md`), open-frame
 leniency (ADR-0006), the `Unknown`-degradation points (`docs/leniency.md`),
 and the conservative boundaries of pple-rowpoly-not-preserved / the duplicate-column and
@@ -102,7 +102,7 @@ pattern-drop checks.
   flagged operation must actually raise at runtime, or be a declared-
   contract violation with a documented static-only justification).
 - Reviewers should reject a proposed diagnostic that cannot be shown free
-  of false positives, and prefer a `PLW###` advisory or silence instead.
+  of false positives, and prefer a `pplw-*` advisory or silence instead.
 
 ## Revival conditions
 

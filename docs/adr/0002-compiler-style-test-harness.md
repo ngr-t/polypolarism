@@ -8,7 +8,7 @@
 
 polypolarism is structurally a compiler front-end: it parses Python source,
 runs type inference over a dtype lattice, and emits diagnostics with stable
-codes (`PLY###` / `PLW###`). Its test suite, however, grew as a conventional
+codes (`pple-*` / `pplw-*`). Its test suite, however, grew as a conventional
 unit-test suite:
 
 - `tests/fixtures/{valid,invalid,warning}/` held end-to-end input programs,
@@ -69,8 +69,8 @@ Mature compiler projects solve these problems with two standard techniques:
 ### 2. Diagnostic-code coverage gate
 
 `test_every_diagnostic_code_is_exercised_by_a_fixture` introspects
-`diagnostics.py` for all defined `PLY###`/`PLW###` codes and requires each to
-appear in at least one golden file. Codes that genuinely cannot fire from a
+`diagnostics.ALL_CODES` for all defined `pple-*`/`pplw-*` codes and requires
+each to appear in at least one golden file. Codes that genuinely cannot fire from a
 self-contained fixture (currently only `pplw-unsupported-version`, the environment version
 floor) live in an explicit allowlist that must name the unit test covering
 them instead — and the test also fails if an allowlisted code *becomes*

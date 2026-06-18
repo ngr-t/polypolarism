@@ -36,7 +36,7 @@ The main constructs whose inference intentionally degrades to `Unknown`:
 How to keep leniency visible:
 
 - Where a concrete source change restores precision, polypolarism emits a
-  `PLW###` warning naming it (see
+  `pplw-*` warning naming it (see
   [Apply-style helpers and warning codes](diagnostics.md#apply-style-helpers-and-warning-codes)).
 - In this repo's own test suite, every golden fixture report renders an
   indented `via:` note for each leniency-mediated pass, and unit tests

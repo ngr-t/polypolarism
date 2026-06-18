@@ -159,7 +159,7 @@ class TestFormatJson:
         assert data["diagnostics"][0]["message"].startswith("[pple-return-type] ")
 
     def test_warning_diagnostic_carries_structured_code(self):
-        """Tagged warnings expose their PLW code structurally too."""
+        """Tagged warnings expose their `pplw-*` code structurally too."""
         result = CheckResult(
             function_name="process",
             passed=True,
