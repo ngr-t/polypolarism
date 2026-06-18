@@ -108,7 +108,7 @@ part of either declared schema.
 With `@rowpoly("R")`, `use_rowpoly` **fails `pple-return-type`**: the row variable threads
 `region` into the result *with its real `Utf8` dtype*, so the lying `int`
 declaration is caught. That precision — and the matching obligation that the
-body actually preserve `region` (the [`pple-rowpoly-not-preserved`](#ply043--the-preservation-check)
+body actually preserve `region` (the [`pple-rowpoly-not-preserved`](#pple-rowpoly-not-preserved--the-preservation-check)
 check below) — is exactly what `strict = False` alone cannot say.
 
 ## The hard constraint: Pandera stays the runtime authority
@@ -285,7 +285,7 @@ def add_score(df: DataFrame[InId]) -> DataFrame[OutScore]:
 ```
 
 ```text
-$ polypolarism ply043.py
+$ polypolarism not_preserved.py
   add_score (line 24): FAIL
     - [pple-rowpoly-not-preserved] @rowpoly: helper does not preserve row variable 'R' (parameter 'df') — the frame returned at line 26 provably drops it. A row-polymorphic helper must keep every column of 'df' (use with_columns / pl.all() rather than selecting a fixed set), or remove 'R' from @rowpoly.
 ```
