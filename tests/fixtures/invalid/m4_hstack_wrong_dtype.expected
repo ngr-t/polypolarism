@@ -1,2 +1,2 @@
 long_with_label: FAIL
-  error: [PLY040] Column 'label' has type Utf8, but declared type is Int64
+  error: [pple-return-type] Column 'label' has type Utf8, but declared type is Int64

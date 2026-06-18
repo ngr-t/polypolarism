@@ -1,6 +1,6 @@
 cats_of_int: FAIL
-  error: [PLY012] `.cat` accessor requires a Categorical or Enum column, but column 'a' is Int64 — polars raises SchemaError at runtime
+  error: [pple-wrong-namespace-dtype] `.cat` accessor requires a Categorical or Enum column, but column 'a' is Int64 — polars raises SchemaError at runtime
   via: column 'cats': passed via Unknown
 cats_of_str: FAIL
-  error: [PLY012] `.cat` accessor requires a Categorical or Enum column, but column 's' is Utf8 — polars raises SchemaError at runtime
+  error: [pple-wrong-namespace-dtype] `.cat` accessor requires a Categorical or Enum column, but column 's' is Utf8 — polars raises SchemaError at runtime
   via: column 'cats': passed via Unknown

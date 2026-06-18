@@ -1,3 +1,3 @@
 concat_mixed_units: FAIL
-  error: [PLY020] concat: column 't' — Cannot unify types Datetime[us] and Datetime[ns]
-  error: [PLY040] Could not infer return type
+  error: [pple-concat-mismatch] concat: column 't' — Cannot unify types Datetime[us] and Datetime[ns]
+  error: [pple-return-type] Could not infer return type

@@ -1,2 +1,2 @@
 collect_eager_frame: FAIL
-  error: [PLY031] `.collect()` is only available on LazyFrame, but the receiver is a DataFrame. Drop the call — it's already eager.
+  error: [pple-lazy-only-method] `.collect()` is only available on LazyFrame, but the receiver is a DataFrame. Drop the call — it's already eager.

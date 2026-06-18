@@ -1,2 +1,2 @@
 combine: FAIL
-  error: [PLY040] Column 'z' has type Int64?, but declared type is Int64
+  error: [pple-return-type] Column 'z' has type Int64?, but declared type is Int64

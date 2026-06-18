@@ -1,2 +1,2 @@
 tally: FAIL
-  error: [PLY040] Column 'id' has type UInt32, but declared type is Int64
+  error: [pple-return-type] Column 'id' has type UInt32, but declared type is Int64

@@ -1,2 +1,2 @@
 passthrough: FAIL
-  error: [PLY040] Column 'q' has type Array[Int64, 3], but declared type is Array[Int64, 5]
+  error: [pple-return-type] Column 'q' has type Array[Int64, 3], but declared type is Array[Int64, 5]

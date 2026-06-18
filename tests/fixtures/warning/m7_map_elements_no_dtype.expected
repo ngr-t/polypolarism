@@ -1,2 +1,2 @@
 f: WARN
-  warning: [PLW001] map_elements: no `return_dtype=` was supplied, so polypolarism falls back to the receiver dtype. Add e.g. `return_dtype=pl.Float64` to make the result type precise.
+  warning: [pplw-missing-return-dtype] map_elements: no `return_dtype=` was supplied, so polypolarism falls back to the receiver dtype. Add e.g. `return_dtype=pl.Float64` to make the result type precise.

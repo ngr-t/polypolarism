@@ -1,2 +1,2 @@
 f: WARN
-  warning: [PLW004] pipe: a lambda was passed as the callable; polypolarism cannot infer its return type. Promote the lambda to a top-level function with a DataFrame[Schema] return annotation.
+  warning: [pplw-untyped-callable] pipe: a lambda was passed as the callable; polypolarism cannot infer its return type. Promote the lambda to a top-level function with a DataFrame[Schema] return annotation.

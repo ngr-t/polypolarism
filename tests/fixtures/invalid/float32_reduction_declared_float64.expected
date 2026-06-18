@@ -1,9 +1,9 @@
 rolling_mean_declared_float64: FAIL
-  error: [PLY040] Column 'reading_rolling_mean' has type Float32?, but declared type is Float64?
+  error: [pple-return-type] Column 'reading_rolling_mean' has type Float32?, but declared type is Float64?
 agg_declared_float64: FAIL
-  error: [PLY040] Column 'avg_reading' has type Float32, but declared type is Float64
-  error: [PLY040] Column 'med_reading' has type Float32, but declared type is Float64
+  error: [pple-return-type] Column 'avg_reading' has type Float32, but declared type is Float64
+  error: [pple-return-type] Column 'med_reading' has type Float32, but declared type is Float64
 select_std_ddof0_declared_float64: FAIL
-  error: [PLY040] Column 'spread' has type Float32, but declared type is Float64
+  error: [pple-return-type] Column 'spread' has type Float32, but declared type is Float64
 mean_horizontal_declared_float64: FAIL
-  error: [PLY040] Column 'avg' has type Float32, but declared type is Float64
+  error: [pple-return-type] Column 'avg' has type Float32, but declared type is Float64

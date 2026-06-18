@@ -1,12 +1,12 @@
 cast_match: WARN
-  warning: [PLW013] typing.cast to frame schema 'KVa' is not honored as a schema assertion; polypolarism checks the cast argument's actual inferred schema instead. Use # type: ignore[PLY040] to suppress a resulting mismatch if the cast is intentional.
+  warning: [pplw-ignored-cast] typing.cast to frame schema 'KVa' is not honored as a schema assertion; polypolarism checks the cast argument's actual inferred schema instead. Use # type: ignore[pple-return-type] to suppress a resulting mismatch if the cast is intentional.
 cast_unverified: WARN
-  warning: [PLW013] typing.cast to frame schema 'KVa' over an unknown/open frame was accepted as an UNVERIFIED assumption: polypolarism does not honor cast as a schema assertion and cannot check the source frame's columns.
+  warning: [pplw-ignored-cast] typing.cast to frame schema 'KVa' over an unknown/open frame was accepted as an UNVERIFIED assumption: polypolarism does not honor cast as a schema assertion and cannot check the source frame's columns.
   via: column 'k': not provably absent (open frame)
   via: column 'v': not provably absent (open frame)
   via: column 'a': not provably absent (open frame)
 cast_unverified_via_var: WARN
-  warning: [PLW013] typing.cast to frame schema 'KVa' over an unknown/open frame was accepted as an UNVERIFIED assumption: polypolarism does not honor cast as a schema assertion and cannot check the source frame's columns.
+  warning: [pplw-ignored-cast] typing.cast to frame schema 'KVa' over an unknown/open frame was accepted as an UNVERIFIED assumption: polypolarism does not honor cast as a schema assertion and cannot check the source frame's columns.
   via: column 'k': not provably absent (open frame)
   via: column 'v': not provably absent (open frame)
   via: column 'a': not provably absent (open frame)

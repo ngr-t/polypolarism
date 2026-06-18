@@ -1,2 +1,2 @@
 add: FAIL
-  error: [PLY040] Column 's' has type Decimal(38, 2), but declared type is Decimal(10, 2)
+  error: [pple-return-type] Column 's' has type Decimal(38, 2), but declared type is Decimal(10, 2)

@@ -1,2 +1,2 @@
 project: FAIL
-  error: [PLY015] duplicate output column 'a' in select — polars rejects duplicate output names at runtime; rename one with `.alias(...)`
+  error: [pple-duplicate-column] duplicate output column 'a' in select — polars rejects duplicate output names at runtime; rename one with `.alias(...)`

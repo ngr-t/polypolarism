@@ -1,6 +1,6 @@
 widen: FAIL
-  error: [PLY040] Column 'revenue' has type Float64, but declared type is Int64
-  warning: [PLW005] pivot: output schema depends on the runtime values of the `on` column, so polypolarism cannot infer it. Assign the result to a `DataFrame[Schema]`-annotated variable to give the analyser a schema to check against. Suggested annotation:
+  error: [pple-return-type] Column 'revenue' has type Float64, but declared type is Int64
+  warning: [pplw-data-dependent-schema] pivot: output schema depends on the runtime values of the `on` column, so polypolarism cannot infer it. Assign the result to a `DataFrame[Schema]`-annotated variable to give the analyser a schema to check against. Suggested annotation:
       class PivotedOut(pa.DataFrameModel):
           region: pl.Utf8
           # one column per each value of 'metric', dtype pl.Float64

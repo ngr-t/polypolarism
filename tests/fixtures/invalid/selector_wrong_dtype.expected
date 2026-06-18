@@ -1,4 +1,4 @@
 numeric_only_wrong_dtype: FAIL
-  error: [PLY040] Column 'price' has type Float64, but declared type is Utf8
+  error: [pple-return-type] Column 'price' has type Float64, but declared type is Utf8
 numeric_only_missing_column: FAIL
-  error: [PLY040] Missing column 'name' of type Utf8
+  error: [pple-return-type] Missing column 'name' of type Utf8

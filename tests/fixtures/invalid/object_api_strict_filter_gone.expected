@@ -1,2 +1,2 @@
 filtered_column_gone: FAIL
-  error: [PLY001] Column 'b' not found in frame from schema 'filter_schema'. Available columns: ['a']
+  error: [pple-column-not-found] Column 'b' not found in frame from schema 'filter_schema'. Available columns: ['a']

@@ -1,2 +1,2 @@
 presence_only_not_enough: FAIL
-  error: [PLY040] Missing column 'a' of type Float64
+  error: [pple-return-type] Missing column 'a' of type Float64

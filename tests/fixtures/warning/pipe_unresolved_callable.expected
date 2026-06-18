@@ -1,2 +1,2 @@
 apply_external_pipe: WARN
-  warning: [PLW002] pipe: callable 'enrich' is not annotated or not in this module; treating as identity. To make polypolarism check it, define 'enrich' here with a DataFrame[Schema] return annotation, or call it directly.
+  warning: [pplw-unresolved-pipe] pipe: callable 'enrich' is not annotated or not in this module; treating as identity. To make polypolarism check it, define 'enrich' here with a DataFrame[Schema] return annotation, or call it directly.

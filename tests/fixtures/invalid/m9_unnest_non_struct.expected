@@ -1,2 +1,2 @@
 f: FAIL
-  error: [PLY021] unnest: column 'v' is Float64, not Struct{...}
+  error: [pple-explode] unnest: column 'v' is Float64, not Struct{...}

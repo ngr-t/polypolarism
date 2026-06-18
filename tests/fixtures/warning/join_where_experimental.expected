@@ -1,5 +1,5 @@
 ok_join_where: WARN
-  warning: [PLW007] `.join_where()` is experimental in polars (its schema may change without notice), so polypolarism does not track its result schema — downstream checks weaken. Validate the result against a schema (`Schema.validate(...)`) to keep checking precise.
+  warning: [pplw-unmodeled-method] `.join_where()` is experimental in polars (its schema may change without notice), so polypolarism does not track its result schema — downstream checks weaken. Validate the result against a schema (`Schema.validate(...)`) to keep checking precise.
   via: column 'k': not provably absent (open frame)
   via: column 'x': not provably absent (open frame)
   via: column 'k_right': not provably absent (open frame)

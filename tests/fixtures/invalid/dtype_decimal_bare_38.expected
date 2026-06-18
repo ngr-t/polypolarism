@@ -1,2 +1,2 @@
 wrong_38: FAIL
-  error: [PLY040] Column 'd' has type Decimal(38, 0), but declared type is Decimal(28, 0)
+  error: [pple-return-type] Column 'd' has type Decimal(38, 0), but declared type is Decimal(28, 0)

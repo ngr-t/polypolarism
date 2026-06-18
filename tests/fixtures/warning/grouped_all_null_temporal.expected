@@ -1,2 +1,2 @@
 grouped_std_datetime: WARN
-  warning: [PLW012] std on Datetime[us] in a grouped context always yields an all-null column (probed; the same reduction raises in a plain select) — this is probably not intended
+  warning: [pplw-all-null-aggregation] std on Datetime[us] in a grouped context always yields an all-null column (probed; the same reduction raises in a plain select) — this is probably not intended

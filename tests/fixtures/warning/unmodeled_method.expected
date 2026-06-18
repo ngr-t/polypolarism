@@ -1,3 +1,3 @@
 peaks: WARN
-  warning: [PLW007] `.peak_max()` is not modeled by polypolarism — the result dtype degrades to Unknown and downstream dtype checks weaken. Pin the dtype with `.cast(...)` after the call, or validate the frame against a schema, to keep checking precise.
+  warning: [pplw-unmodeled-method] `.peak_max()` is not modeled by polypolarism — the result dtype degrades to Unknown and downstream dtype checks weaken. Pin the dtype with `.cast(...)` after the call, or validate the frame against a schema, to keep checking precise.
   via: column 'flag': passed via Unknown

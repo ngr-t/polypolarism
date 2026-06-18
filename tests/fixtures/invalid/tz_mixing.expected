@@ -1,10 +1,10 @@
 stack: FAIL
-  error: [PLY020] concat: column 't' — Cannot unify types Datetime[us] and Datetime[us, UTC]
-  error: [PLY040] Could not infer return type
+  error: [pple-concat-mismatch] concat: column 't' — Cannot unify types Datetime[us] and Datetime[us, UTC]
+  error: [pple-return-type] Could not infer return type
 elapsed: FAIL
-  error: [PLY009] arithmetic 'Datetime[us, UTC] - Datetime[us]' is not supported — polars raises InvalidOperationError at runtime; cast an operand first
+  error: [pple-incompatible-operands] arithmetic 'Datetime[us, UTC] - Datetime[us]' is not supported — polars raises InvalidOperationError at runtime; cast an operand first
   via: column 'span': passed via Unknown
 compare_zones: FAIL
-  error: [PLY009] comparison 'Datetime[us, UTC] == Datetime[us, Asia/Tokyo]' is not supported — polars rejects comparing these dtypes at runtime; cast an operand first
+  error: [pple-incompatible-operands] comparison 'Datetime[us, UTC] == Datetime[us, Asia/Tokyo]' is not supported — polars rejects comparing these dtypes at runtime; cast an operand first
 parse_offset: FAIL
-  error: [PLY040] Column 'stamp' has type Datetime[us, UTC], but declared type is Datetime[us]
+  error: [pple-return-type] Column 'stamp' has type Datetime[us, UTC], but declared type is Datetime[us]

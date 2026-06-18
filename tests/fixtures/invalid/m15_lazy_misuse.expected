@@ -1,2 +1,2 @@
 f: FAIL
-  error: [PLY030] `.write_csv()` is only available on DataFrame, but the receiver is a LazyFrame. Insert `.collect()` before `.write_csv()` or work with the eager API throughout.
+  error: [pple-eager-only-method] `.write_csv()` is only available on DataFrame, but the receiver is a LazyFrame. Insert `.collect()` before `.write_csv()` or work with the eager API throughout.

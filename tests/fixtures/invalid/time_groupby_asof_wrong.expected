@@ -1,7 +1,7 @@
 dynamic_agg_wrong_dtype: FAIL
-  error: [PLY040] Column 'avg_px' has type Float64, but declared type is Int64
+  error: [pple-return-type] Column 'avg_px' has type Float64, but declared type is Int64
 asof_nonnullable_declared: FAIL
-  error: [PLY040] Column 'bid' has type Float64?, but declared type is Float64
+  error: [pple-return-type] Column 'bid' has type Float64?, but declared type is Float64
 asof_key_dtype_mismatch: FAIL
-  error: [PLY010] Join key dtype mismatch: left 'ts' is Datetime[us], right 'ts' is Date
-  error: [PLY040] Could not infer return type
+  error: [pple-join-key] Join key dtype mismatch: left 'ts' is Datetime[us], right 'ts' is Date
+  error: [pple-return-type] Could not infer return type

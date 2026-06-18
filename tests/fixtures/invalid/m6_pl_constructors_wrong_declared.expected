@@ -1,4 +1,4 @@
 concat_str_wrong: FAIL
-  error: [PLY040] Column 'full_name' has type Utf8, but declared type is Int64
+  error: [pple-return-type] Column 'full_name' has type Utf8, but declared type is Int64
 coalesce_wrong: FAIL
-  error: [PLY040] Column 'amount' has type Float64, but declared type is Int64
+  error: [pple-return-type] Column 'amount' has type Float64, but declared type is Int64

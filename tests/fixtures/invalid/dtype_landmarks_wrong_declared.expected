@@ -1,8 +1,8 @@
 enum_declared_categorical: FAIL
-  error: [PLY040] Column 'status' has type Enum['new', 'paid'], but declared type is Categorical
+  error: [pple-return-type] Column 'status' has type Enum['new', 'paid'], but declared type is Categorical
 float16_declared_float32: FAIL
-  error: [PLY040] Column 'embedding_dim_0' has type Float16, but declared type is Float32
+  error: [pple-return-type] Column 'embedding_dim_0' has type Float16, but declared type is Float32
 int128_declared_int64: FAIL
-  error: [PLY040] Column 'amount_micros' has type Int128, but declared type is Int64
+  error: [pple-return-type] Column 'amount_micros' has type Int128, but declared type is Int64
 uint128_declared_int128: FAIL
-  error: [PLY040] Column 'key' has type UInt128, but declared type is Int128
+  error: [pple-return-type] Column 'key' has type UInt128, but declared type is Int128

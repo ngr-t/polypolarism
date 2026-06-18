@@ -1,3 +1,3 @@
 bug_cum_sum_on_string: FAIL
-  error: [PLY016] cum_sum: operation not supported for dtype Utf8 — polars raises InvalidOperationError at runtime
+  error: [pple-non-numeric-operand] cum_sum: operation not supported for dtype Utf8 — polars raises InvalidOperationError at runtime
   via: column 's': passed via Unknown

@@ -1,2 +1,2 @@
 collide: FAIL
-  error: [PLY015] duplicate output column 'x' in rename — polars rejects duplicate output names at runtime; rename one with a distinct name
+  error: [pple-duplicate-column] duplicate output column 'x' in rename — polars rejects duplicate output names at runtime; rename one with a distinct name

@@ -1,4 +1,4 @@
 datetime_unit_mismatch: FAIL
-  error: [PLY040] Column 't' has type Datetime[us], but declared type is Datetime[ns]
+  error: [pple-return-type] Column 't' has type Datetime[us], but declared type is Datetime[ns]
 duration_unit_mismatch: FAIL
-  error: [PLY040] Column 'd' has type Duration[us]?, but declared type is Duration[ms]?
+  error: [pple-return-type] Column 'd' has type Duration[us]?, but declared type is Duration[ms]?

@@ -1,2 +1,2 @@
 caller: FAIL
-  error: [PLY040] Could not infer return type
+  error: [pple-return-type] Could not infer return type

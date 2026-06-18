@@ -1,2 +1,2 @@
 passthrough: FAIL
-  error: [PLY040] Missing column 'age' of type Int64
+  error: [pple-return-type] Missing column 'age' of type Int64

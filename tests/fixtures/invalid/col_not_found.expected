@@ -1,3 +1,3 @@
 reference_missing_column: FAIL
-  error: [PLY042] column 'amount' is not declared in schema 'InSchema' — the (non-strict) schema admits extra columns at runtime, but this function's declaration does not promise it. Declare the column on the schema, or take a bare pl.DataFrame parameter for row-polymorphic helpers
-  error: [PLY040] Column 'doubled' has type Int64, but declared type is Float64
+  error: [pple-undeclared-column] column 'amount' is not declared in schema 'InSchema' — the (non-strict) schema admits extra columns at runtime, but this function's declaration does not promise it. Declare the column on the schema, or take a bare pl.DataFrame parameter for row-polymorphic helpers
+  error: [pple-return-type] Column 'doubled' has type Int64, but declared type is Float64

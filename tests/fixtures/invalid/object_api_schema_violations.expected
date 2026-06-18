@@ -1,4 +1,4 @@
 missing_after_strict_validate: FAIL
-  error: [PLY001] Column 'missing' not found in frame from schema 'order_schema'. Available columns: ['order_id']
+  error: [pple-column-not-found] Column 'missing' not found in frame from schema 'order_schema'. Available columns: ['order_id']
 str_on_int_column: FAIL
-  error: [PLY012] `.str` accessor requires a String column, but column 'order_id' is Int64 — polars raises InvalidOperationError at runtime
+  error: [pple-wrong-namespace-dtype] `.str` accessor requires a String column, but column 'order_id' is Int64 — polars raises InvalidOperationError at runtime

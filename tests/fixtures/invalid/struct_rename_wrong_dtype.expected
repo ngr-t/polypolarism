@@ -1,2 +1,2 @@
 bad_struct_rename: FAIL
-  error: [PLY040] Column 'q' has type Int64, but declared type is Utf8
+  error: [pple-return-type] Column 'q' has type Int64, but declared type is Utf8

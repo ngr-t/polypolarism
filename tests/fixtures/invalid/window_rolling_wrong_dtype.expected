@@ -1,6 +1,6 @@
 cum_wrong_dtype: FAIL
-  error: [PLY040] Column 'running' has type Int64, but declared type is Utf8
+  error: [pple-return-type] Column 'running' has type Int64, but declared type is Utf8
 over_wrong_dtype: FAIL
-  error: [PLY040] Column 'region_mean' has type Float64, but declared type is Int64
+  error: [pple-return-type] Column 'region_mean' has type Float64, but declared type is Int64
 rolling_wrong_dtype: FAIL
-  error: [PLY040] Column 'roll' has type Float64?, but declared type is Int64?
+  error: [pple-return-type] Column 'roll' has type Float64?, but declared type is Int64?

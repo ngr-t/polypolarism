@@ -1,2 +1,2 @@
 f: FAIL
-  error: [PLY020] concat(how='vertical'): column sets differ — another frame has ['extra'] not in first
+  error: [pple-concat-mismatch] concat(how='vertical'): column sets differ — another frame has ['extra'] not in first

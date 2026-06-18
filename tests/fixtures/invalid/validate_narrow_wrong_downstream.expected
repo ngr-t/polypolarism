@@ -1,2 +1,2 @@
 process: FAIL
-  error: [PLY040] Column 'value' has type Float64, but declared type is Utf8
+  error: [pple-return-type] Column 'value' has type Float64, but declared type is Utf8

@@ -1,2 +1,2 @@
 bug_when_nonbool: FAIL
-  error: [PLY008] when: condition has dtype Int64, expected Boolean — polars only accepts boolean conditions (use a comparison or `.is_*()` method)
+  error: [pple-non-boolean-predicate] when: condition has dtype Int64, expected Boolean — polars only accepts boolean conditions (use a comparison or `.is_*()` method)

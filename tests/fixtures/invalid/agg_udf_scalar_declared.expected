@@ -1,2 +1,2 @@
 wrong_scalar_declaration: FAIL
-  error: [PLY040] Column 'x' has type List[Float64], but declared type is Float64
+  error: [pple-return-type] Column 'x' has type List[Float64], but declared type is Float64

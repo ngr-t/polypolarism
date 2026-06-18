@@ -1,2 +1,2 @@
 bug_over_nonexistent: FAIL
-  error: [PLY042] column 'ghost' is not declared in schema 'Mixed' — the (non-strict) schema admits extra columns at runtime, but this function's declaration does not promise it. Declare the column on the schema, or take a bare pl.DataFrame parameter for row-polymorphic helpers
+  error: [pple-undeclared-column] column 'ghost' is not declared in schema 'Mixed' — the (non-strict) schema admits extra columns at runtime, but this function's declaration does not promise it. Declare the column on the schema, or take a bare pl.DataFrame parameter for row-polymorphic helpers

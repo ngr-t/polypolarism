@@ -1,2 +1,2 @@
 to_datetime_stale_unit: FAIL
-  error: [PLY040] Column 't' has type Datetime[ns], but declared type is Datetime[us]
+  error: [pple-return-type] Column 't' has type Datetime[ns], but declared type is Datetime[us]

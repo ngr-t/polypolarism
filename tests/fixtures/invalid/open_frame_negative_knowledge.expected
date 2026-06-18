@@ -1,6 +1,6 @@
 use_after_drop: FAIL
-  error: [PLY001] Column 'a' not found — it was removed earlier in this chain (drop/rename)
+  error: [pple-column-not-found] Column 'a' not found — it was removed earlier in this chain (drop/rename)
 use_old_name_after_rename: FAIL
-  error: [PLY001] Column 'a' not found — it was removed earlier in this chain (drop/rename)
+  error: [pple-column-not-found] Column 'a' not found — it was removed earlier in this chain (drop/rename)
 declared_column_provably_removed: FAIL
-  error: [PLY040] Missing column 'a' of type Int64
+  error: [pple-return-type] Missing column 'a' of type Int64

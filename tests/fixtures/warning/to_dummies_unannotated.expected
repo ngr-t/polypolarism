@@ -1,5 +1,5 @@
 widen: WARN
-  warning: [PLW005] to_dummies: output column names depend on the runtime values of the dummied columns, so polypolarism cannot infer the schema. Assign the result to a `DataFrame[Schema]`-annotated variable to give the analyser a schema to check against. Suggested annotation:
+  warning: [pplw-data-dependent-schema] to_dummies: output column names depend on the runtime values of the dummied columns, so polypolarism cannot infer the schema. Assign the result to a `DataFrame[Schema]`-annotated variable to give the analyser a schema to check against. Suggested annotation:
       class DummiesOut(pa.DataFrameModel):
           qty: pl.Int64
           # one pl.UInt8 column per value of 'color' (named 'color_<value>')

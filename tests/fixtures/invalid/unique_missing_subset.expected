@@ -1,2 +1,2 @@
 bug_unique_subset_ghost: FAIL
-  error: [PLY014] unique: subset column 'ghost' not found
+  error: [pple-column-not-found] unique: subset column 'ghost' not found

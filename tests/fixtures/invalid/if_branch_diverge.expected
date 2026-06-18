@@ -1,9 +1,9 @@
 if_branch_wrong: FAIL
-  error: at line 33: [PLY040] Missing column 'a' of type Float64
+  error: at line 33: [pple-return-type] Missing column 'a' of type Float64
 else_branch_wrong: FAIL
-  error: at line 42: [PLY040] Missing column 'a' of type Float64
+  error: at line 42: [pple-return-type] Missing column 'a' of type Float64
 if_strict_extra: FAIL
-  error: at line 51: [PLY040] Extra column 'b' of type Float64 not in declared return type
-  error: at line 51: [PLY040] Extra column 'c' of type Float64 not in declared return type
+  error: at line 51: [pple-return-type] Extra column 'b' of type Float64 not in declared return type
+  error: at line 51: [pple-return-type] Extra column 'c' of type Float64 not in declared return type
 if_only_missing: FAIL
-  error: at line 59: [PLY040] Missing column 'a' of type Float64
+  error: at line 59: [pple-return-type] Missing column 'a' of type Float64

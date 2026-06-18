@@ -1,3 +1,3 @@
 combine: FAIL
-  error: [PLY009] arithmetic 'Utf8 + Int64' is not supported — polars raises InvalidOperationError at runtime; cast an operand first
+  error: [pple-incompatible-operands] arithmetic 'Utf8 + Int64' is not supported — polars raises InvalidOperationError at runtime; cast an operand first
   via: column 'r': passed via Unknown

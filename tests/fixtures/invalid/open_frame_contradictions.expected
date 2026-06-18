@@ -1,6 +1,6 @@
 select_closed_the_frame: FAIL
-  error: [PLY001] Column 'c' not found. Available columns: ['a', 'b']
+  error: [pple-column-not-found] Column 'c' not found. Available columns: ['a', 'b']
 pinned_dtype_misused: FAIL
-  error: [PLY009] arithmetic 'Utf8 - Int64' is not supported — polars raises InvalidOperationError at runtime; cast an operand first
+  error: [pple-incompatible-operands] arithmetic 'Utf8 - Int64' is not supported — polars raises InvalidOperationError at runtime; cast an operand first
 pinned_dtype_contradicts_declared: FAIL
-  error: [PLY040] Column 'total' has type Utf8, but declared type is Int64
+  error: [pple-return-type] Column 'total' has type Utf8, but declared type is Int64

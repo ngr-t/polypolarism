@@ -1,2 +1,2 @@
 add_score: FAIL
-  error: [PLY043] @rowpoly: helper does not preserve row variable 'R' (parameter 'df') — the frame returned at line 44 provably drops it. A row-polymorphic helper must keep every column of 'df' (use with_columns / pl.all() rather than selecting a fixed set), or remove 'R' from @rowpoly.
+  error: [pple-rowpoly-not-preserved] @rowpoly: helper does not preserve row variable 'R' (parameter 'df') — the frame returned at line 44 provably drops it. A row-polymorphic helper must keep every column of 'df' (use with_columns / pl.all() rather than selecting a fixed set), or remove 'R' from @rowpoly.

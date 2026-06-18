@@ -1,4 +1,4 @@
 cast_ineffective: FAIL
-  error: [PLY040] Missing column 'v' of type Float64
-  error: [PLY040] Missing column 'a' of type Float64
-  warning: [PLW013] typing.cast to frame schema 'KVa' is not honored as a schema assertion; polypolarism checks the cast argument's actual inferred schema instead. Use # type: ignore[PLY040] to suppress a resulting mismatch if the cast is intentional.
+  error: [pple-return-type] Missing column 'v' of type Float64
+  error: [pple-return-type] Missing column 'a' of type Float64
+  warning: [pplw-ignored-cast] typing.cast to frame schema 'KVa' is not honored as a schema assertion; polypolarism checks the cast argument's actual inferred schema instead. Use # type: ignore[pple-return-type] to suppress a resulting mismatch if the cast is intentional.

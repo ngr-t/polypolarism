@@ -1,2 +1,2 @@
 relabel: FAIL
-  error: [PLY033] annotation `DataFrame[WrongView]` re-interprets the inferred frame as an unrelated type: column 'name': declared Float64 but inferred Utf8. Fix the annotation or the expression.
+  error: [pple-annotation-conflict] annotation `DataFrame[WrongView]` re-interprets the inferred frame as an unrelated type: column 'name': declared Float64 but inferred Utf8. Fix the annotation or the expression.
