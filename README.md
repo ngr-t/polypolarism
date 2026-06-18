@@ -125,7 +125,7 @@ def compute_revenue(
 ```
 pipeline.py
   compute_revenue (line 23): FAIL
-    - [PLY040] Column 'total_revenue' has type Float64, but declared type is Int64
+    - [pple-return-type] Column 'total_revenue' has type Float64, but declared type is Int64
 
 1 function(s) failed, 0 passed.
 ```
@@ -147,7 +147,7 @@ polypolarism --format json path/to/file.py
 # Other flags
 polypolarism --version
 polypolarism --no-color path/to/file.py
-polypolarism --polars-version 1.40 path/to/file.py   # suppresses PLW010
+polypolarism --polars-version 1.40 path/to/file.py   # suppresses pplw-unsupported-version
 polypolarism --no-version-check path/to/file.py
 ```
 
@@ -160,7 +160,7 @@ polypolarism --no-version-check path/to/file.py
 - [Diagnostics](docs/diagnostics.md) — `PLY###` / `PLW###` codes, JSON
   output, and the schema diff block.
 - [Row polymorphism](docs/row-polymorphism.md) — the opt-in `@rowpoly`
-  dialect for column-preserving helpers (threading + `PLY043`).
+  dialect for column-preserving helpers (threading + `pple-rowpoly-not-preserved`).
 - [Leniency](docs/leniency.md) — when a clean run is *not* a proof.
 - [Supported versions](docs/versions.md) — Polars `1.37+` / Pandera
   `0.19+`, lockfile detection, and `[tool.polypolarism]` config.

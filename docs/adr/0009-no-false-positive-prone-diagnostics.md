@@ -25,7 +25,7 @@ shipped** and the **pure residual cannot be added soundly**:
 - *Exact-column lacks* — `class Config: strict = True` already means "these
   columns and no others", the strongest practical "frame lacks X".
 - *Collision-as-runtime-error* — `rename` to an existing/duplicate target
-  and duplicate `select`/`alias` outputs are caught (PLY015, extended for
+  and duplicate `select`/`alias` outputs are caught (pple-duplicate-column, extended for
   rename); the join non-key `_right` suffix is already modeled in the join
   result schema (verified).
 - *Declared restriction of the rest* — `@rowpoly("R", drops=<selector>)`
@@ -82,14 +82,14 @@ Concretely:
   (sound but low-value)**, not built now.
 - A **polymorphic "open-but-lacks-X" annotation** is not added — it has no
   consumer: the runtime errors it could guard (`rename`-to-existing) are
-  already covered (PLY015) and the rest (`with_columns` overwrite, join
+  already covered (pple-duplicate-column) and the rest (`with_columns` overwrite, join
   suffix) are not errors. `strict` and `FrameType.absent` cover the real
   needs.
 
 This ADR generalizes the rule already applied piecemeal: PLW-advisories
 over hard errors under uncertainty (`docs/diagnostics.md`), open-frame
 leniency (ADR-0006), the `Unknown`-degradation points (`docs/leniency.md`),
-and the conservative boundaries of PLY043 / the duplicate-column and
+and the conservative boundaries of pple-rowpoly-not-preserved / the duplicate-column and
 pattern-drop checks.
 
 ## Consequences

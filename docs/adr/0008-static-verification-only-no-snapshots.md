@@ -40,7 +40,7 @@ What covers the gap instead — all already shipped:
   everything the code itself determines is checked, source facts are
   assumptions;
 - dynamic schemas degrade loudly (issue #90: unresolved object schemas
-  bind as open assumption frames with a PLW011 advisory);
+  bind as open assumption frames with a pplw-unrecognized-annotation advisory);
 - users who want verified source schemas write them down — a pandera
   schema plus `Schema.validate(...)` narrowing IS the runtime-backed
   version of a snapshot, with better guarantees (validation actually

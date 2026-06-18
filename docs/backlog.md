@@ -25,7 +25,7 @@ Status legend: `[ ]` open / `[x]` done / `[-]` deliberately deferred.
 ## B. Mid-term (precision improvements)
 
 - [x] **B-4: Warn on unsupported/unprobed Polars methods**
-  Done 2026-06-11: PLW007 fires at the expression-chain and namespace
+  Done 2026-06-11: pplw-unmodeled-method fires at the expression-chain and namespace
   fall-throughs when the receiver dtype was precisely known (degraded
   receivers stay silent — no cascade; a `.cast(...)` directly after the
   call retracts the warning). Frame-level methods deliberately NOT
@@ -48,12 +48,12 @@ Status legend: `[ ]` open / `[x]` done / `[-]` deliberately deferred.
 - [x] **N-1: Variable annotation contradicting an inferable RHS passes
   silently (false negative).** Done 2026-06-11 per **ADR-0005**
   (two-direction rule; annotation still wins downstream):
-  - [x] **N-1a (案1)**: PLW008 on every provable contradiction
+  - [x] **N-1a (案1)**: pplw-unbacked-narrowing on every provable contradiction
     (warn-only phase), via the checker verdict engine — pivot/Unknown
     annotations stay silent.
   - [x] **N-1b (案3)**: reverse-direction classification — pure
-    narrowing (incl. optional→required) keeps PLW008 with the
-    `Schema.validate` remedy; neither-direction becomes PLY033.
+    narrowing (incl. optional→required) keeps pplw-unbacked-narrowing with the
+    `Schema.validate` remedy; neither-direction becomes pple-annotation-conflict.
   - [x] **N-1c**: fixtures `invalid/variable_annotation_contradiction`
     (+ runtime SKIP: annotations are inert at runtime) and
     `warning/annotation_narrowing`.
@@ -74,11 +74,11 @@ Status legend: `[ ]` open / `[x]` done / `[-]` deliberately deferred.
   Float16 keeps width through every select reduction, 128-bit preserved.
   `infer_agg_result_type` gained `context="select"|"agg"`; the four
   probed rust-PANIC cells ({mean,median,quantile}×Float16,
-  product×UInt128) are PLY011 errors in grouped contexts (group_by/agg
+  product×UInt128) are pple-groupby errors in grouped contexts (group_by/agg
   chains/`.over()`), valid in select. Runtime harness now catches
   `PanicException` (BaseException) as the predicted crash. Pair:
   `valid/small_int_float16_reductions` + 2 invalid twins.
-- [x] **N-3: PLW007 for unmodeled FRAME-level methods.** Done 2026-06-11:
+- [x] **N-3: pplw-unmodeled-method for unmodeled FRAME-level methods.** Done 2026-06-11:
   probed frame-returning sets (`EAGER/LAZY_FRAME_RETURNING_METHODS`,
   73/66 names from signature return annotations on 1.41.2) gate the
   warning — terminal methods and unknown names stay silent.
@@ -94,12 +94,12 @@ Status legend: `[ ]` open / `[x]` done / `[-]` deliberately deferred.
   `width: int | None`; widths parse from annotations/cast targets
   (`shape=` keyword, 1-tuples; multi-dim/non-literal → None wildcard).
   Probed (1.41.2): pandera rejects width mismatches (coerce cannot
-  repair), width-change casts raise in both strict modes (PLY013), arr
+  repair), width-change casts raise in both strict modes (pple-invalid-cast), arr
   namespace + arr.eval preserve the receiver width. Unknown widths pass
   with a "via: unknown Array width" leniency note. Fixture pair:
   `invalid/array_width_mismatch` + existing `valid/array_dtype`.
 - [-] **C-8: `pivot()` output schema inference** — data-dependent,
-  fundamentally not inferable; current PLW005 warning + user annotation
+  fundamentally not inferable; current pplw-data-dependent-schema warning + user annotation
   is the accepted design.
 - [x] **C-9: Open-struct semantics** — Done 2026-06-12 (user-approved
   design). The original framing ("tighten = close, trading FN for FP")
@@ -108,7 +108,7 @@ Status legend: `[ ]` open / `[x]` done / `[-]` deliberately deferred.
   to `Struct({}, open=True)` instead of `Unknown` — the struct-ness is
   provable (probed: pandera's bare declaration validates any struct and
   rejects non-structs; `.str` on a struct is a runtime SchemaError), so
-  wrong-namespace accessors became proofs (PLY012), while field lookups
+  wrong-namespace accessors became proofs (pple-wrong-namespace-dtype), while field lookups
   get ADR-0006 assumption semantics (`struct.field` pins Unknown,
   `unnest` opens the frame with pinned fields registered). Checker
   verdict mirrors Array-width/Enum-categories wildcards: overlapping
@@ -129,13 +129,13 @@ Status legend: `[ ]` open / `[x]` done / `[-]` deliberately deferred.
      nullable=..., required=...)}, strict=..., coerce=...)` registers
      like a class schema keyed by the variable name; `schema.validate`
      narrowing, checked-island provenance, cross-file imports and
-     PLW011 loud-degrade (string dtype aliases, non-literal kwargs)
+     pplw-unrecognized-annotation loud-degrade (string dtype aliases, non-literal kwargs)
      apply uniformly. Module-level only; `update_columns` /
      `rename_columns` and dotted `mod.schema.validate` not modeled.
   2. [x] *Constant-foldable construction* — Done 2026-06-12: dict
      comprehensions over literal/module-const string lists (key = bare
      loop var, no conditions; a loop-var-referencing value registers
-     the known keys as Unknown + PLW011), `**` spreads of module-level
+     the known keys as Unknown + pplw-unrecognized-annotation), `**` spreads of module-level
      column dicts, direct `Name` column-dict arguments, and
      `add_columns` / `remove_columns` derivation (probed immutable).
      Statement-level loops (`for c in ...: cols[c] = ...`) are NOT
@@ -143,7 +143,7 @@ Status legend: `[ ]` open / `[x]` done / `[-]` deliberately deferred.
   3. [-] *Genuinely dynamic* — deliberately NOT implemented per
      **ADR-0008** (2026-06-12). The open-frame degrade option shipped
      via issue #90 (unresolved schemas bind as open assumption frames +
-     PLW011); the execute-user-code "schema provider" stays out of
+     pplw-unrecognized-annotation); the execute-user-code "schema provider" stays out of
      scope. Revival conditions in the ADR.
 - [ ] **C-12: Implicit schemas for unannotated frames** (user request
   2026-06-11). Two independent halves:
@@ -266,19 +266,19 @@ Status legend: `[ ]` open / `[x]` done / `[-]` deliberately deferred.
   3. [x] *Precision (call-site instantiation).* Done 2026-06-17 (`a313a89`).
      `_thread_row_poly_extras` adds the caller's extras (arg columns − declared
      param columns) to the call result with their real dtypes; a wrong-dtype
-     declaration of a preserved column now fails PLY040 where the open-frame
+     declaration of a preserved column now fails pple-return-type where the open-frame
      Unknown leniency used to accept it.
-  4. [x] *Soundness (preservation check).* Done 2026-06-17 (`f6028bb`, PLY043).
+  4. [x] *Soundness (preservation check).* Done 2026-06-17 (`f6028bb`, pple-rowpoly-not-preserved).
      `_check_row_preservation` skolemizes the row variable (sentinel column)
      and flags a return point that provably drops it. Static-only — the
      invalid fixture is runtime-SKIPped (caller-relative property).
   5. [x] *Row algebra + relations — done / item closed.* Per-parameter row
      variables `@rowpoly(a="R1", b="R2")` (`b2e5a69`), threading-law property
-     tests, duplicate-output detection (PLY015, `47ad73c`), and the
+     tests, duplicate-output detection (pple-duplicate-column, `47ad73c`), and the
      `@rowpoly("R", drops=<selector>)` declared-restriction surface
      (`293320c`). The "polymorphic lacks / disjointness" residual is **closed
      per ADR-0009**: the practical core (monomorphic `absent`, strict-as-
-     exact-columns, rename/select collision PLY015, join `_right` suffix
+     exact-columns, rename/select collision pple-duplicate-column, join `_right` suffix
      modeling, `drops=`) is shipped; the definition-time `R1 # R2`
      disjointness diagnostic is **permanently deferred as unsound** (false-
      positive on every join helper's key); the `@rowpoly`-join colliding-
@@ -286,7 +286,7 @@ Status legend: `[ ]` open / `[x]` done / `[-]` deliberately deferred.
      "open-but-lacks-X" annotation has **no consumer**. See ADR-0009.
      **Tier-5 remainder, 2026-06-17:**
      - [x] *Row add/drop/rename tracking — no false positive.* Audited
-       whether `_check_row_preservation` (PLY043) wrongly flags
+       whether `_check_row_preservation` (pple-rowpoly-not-preserved) wrongly flags
        legitimately-preserving bodies (`with_columns`, `drop("realcol")`,
        `rename({"realcol": ...})`, `select(pl.all())`, `select(cs.all())`,
        conditional/early-return, `pl.concat([df, df])`). **No false positive
@@ -316,7 +316,7 @@ Status legend: `[ ]` open / `[x]` done / `[-]` deliberately deferred.
        3. **The real collision is already covered.** A genuine non-key
           overlap surfaces at the join (polars suffixes the right side,
           `tag` → `tag_right`) and is checked against the declared return by
-          the existing PLY040 return-type comparison. A separate
+          the existing pple-return-type return-type comparison. A separate
           definition-time warning would be redundant where it is right and a
           false positive where it is not. A type checker must not flag
           correct code; this diagnostic stays deferred. Revive only if a
@@ -329,9 +329,9 @@ Status legend: `[ ]` open / `[x]` done / `[-]` deliberately deferred.
        present, so the payload stays backward-compatible). `FunctionAnalysis`
        gained `param_row_vars` (it already carried `row_var`).
      - [x] Docs: `docs/row-polymorphism.md` documents the dialect (surface,
-       threading precision, `PLY043`, JSON exposure, the static-only /
+       threading precision, `pple-rowpoly-not-preserved`, JSON exposure, the static-only /
        Pandera-runtime-authority constraint), with every example verified by
-       running the CLI. Linked from `docs/README.md` / `README.md`; `PLY043`
+       running the CLI. Linked from `docs/README.md` / `README.md`; `pple-rowpoly-not-preserved`
        added to the `docs/diagnostics.md` code table.
      - Golden fixtures already exist (`valid/rowpoly_*`,
        `invalid/rowpoly_drops_row_variable`, plus the new
@@ -361,7 +361,7 @@ Status legend: `[ ]` open / `[x]` done / `[-]` deliberately deferred.
   test` green: download VS Code, install ms-python.python, smoke
   suite); toolchains refreshed superseding 8 stale dependabot PRs
   (closed); LSP e2e suite extended with a hover test (sample now pins
-  PLY042 after the checked-island re-bundle).
+  pple-undeclared-column after the checked-island re-bundle).
   - [ ] **D-11b (follow-up): QuickFix / rename** — blocked on core:
     diagnostics report function-body line spans, not expression-level
     column positions. QuickFix ("declare column on schema", "switch to
@@ -489,7 +489,7 @@ is silently skipped — frame-level annotation detection doesn't unwrap
 `Annotated`, unlike field-dtype parsing in `pandera_dtype.py`), whereas a
 bare `DataFrame[S]` carrying an unknown `@rowpoly("R")` decorator analyzes
 exactly as today (unknown decorators are ignored; a return-type mismatch on
-such a function still fires PLY040). So the decorator surface is purely
+such a function still fires pple-return-type). So the decorator surface is purely
 additive on the static side — no regression, and the row-var reader is a
 new decorator-recognition pass, not a rework of annotation handling.
 

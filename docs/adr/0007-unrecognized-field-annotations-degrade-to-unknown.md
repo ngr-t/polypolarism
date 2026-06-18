@@ -1,4 +1,4 @@
-# ADR-0007: Unrecognized Field Annotations Degrade to Unknown-Dtype Columns with PLW011
+# ADR-0007: Unrecognized Field Annotations Degrade to Unknown-Dtype Columns with pplw-unrecognized-annotation
 
 - **Status**: Accepted
 - **Date**: 2026-06-11
@@ -38,26 +38,26 @@ An annotation `parse_field_annotation` rejects registers the column anyway,
 with `Unknown` dtype (`unrecognized_field_spec`; `Optional[...]` /
 `Series[...]` wrappers still contribute requiredness), and the schema
 records a per-field `definition_warnings` entry that the analyzer surfaces
-as **PLW011** (warning, once per schema per function) on every function
-referencing the schema — mirroring the PLY041 `definition_errors` plumbing
+as **pplw-unrecognized-annotation** (warning, once per schema per function) on every function
+referencing the schema — mirroring the pple-broken-schema-annotation `definition_errors` plumbing
 from issue #69.
 
-Wrong-arity `Annotated` forms are excluded: PLY041 already carries their
-verdict (those ARE provably broken), and a second PLW011 on the same field
+Wrong-arity `Annotated` forms are excluded: pple-broken-schema-annotation already carries their
+verdict (those ARE provably broken), and a second pplw-unrecognized-annotation on the same field
 would be noise.
 
 ## Alternatives considered
 
 - **Keep the silent drop** — rejected: hides parser gaps as wrong verdicts
   in both directions (the issue itself).
-- **Hard error (PLY041 family)** — rejected: pandera's own error is real
+- **Hard error (pple-broken-schema-annotation family)** — rejected: pandera's own error is real
   only for *genuinely* unresolvable annotations, and unresolvability is not
-  provable statically (the `MyAlias = pl.Int64` counterexample). PLY041 is
+  provable statically (the `MyAlias = pl.Int64` counterexample). pple-broken-schema-annotation is
   reserved for provable runtime crashes; a hard error here would reject
   working code.
 - **Silent `Unknown` (no diagnostic)** — rejected: the issue explicitly
   asks for a loud degrade, and a genuinely-broken schema (pandera TypeError
-  at first use) would otherwise pass with zero signal. The PLW011 text
+  at first use) would otherwise pass with zero signal. The pplw-unrecognized-annotation text
   names the field, the annotation source, and the runtime consequence.
 
 ## Consequences
@@ -68,8 +68,8 @@ would be noise.
   goldens).
 - A wrong dtype against the degraded column still passes statically
   (Unknown accepts everything) — the FN narrows from "any code shape" to
-  the ordinary, visible Unknown leniency, with PLW011 telling the user
+  the ordinary, visible Unknown leniency, with pplw-unrecognized-annotation telling the user
   exactly which annotation to fix to restore precision.
-- Inheritance/repair semantics mirror PLY041: warnings are inherited from
+- Inheritance/repair semantics mirror pple-broken-schema-annotation: warnings are inherited from
   parents; a child re-declaring the field with a recognized annotation
   clears the entry.

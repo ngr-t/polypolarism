@@ -72,7 +72,7 @@ the same expression analyser, so referencing a missing column produces a
 Method chains on `.str` / `.dt` / `.list` / `.arr` / `.struct` / `.bin` /
 `.cat` are dispatched to per-namespace return-type tables, and each
 namespace validates its receiver dtype (`.list` requires `List`, `.arr`
-requires `Array`, `.cat` requires `Categorical` / `Enum` — PLY012
+requires `Array`, `.cat` requires `Categorical` / `Enum` — pple-wrong-namespace-dtype
 otherwise). The receiver's `Nullable[...]` wrapper is preserved on the
 result.
 
@@ -147,8 +147,8 @@ result.
 | `df.hstack(other)` / `df.extend(other)` | shorthand for horizontal `pl.concat([df, other])` |
 | `df.unpivot(index=[...], on=[...], variable_name="variable", value_name="value")` / `df.melt(...)` | output schema `{index..., variable_name: Utf8, value_name: T}` where `T` unifies the dtypes of the `on` columns |
 | `df.unnest("s")` / `df.unnest(["a","b"])` | each named `Struct{...}` column is replaced by its fields; receiver `Nullable[Struct]` widens each field to `Nullable[T]`; errors on missing column or non-`Struct` |
-| `df.pivot(on=, index=, values=)` | output schema is data-dependent and so cannot be inferred. Polypolarism emits `[PLW005]` with a copy-pasteable Pandera schema sketch and trusts the user's `result: DataFrame[Schema]` annotation when the result is bound to a typed variable. |
-| **LazyFrame**: `lf.collect()`, `lf.collect_async()`, `lf.collect_batches()`, `lf.cache()`, `lf.first()`, `lf.last()`, `lf.inspect()`, `lf.top_k(...)`, `lf.bottom_k(...)`, `lf.sink_csv(...)`, `lf.sink_parquet(...)`, `lf.sink_ipc(...)`, `lf.sink_ndjson(...)`, `lf.sink_batches(...)`, `df.lazy()` | column shape preserved through the call. `LazyFrame[Schema]` and `DataFrame[Schema]` are *statically distinguished*: `lazy()` flips the receiver to lazy and `collect*()` flips it to eager. Calling a lazy-only method on a `DataFrame` (or vice versa) emits `PLY031` / `PLY030`. Crossing eager↔lazy in function-call arguments or return types emits `PLY032`. |
+| `df.pivot(on=, index=, values=)` | output schema is data-dependent and so cannot be inferred. Polypolarism emits `[pplw-data-dependent-schema]` with a copy-pasteable Pandera schema sketch and trusts the user's `result: DataFrame[Schema]` annotation when the result is bound to a typed variable. |
+| **LazyFrame**: `lf.collect()`, `lf.collect_async()`, `lf.collect_batches()`, `lf.cache()`, `lf.first()`, `lf.last()`, `lf.inspect()`, `lf.top_k(...)`, `lf.bottom_k(...)`, `lf.sink_csv(...)`, `lf.sink_parquet(...)`, `lf.sink_ipc(...)`, `lf.sink_ndjson(...)`, `lf.sink_batches(...)`, `df.lazy()` | column shape preserved through the call. `LazyFrame[Schema]` and `DataFrame[Schema]` are *statically distinguished*: `lazy()` flips the receiver to lazy and `collect*()` flips it to eager. Calling a lazy-only method on a `DataFrame` (or vice versa) emits `pple-lazy-only-method` / `pple-eager-only-method`. Crossing eager↔lazy in function-call arguments or return types emits `pple-eager-lazy-mismatch`. |
 
 `df.partition_by("k")` returns a list of frames — assigning it
 to a variable binds the variable as a `FrameList(element=...)` whose
@@ -165,7 +165,7 @@ return multiple frames are out of scope.
 | `pl.col("v").cum_sum() / cum_max() / cum_min() / cum_prod()` | preserves receiver dtype |
 | `pl.col("v").cum_count()` | `UInt32` |
 | `pl.col("v").shift(n) / diff(n) / pct_change(n)` | `Nullable[T]` (head positions become NULL) |
-| `pl.col("v").rolling_sum(...) / rolling_min / rolling_max` | `Nullable[T]` of the receiver dtype (`rolling_sum` upcasts `Int8/Int16/UInt8/UInt16` → `Int64`, `Boolean` → `UInt32`); probed-invalid receivers (e.g. String, Decimal — Date/Datetime/Time/Duration too for `rolling_sum`) flag PLY016 |
+| `pl.col("v").rolling_sum(...) / rolling_min / rolling_max` | `Nullable[T]` of the receiver dtype (`rolling_sum` upcasts `Int8/Int16/UInt8/UInt16` → `Int64`, `Boolean` → `UInt32`); probed-invalid receivers (e.g. String, Decimal — Date/Datetime/Time/Duration too for `rolling_sum`) flag pple-non-numeric-operand |
 | `pl.col("v").rolling_mean / rolling_std / rolling_var / rolling_median / rolling_quantile` | `Nullable[Float64]` (windows below `min_samples` are null); an explicit literal `min_samples<=1` / `window_size=1` keeps plain `Float64` (`rolling_std`/`rolling_var` also need `ddof=0`) |
 | `pl.col("v").mean().over("k")` and other aggregations followed by `.over(...)` | preserves receiver dtype |
 | `df.group_by_dynamic("ts", every="1d").agg(...)` / `df.rolling("ts", period="1d").agg(...)` | same shape as `df.group_by(...).agg(...)` |
@@ -175,7 +175,7 @@ return multiple frames are out of scope.
 
 `pl.col("a", "b", ...)` and `pl.col(["a", "b"])` inside `select` /
 `with_columns` fan out to the named columns (their dtypes flow through
-unchanged). Missing names raise `[PLY001]`.
+unchanged). Missing names raise `[pple-column-not-found]`.
 
 ## `pl.*` expression constructors
 

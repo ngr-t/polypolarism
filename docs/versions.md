@@ -19,14 +19,14 @@ window is narrow and explicit:
 
 When the version detected from your project's lockfile (`uv.lock` /
 `poetry.lock`) or the installed environment falls below the supported
-floor, polypolarism emits a `[PLW010]` warning to stderr — it doesn't
+floor, polypolarism emits a `[pplw-unsupported-version]` warning to stderr — it doesn't
 fail the run, just tells you that type-check accuracy is best-effort
 below the window. Use `--polars-version <ver>` (or the
 `[tool.polypolarism]` config below) to opt back in if you've audited
 that your code stays within the analyzer's known surface.
 
 Only exact sources can trigger the warning. When the version is merely
-inferred from a `>=` floor in `[project.dependencies]`, no PLW010 is
+inferred from a `>=` floor in `[project.dependencies]`, no pplw-unsupported-version is
 emitted — `polars>=1.0` says what the project tolerates, not what it
 runs.
 
@@ -49,7 +49,7 @@ Detection priority (first match wins per package):
 5. The version installed in the running environment
    (`importlib.metadata`)
 6. `[project.dependencies]` / `[dependency-groups.*]` floor
-   (never triggers PLW010 — a `>=` floor is not the version in use)
+   (never triggers pplw-unsupported-version — a `>=` floor is not the version in use)
 
 For more on the policy, see
 [`adr/0001-polars-pandera-version-support.md`](adr/0001-polars-pandera-version-support.md).

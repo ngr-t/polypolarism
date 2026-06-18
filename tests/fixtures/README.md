@@ -108,19 +108,19 @@ Rules with both sides present (valid twin -> invalid twin):
 | frame literals | `frame_literal` | `frame_literal_wrong_declared` |
 | pl expression constructors | `m6_pl_constructors` | `m6_pl_constructors_wrong_declared` |
 | variable annotations | `variable_annotation_basic`, `variable_annotation_chain` | `variable_annotation_wrong_downstream` |
-| annotation vs inferred RHS (ADR-0005, PLY033/PLW008) | `warning/annotation_narrowing` (narrowing assertion warns) | `variable_annotation_contradiction` |
+| annotation vs inferred RHS (ADR-0005, pple-annotation-conflict/pplw-unbacked-narrowing) | `warning/annotation_narrowing` (narrowing assertion warns) | `variable_annotation_contradiction` |
 | plural col | `m9_plural_col`, `plural_col_exprs` | `plural_col_wrong_dtype` |
 | struct rename_fields | `struct_rename_fields` | `struct_rename_wrong_dtype` |
 | hstack | `m4_unpivot_and_hstack` | `m4_hstack_wrong_dtype` |
-| unmodeled-method degradation (PLW007) | `unmodeled_method_pinned` (cast retracts the warning) | `warning/unmodeled_method` (a warning, not an error — Unknown passes by design) |
-| unmodeled FRAME method untracks (PLW007) | `unmodeled_frame_method_validated` (validate retracts the warning; terminal `to_dicts` stays silent) | `warning/unmodeled_frame_method` (a warning, not an error — the untracked frame passes by design) |
+| unmodeled-method degradation (pplw-unmodeled-method) | `unmodeled_method_pinned` (cast retracts the warning) | `warning/unmodeled_method` (a warning, not an error — Unknown passes by design) |
+| unmodeled FRAME method untracks (pplw-unmodeled-method) | `unmodeled_frame_method_validated` (validate retracts the warning; terminal `to_dicts` stays silent) | `warning/unmodeled_frame_method` (a warning, not an error — the untracked frame passes by design) |
 | upsample nullability (issue #74) | `upsample_nullable_gaps` | `upsample_nonnullable_declared` |
 | null_count UInt32 mapping (issue #74) | `null_count_schema` | `null_count_wrong_dtype` |
-| to_dummies data-dependent schema (issue #74) | (annotation path shared with pivot) | `warning/to_dummies_unannotated` (PLW005, a warning, not an error) |
+| to_dummies data-dependent schema (issue #74) | (annotation path shared with pivot) | `warning/to_dummies_unannotated` (pplw-data-dependent-schema, a warning, not an error) |
 
 | absent-tracking edge cases (#78) | `absent_rename_swap` (simultaneous swap), `absent_reintroduce_join` | `absent_rename_chain` (sequential renames accumulate), `absent_join_no_reintroduce` |
 | concat time-unit unification (#66) | `concat_time_unit_same` | `concat_time_unit_mixing` |
-| object-API `strict="filter"` mode (#88) | `object_api_strict_filter` (extras accepted at input) | `object_api_strict_filter_gone` (removed column is a PLY001 proof) |
+| object-API `strict="filter"` mode (#88) | `object_api_strict_filter` (extras accepted at input) | `object_api_strict_filter_gone` (removed column is a pple-column-not-found proof) |
 | `str.to_datetime` time_unit= / `%::z` (#66) | `str_to_datetime_time_unit` | `str_to_datetime_time_unit_wrong` |
 | bitwise NOT unsigned widths (#72) | `not_bitwise_unsigned_width` | `not_unsigned_declared_i64` |
 | bare-return laziness, eager direction (ADR-0006) | `adr0006_amendment_flows` (`matching_laziness`) | `bare_return_eager_into_lazy` |
@@ -137,7 +137,7 @@ Intentionally unpaired:
   the leniency visible; an invalid twin is impossible by construction.
 - `warning/join_where_experimental` — polars marks `join_where`
   experimental, so polypolarism deliberately degrades it to an open frame
-  with PLW007 instead of encoding a schema (issue #74). There is no
+  with pplw-unmodeled-method instead of encoding a schema (issue #74). There is no
   inference rule to falsify; the golden's `via:` notes pin the
   leniency-mediated pass.
 
@@ -145,7 +145,7 @@ Intentionally unpaired:
 
 (none at the moment — the variable-annotation contradiction gap was
 closed by ADR-0005: `invalid/variable_annotation_contradiction` pins the
-PLY033 error, `warning/annotation_narrowing` pins the PLW008 narrowing
+pple-annotation-conflict error, `warning/annotation_narrowing` pins the pplw-unbacked-narrowing narrowing
 assertion.)
 
 ## Runtime differential harness (ADR-0003, separate module)

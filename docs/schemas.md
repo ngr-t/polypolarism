@@ -16,7 +16,7 @@ form:
 | `List` call form | `pl.List(pl.Int64)` | `List[Int64]` |
 | `Array` call form | `pl.Array(pl.Int64, 3)`, `pl.Array(pl.Int64, shape=3)`, `pl.Array(pl.Int64, (3,))` | `Array[Int64, 3]` — the width is tracked; a multi-dimensional or non-literal `shape` leaves the width a wildcard |
 | `Struct` call form | `pl.Struct({"a": pl.Utf8, "b": pl.Float64()})` | `Struct{a: Utf8, b: Float64}` |
-| `Annotated` containers | `Annotated[pl.List, pl.Int64()]`, `Annotated[pl.Array, pl.Int64(), 3, None]`, `Annotated[pl.Struct, {...}]` | same as the call forms. pandera requires **exactly all** of the dtype's parameters as metadata (`Array` needs `inner, shape, width` — a `None` literal keeps the polars default); a wrong arity crashes pandera at runtime and is flagged `PLY041` |
+| `Annotated` containers | `Annotated[pl.List, pl.Int64()]`, `Annotated[pl.Array, pl.Int64(), 3, None]`, `Annotated[pl.Struct, {...}]` | same as the call forms. pandera requires **exactly all** of the dtype's parameters as metadata (`Array` needs `inner, shape, width` — a `None` literal keeps the polars default); a wrong arity crashes pandera at runtime and is flagged `pple-broken-schema-annotation` |
 | bare containers | `pl.List`, `pl.Array`, `pl.Struct` | `List[Unknown]`, `Array[Unknown]`, `Struct{...}` (an OPEN struct — provably a struct, fields unknown; field lookups are assumed, wrong-namespace accessors are errors) |
 | `Series` wrapper | `Series[T]` (bare or qualified: `pa.typing.Series[T]`, ...) | unwraps to `T` |
 | optional column | `Optional[T]`, `T \| None` | the **column may be absent** (`required=False`) |
@@ -34,8 +34,8 @@ Frame-level annotations accept `DataFrame[Schema]` and
 `LazyFrame[Schema]`, on function parameters and return types as the
 checked contract, and on local variables (`x: DataFrame[S] = ...`) where
 the annotation is checked against the inferred right-hand side
-(ADR-0005: a pure narrowing assertion warns `PLW008`; an unrelated
-re-interpretation is a `PLY033` error).
+(ADR-0005: a pure narrowing assertion warns `pplw-unbacked-narrowing`; an unrelated
+re-interpretation is a `pple-annotation-conflict` error).
 
 ```python
 class Example(pa.DataFrameModel):

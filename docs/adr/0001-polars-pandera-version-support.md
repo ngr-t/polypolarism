@@ -79,7 +79,7 @@ support, pinning `polars >= 1.0`) does not affect AST-level introspection.
      AST-relevant surface (class-name matching) is stable across minors,
      so a "latest two minors" window would not differentiate anything we
      actually test against. When the detected version is below the floor,
-     `polypolarism` emits a `PLW010` warning to stderr.
+     `polypolarism` emits a `pplw-unsupported-version` warning to stderr.
      `--no-version-check` suppresses detection entirely.
    - The detected version **does not feed analyzer dispatch today** — it
      only gates the warning. When `PolarsProfile` later grows fields, the
@@ -189,7 +189,7 @@ not a profile concern.
 
 ### Negative
 
-- Users on **anything below the latest two 1.x minors** see a `PLW010`
+- Users on **anything below the latest two 1.x minors** see a `pplw-unsupported-version`
   warning. Pre-1.0 is the harder case (the analyzer doesn't recognize
   the legacy spellings and will silently misanalyze); 1.0–1.38 are
   best-effort (the analyzer should work but isn't actively tested for
@@ -222,8 +222,8 @@ not a profile concern.
 | 8 | **Done.** `Int128`, `UInt128`, `Float16`, `Enum`, `Decimal(p, s)` added to `DTYPE_NAME_MAP`. Fixtures per landmark version. New `_parse_decimal_call` extracts precision/scale (the only parametrized dtype where args matter for type identity). | `compat/polars_api.py`, `pandera_dtype.py`, `types.py`, `tests/fixtures/` |
 | 9 | **Done.** Audited selector dispatch against five 1.32-affected patterns — all currently infer correctly. Pinned in `tests/fixtures/valid/selector_dsl_1_32.py`. | `analyzer.py`, `tests/fixtures/` |
 | 10 | **Done.** `PolarsProfile` scaffold + default `POLARS_1_X` in compat. Name-only; fields get added when a real divergence appears. | `compat/polars_api.py` |
-| 11 | **Done** in `src/polypolarism/version_check.py`: detection from CLI flag, `[tool.polypolarism]`, `uv.lock`, dependencies; PLW010 warning on below-floor; `--polars-version` / `--pandera-version` / `--no-version-check` CLI flags. | `version_check.py`, `cli.py`, `diagnostics.py` |
-| 12 | **Done.** New "Supported versions" section, `--polars-version` / `--pandera-version` / `--no-version-check` CLI examples, `[tool.polypolarism]` config block, dtype list refreshed for `Int128` / `UInt128` / `Float16` / `Enum` / `Decimal(p, s)`, `cs.integer()` / `cs.float()` lists updated, `PLW010` added to the warning code table. | `README.md` |
+| 11 | **Done** in `src/polypolarism/version_check.py`: detection from CLI flag, `[tool.polypolarism]`, `uv.lock`, dependencies; pplw-unsupported-version warning on below-floor; `--polars-version` / `--pandera-version` / `--no-version-check` CLI flags. | `version_check.py`, `cli.py`, `diagnostics.py` |
+| 12 | **Done.** New "Supported versions" section, `--polars-version` / `--pandera-version` / `--no-version-check` CLI examples, `[tool.polypolarism]` config block, dtype list refreshed for `Int128` / `UInt128` / `Float16` / `Enum` / `Decimal(p, s)`, `cs.integer()` / `cs.float()` lists updated, `pplw-unsupported-version` added to the warning code table. | `README.md` |
 
 All 12 steps complete. Known remaining gaps (Categorical ordering
 rework from polars 1.32, `hist` bin-closure from 1.27, left-join
@@ -242,7 +242,7 @@ ever exposes a divergence.
   algebra still produces the expected projected schema under the 1.32+
   `Selector` semantics.
 - Step 11 (shipped): a project pinning `polars>=0.20.0` triggers
-  `[PLW010] detected polars 0.20.0 ...` on stderr; `--polars-version
+  `[pplw-unsupported-version] detected polars 0.20.0 ...` on stderr; `--polars-version
   <floor-or-above>` silences it; `--no-version-check` skips detection
   entirely. Polars 1.0–1.38 also warn under the "fully supported only"
   policy. `tests/test_version_check.py` covers 35 paths including the

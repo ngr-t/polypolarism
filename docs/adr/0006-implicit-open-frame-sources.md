@@ -140,18 +140,18 @@ snapshots read from parquet/IPC footers).
   readable data dict / `schema=` keeps the exact closed inference.
 - **Bare return annotations check the eager/lazy bit** — implemented.
   `-> pl.DataFrame` with an inferred LazyFrame return (or vice versa)
-  is PLY032; no schema claim is made, so an uninferable body stays
+  is pple-eager-lazy-mismatch; no schema claim is made, so an uninferable body stays
   silent (no could-not-infer error).
 - **Checked-island semantics for non-strict declared schemas** (issue
   #83, design decision). A `strict=False` schema on YOUR OWN parameter
   (or a `Schema.validate` narrowing) binds CLOSED: the declaration is
   the function's interface, and referencing an undeclared column is
-  flagged — but as `PLY042` with honest wording (the schema admits
+  flagged — but as `pple-undeclared-column` with honest wording (the schema admits
   caller extras at runtime; the declaration just doesn't promise the
-  column), not `PLY001`'s runtime certainty. The frame carries
+  column), not `pple-column-not-found`'s runtime certainty. The frame carries
   `nonstrict_schema` provenance through shape-preserving operations;
   shape-determining calls (`select`, aggregations) re-anchor exactness
-  and PLY001 proofs. The alternative — binding non-strict schemas open
+  and pple-column-not-found proofs. The alternative — binding non-strict schemas open
   (assumption semantics) — was prototyped and rejected: it silences the
   declared-interface checking that is the tool's core value for the
   default (non-strict) schema style, invalidating 159 tests/25 fixtures

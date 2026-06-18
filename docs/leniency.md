@@ -17,7 +17,7 @@ The main constructs whose inference intentionally degrades to `Unknown`:
   methods added in polars releases newer than the probed set) yields an
   `Unknown` result rather than a guess. Downstream of such a call, dtype
   errors are no longer detectable. When the receiver dtype was precisely
-  known, the degradation is surfaced as `PLW007`; a `.cast(...)` directly
+  known, the degradation is surfaced as `pplw-unmodeled-method`; a `.cast(...)` directly
   after the call both restores precision and retracts the warning.
 - **Value-dependent arguments** — when a result dtype depends on a
   *runtime value* that is not a literal in the source (a dtype passed via
@@ -25,10 +25,10 @@ The main constructs whose inference intentionally degrades to `Unknown`:
   …), the result degrades to `Unknown`. Using a literal restores precise
   checking.
 - **Data-dependent schemas** — `pivot()` output columns depend on the
-  data; this one is surfaced as `PLW005` instead of silent leniency (see
+  data; this one is surfaced as `pplw-data-dependent-schema` instead of silent leniency (see
   the warning table in [Diagnostics](diagnostics.md)).
 - **External / untyped helpers** — `pipe`/calls into code the analyzer
-  cannot see degrade to best-effort inference and warn (`PLW002`–`PLW004`).
+  cannot see degrade to best-effort inference and warn (`pplw-unresolved-pipe`–`pplw-untyped-callable`).
 - **Open-frame column reads** — `pl.col("x")` on an open frame where `x`
   is not statically known resolves to `Unknown` (it may be one of the
   unknown extra columns).

@@ -22,7 +22,7 @@ Two legitimate uses pull in opposite directions:
   error). polypolarism's entire value proposition is comparing declared
   against inferred schemas; an unchecked declaration position is a hole
   in that loop.
-- **Deliberate re-typing**. `PLW005` explicitly tells users to annotate
+- **Deliberate re-typing**. `pplw-data-dependent-schema` explicitly tells users to annotate
   the result of `pivot()` (whose schema is data-dependent), and users
   legitimately assert *narrower* types than the conservative inference —
   the canonical case is annotating a post-left-join column non-nullable
@@ -31,7 +31,7 @@ Two legitimate uses pull in opposite directions:
 A blanket "error on contradiction" would break the second use and would
 amplify every analyzer imprecision into a user-facing false positive at
 each annotation site. A blanket "trust the annotation" keeps the false
-negative. Note that the `PLW005`/pivot workflow is *not* actually in
+negative. Note that the `pplw-data-dependent-schema`/pivot workflow is *not* actually in
 tension: there the inference degrades to `Unknown`, and the comparison
 engine's Unknown-compatibility leniency (ADR-0003 family) already treats
 that as non-contradictory — only *precise* disagreements are at stake.
@@ -46,21 +46,21 @@ compatibility, open-frame skips, `coerce` differences), classified by a
 1. **Forward holds** (`inferred <: declared`): pass, exactly as today.
 2. **Forward fails, reverse holds** (`declared <: inferred` — a pure
    *narrowing assertion*: non-null over nullable, required over
-   optional): allowed, surfaced as **`PLW008`** naming the runtime-backed
+   optional): allowed, surfaced as **`pplw-unbacked-narrowing`** naming the runtime-backed
    upgrade (`Schema.validate(...)` retypes with an actual check).
 3. **Neither direction holds** (unrelated dtype, a column provably
    absent from a closed inferred frame, extra columns under a `strict`
-   annotation, eager/lazy mismatch): **`PLY033` error** — the annotation
+   annotation, eager/lazy mismatch): **`pple-annotation-conflict` error** — the annotation
    re-interprets the frame as something it provably is not.
 
 In every case the annotation still wins for the variable's downstream
 type: one clear diagnostic at the assignment, no cascading errors (the
-same convention as `PLY013`'s degrade-after-error).
+same convention as `pple-invalid-cast`'s degrade-after-error).
 
 Rollout is phased in two steps within the same release train so each
-step's golden diff stays reviewable: first `PLW008` fires on *every*
+step's golden diff stays reviewable: first `pplw-unbacked-narrowing` fires on *every*
 provable contradiction (warn-only, exit code unchanged); then the
-unrelated-contradiction class is promoted to `PLY033`, with `PLW008`
+unrelated-contradiction class is promoted to `pple-annotation-conflict`, with `pplw-unbacked-narrowing`
 remaining on the narrowing class.
 
 ## Alternatives considered
@@ -83,29 +83,29 @@ remaining on the narrowing class.
   pins it.
 - The runtime differential harness needs a justified SKIP entry for the
   contradiction fixture: annotations are inert at runtime (pandera
-  validates only via `validate`/`check_types`), so a static `PLY033`
+  validates only via `validate`/`check_types`), so a static `pple-annotation-conflict`
   FAIL with a runtime success is by design — same family as the existing
-  `PLY032` annotation-contract skip.
+  `pple-eager-lazy-mismatch` annotation-contract skip.
 - The narrowing direction remains runtime-unverified *by construction*;
-  `PLW008`'s remedy text makes `Schema.validate` the blessed escape
+  `pplw-unbacked-narrowing`'s remedy text makes `Schema.validate` the blessed escape
   hatch when the assertion actually matters.
 - `typing.cast(...)` stays a passthrough (`_unwrap_cast`) and is NOT an
-  escape hatch for frame re-typing; the annotation (with its PLW008
+  escape hatch for frame re-typing; the annotation (with its pplw-unbacked-narrowing
   trace) or `Schema.validate` (with its runtime check) are.
 
 ## Amendment (2026-06-11, issues #63 / #64)
 
 Two classification refinements shipped the same day, both narrowing the
-`PLY033` class to what is actually provable:
+`pple-annotation-conflict` class to what is actually provable:
 
 1. **Provable absence requires a STRICT inferred frame** (#63). A
    non-strict schema tolerates extra runtime columns, so a declared
    column missing from a non-strict closed frame is "declared but not
-   guaranteed" — the narrowing class (`PLW008`), not an error. `PLY033`
+   guaranteed" — the narrowing class (`pplw-unbacked-narrowing`), not an error. `pple-annotation-conflict`
    keeps firing when the inferred frame's schema is `strict = True`.
 2. **The coerce-differences leniency does not apply at annotation
    sites** (#64). It is sound at return positions, where
    `pa.check_types` really coerces at runtime; annotations are
    runtime-inert, so a coercible declared/inferred difference there is
-   an unbacked re-type — surfaced as `PLW008` naming `coerce`, with
+   an unbacked re-type — surfaced as `pplw-unbacked-narrowing` naming `coerce`, with
    `Schema.validate(...)` (which *does* coerce) as the remedy.

@@ -14,12 +14,14 @@ unit-test suite:
 - `tests/fixtures/{valid,invalid,warning}/` held end-to-end input programs,
   but each fixture needed a **hand-written companion assertion** in
   `test_cli.py`. Fixtures without one were silently untested, and assertions
-  checked only "some error containing `PLY008` exists" — message wording,
+  checked only "some error containing `pple-non-boolean-predicate` exists" — message wording,
   error counts, and co-occurring diagnostics were unverified.
 - Nothing guaranteed that every diagnostic code defined in `diagnostics.py`
   was exercised end-to-end. When this ADR was implemented, the new coverage
-  check immediately found **seven codes with no fixture at all**
-  (PLY004, PLY005, PLY006, PLY022, PLY031, PLW002, PLW006).
+  check immediately found **seven codes with no fixture at all** (two of
+  them now folded into `pple-column-not-found`: the `cast` and
+  `drop_nulls`-subset misses, plus pple-column-name-collision, pple-unpivot,
+  pple-lazy-only-method, pplw-unresolved-pipe, pplw-unknown-schema).
 - The type-system algebra (`_is_subtype`, `promote_types`, `unify_types`,
   `supertype`, `_is_frame_subtype`) was tested only on hand-picked examples,
   although call sites implicitly rely on algebraic laws (commutativity,
@@ -69,7 +71,7 @@ Mature compiler projects solve these problems with two standard techniques:
 `test_every_diagnostic_code_is_exercised_by_a_fixture` introspects
 `diagnostics.py` for all defined `PLY###`/`PLW###` codes and requires each to
 appear in at least one golden file. Codes that genuinely cannot fire from a
-self-contained fixture (currently only `PLW010`, the environment version
+self-contained fixture (currently only `pplw-unsupported-version`, the environment version
 floor) live in an explicit allowlist that must name the unit test covering
 them instead — and the test also fails if an allowlisted code *becomes*
 fixture-covered, keeping the allowlist minimal.

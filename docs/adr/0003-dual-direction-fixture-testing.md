@@ -18,7 +18,7 @@ the test suite repeatedly interacted badly with it, in two distinct ways:
    precise, those tests broke and had to be hand-triaged with no marker
    telling the triager which way to resolve them: `pl.len()`
    (Unknown → UInt32), when/then/otherwise (Unknown → supertype, #40),
-   `.arr` on a List column (accepted → flagged PLY012). The dangerous
+   `.arr` on a List column (accepted → flagged pple-wrong-namespace-dtype). The dangerous
    failure mode in triage is "weaken the new feature until the old test
    passes" instead of "upgrade the assertion".
 

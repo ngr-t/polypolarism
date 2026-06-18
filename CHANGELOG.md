@@ -12,12 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Cross-file schema imports now resolve in `.git`-rooted projects
   without packaging markers and in the `src/` layout, with a cwd
   fallback for marker-less trees (user report: `from module1.module2
-  import (Schema,)` hit PLW006 although the module existed). When an
-  import is seen but still cannot be resolved, PLW006 now names the
+  import (Schema,)` hit pplw-unknown-schema although the module existed). When an
+  import is seen but still cannot be resolved, pplw-unknown-schema now names the
   failing statement and explains how the project root is detected,
   instead of suggesting an import the user already wrote.
 
-- Column-not-found diagnostics (PLY001–PLY005, PLY007, group_by keys
+- Column-not-found diagnostics (pple-column-not-found, group_by keys
   and aggregation columns) now name the schema the frame came from —
   `Column 'qty' not found in frame from schema 'Forecast'` — so with
   several schemas in one function the violated contract is identifiable
@@ -58,9 +58,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   call after `df.filter(pl.col("region") ...)` now proves the `region`
   extra); (2) **`pl.DataFrame(non_literal)` binds open** instead of
   untracked (the no-args constructor is the provably empty closed
-  frame, making `pl.DataFrame().select("a")` a PLY001 proof);
+  frame, making `pl.DataFrame().select("a")` a pple-column-not-found proof);
   (3) **bare `-> pl.DataFrame` / `-> pl.LazyFrame` return annotations
-  check the eager/lazy bit** (PLY032 on the wrong side) while still
+  check the eager/lazy bit** (pple-eager-lazy-mismatch on the wrong side) while still
   making no schema claim — uninferable bodies stay silent.
 
 - Open structs (backlog C-9): a bare `pl.Struct` annotation (and
@@ -68,7 +68,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Struct` — "some struct, fields unknown" — instead of `Unknown`.
   The struct-ness is provable (probed: pandera's bare declaration
   validates any struct and rejects non-structs), so `.str`/`.cat`/`.arr`
-  on such a column became PLY012 proofs that were previously silent;
+  on such a column became pple-wrong-namespace-dtype proofs that were previously silent;
   field lookups get assumption semantics (`struct.field` pins Unknown,
   `unnest` opens the frame with the pinned fields registered, and
   Annotated `pl.Struct` forms with unreadable mappings keep their
@@ -82,7 +82,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   assignments register like class schemas keyed by the variable name —
   `schema.validate(df)` / `df.pipe(schema.validate)` narrowing, strict
   closure, checked-island provenance for non-strict schemas, cross-file
-  import resolution and the PLW011 loud-degrade channel (string dtype
+  import resolution and the pplw-unrecognized-annotation loud-degrade channel (string dtype
   aliases like `pa.Column("int64")`, non-literal kwargs) all apply
   uniformly. Construction folds statically: dict comprehensions over
   literal/module-const string lists, `**` spreads of module-level column
@@ -109,17 +109,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `null_count()` (same column names, every dtype `UInt32`, eager and
   lazy), `upsample(...)` (identity columns, but non-key columns become
   `Nullable` — gap rows are null-filled; `time_column` and `group_by`
-  keys keep their dtype, and the eager-only method now raises `PLY030`
+  keys keep their dtype, and the eager-only method now raises `pple-eager-only-method`
   on a LazyFrame receiver), and `to_dummies(...)` (value-dependent
-  output columns now get the pivot-style `PLW005`
+  output columns now get the pivot-style `pplw-data-dependent-schema`
   annotate-the-result suggestion instead of silent inference death).
   All rules probed on polars 1.41.2 and 1.37.0 (identical).
 - `join_where(...)` no longer hard-fails: polars documents the method
   as experimental, so instead of encoding its schema the result
-  degrades to an *open* frame with a dedicated `PLW007` warning —
+  degrades to an *open* frame with a dedicated `pplw-unmodeled-method` warning —
   correct code passes via the visible open-frame leniency, and
   `Schema.validate(...)` retracts the warning (issue #74).
-- New error `PLY041` (issue #69): a schema field whose
+- New error `pple-broken-schema-annotation` (issue #69): a schema field whose
   `Annotated[pl.<Dtype>, ...]` metadata arity provably crashes pandera —
   pandera maps the metadata 1:1 onto the dtype class's `__init__`
   parameters and requires exactly all of them, raising a deferred
@@ -128,7 +128,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   README's own `Annotated[pl.Array, pl.Int64(), 3]` example) were
   accepted silently because the parse degraded to `Unknown`. Every
   function referencing a broken schema (parameter / return / variable
-  annotation, `Schema.validate(...)` calls) now fails with one PLY041
+  annotation, `Schema.validate(...)` calls) now fails with one pple-broken-schema-annotation
   per schema; the single-argument `Annotated[X]` form (a typing-level
   `TypeError` at import) is flagged too. A child schema re-declaring
   the field with a full-arity annotation repairs it (probed on
@@ -136,12 +136,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Annotated assignments are now checked against the inferred RHS
   (ADR-0005 two-direction rule): `x: DataFrame[A] = expr` where the
   expression provably infers an *unrelated* schema is a new error
-  `PLY033`; a pure *narrowing* assertion (e.g. non-null over a
-  post-left-join nullable) stays allowed and warns `PLW008` with
+  `pple-annotation-conflict`; a pure *narrowing* assertion (e.g. non-null over a
+  post-left-join nullable) stays allowed and warns `pplw-unbacked-narrowing` with
   `Schema.validate(...)` as the runtime-backed upgrade. Pivot-style
   annotations over `Unknown` inference remain silent; the annotation
   still wins for downstream typing.
-- New warning `PLW007`: a method polypolarism does not model on a
+- New warning `pplw-unmodeled-method`: a method polypolarism does not model on a
   precisely-known receiver now warns that the dtype degrades to
   `Unknown` (one warning per chain; a `.cast(...)` directly after the
   call retracts it). Frame-level methods probed to return a
@@ -158,11 +158,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or module-level `MIN_SAMPLES = 1` now resolves `min_samples` /
   `window_size` / `ddof` like a literal when deciding nullability.
 - README sections: leniency rules ("when 'no error' is not a proof")
-  and the previously undocumented `PLW006` row in the warning table.
+  and the previously undocumented `pplw-unknown-schema` row in the warning table.
 - Fixture corpus: invalid twins for pivot, partition_by, landmark
   dtypes, frame literals, pl constructors, variable annotations, plural
   col, struct rename_fields and hstack (the ADR-0003 pairing-convention
-  backlog), plus the PLW007 pair.
+  backlog), plus the pplw-unmodeled-method pair.
 - `polypolarism` CLI now reports parse / read failures as failing
   `CheckResult`s instead of silently skipping them, so external callers
   (pre-commit, CI) cannot miss a broken file.
@@ -178,21 +178,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `publish.yml` workflow for PyPI Trusted Publishing (manual dispatch /
   tag-triggered; not yet wired up to a published project).
 
-- New diagnostic code `PLY040` for the declared-return-type comparison
+- New diagnostic code `pple-return-type` for the declared-return-type comparison
   family — `Missing column`, `Extra column`, dtype difference, and
   `Could not infer return type` were the only diagnostics without a
   stable code (issue #70). One shared code for the family; the message
   distinguishes the kind.
 - `--format json` diagnostics now carry a structured `"code"` field
-  (`"PLY040"`, `"PLW001"`, ...) in addition to the `[PLY###]` message
+  (`"pple-return-type"`, `"pplw-missing-return-dtype"`, ...) in addition to the `[PLY###]` message
   prefix, so JSON consumers no longer regex the message (issue #70).
   Untagged diagnostics (file read / parse failures) omit the field;
   the schema change is purely additive.
 
 ### Changed
 
+- **Diagnostic codes are now semantic slugs** (one-time, pre-release clean
+  break — no back-compat aliases). Errors are tagged `pple-<slug>` and
+  warnings `pplw-<slug>` (kebab-case); the `ppl` stem plus the `e` / `w`
+  namespace keeps the codes from colliding with mypy / ruff inside
+  `# type: ignore[...]`. The old numeric `PLY` / `PLW` codes no longer
+  resolve — update any `# type: ignore[...]` suppressions and CI filters to
+  the new slugs (see [docs/diagnostics.md](docs/diagnostics.md) for the full
+  table and the old→new correspondence). As part of the change the seven
+  former column-not-found error codes (`pl.col` lookup, `drop`,
+  `rename`-source, `cast`, `drop_nulls`-subset, `sort`, `unique`-subset
+  misses) are **merged** into a single `pple-column-not-found`. Messages,
+  severities, the JSON shape (besides the `code` value), and pass/fail
+  verdicts are otherwise unchanged.
 - Return-type mismatch messages are now prefixed with their diagnostic
-  code, e.g. `[PLY040] Missing column 'name' of type Utf8` (issue #70) —
+  code, e.g. `[pple-return-type] Missing column 'name' of type Utf8` (issue #70) —
   in line with every other diagnostic.
 - `FrameType.__init__` now formally accepts
   `Mapping[str, ColumnSpec | DataType]`, matching the runtime
@@ -204,28 +217,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   boundary of #89): pandera's nullable check is VALUE-based — a
   `Nullable`-typed column with no actual nulls passes a non-nullable
   schema — and validating a post-join nullable into a non-null schema is
-  exactly the narrowing assertion the PLW008 remedy prescribes. The
+  exactly the narrowing assertion the pplw-unbacked-narrowing remedy prescribes. The
   input check now compares base dtypes only; base conflicts (with coerce
   off) remain proofs.
 
 - Grouped std/var/sum on Date/Datetime/Time are accepted (issue #91,
   boundary of #85): these cells raise InvalidOperationError as
-  whole-frame reductions — the select-context PLY011 stays a proof — but
+  whole-frame reductions — the select-context pple-groupby stays a proof — but
   SUCCEED in grouped contexts with an unconditionally all-null column of
   the receiver dtype (probed identical on polars 1.37.0-1.41.2). The
   grouped form now infers `Nullable(receiver)` and surfaces a new
-  `PLW012` advisory ("provably all-null — probably not intended")
-  instead of a PLY011 falsely claiming a runtime raise. `var` on
+  `pplw-all-null-aggregation` advisory ("provably all-null — probably not intended")
+  instead of a pple-groupby falsely claiming a runtime raise. `var` on
   Duration keeps raising in both contexts (probed).
 
 - Validate-result bindings follow pandera's three strict modes (issue
   #88, class and object schemas alike): a `strict=False` validate result
   binds as an OPEN ISLAND — the input's extras provably flow through, so
   frame-level subtyping (e.g. a declared return needing those extras) is
-  lenient, while undeclared lookups keep the PLY042 interface lint —
+  lenient, while undeclared lookups keep the pple-undeclared-column interface lint —
   and `strict="filter"` is now modeled (extras are REMOVED: the result
   is closed and island-free, so a filtered-away column lookup is the
-  PLY001 proof it deserves instead of a factually wrong PLY042 message).
+  pple-column-not-found proof it deserves instead of a factually wrong pple-undeclared-column message).
   Parameter bindings keep the issue #83 checked-island design.
 - `Schema.validate(arg)` checks its INPUT for provable incompatibilities
   (issue #89): a required column missing from a genuinely exact argument
@@ -239,7 +252,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the schema (issue #90): non-literal `remove_columns`,
   `update_columns` / `rename_columns`, and unreadable `DataFrameSchema`
   arguments register as UNRESOLVED — `validate` still narrows (to a
-  fully open assumption frame) and PLW011 surfaces the degrade.
+  fully open assumption frame) and pplw-unrecognized-annotation surfaces the degrade.
 
 - Temporal receivers are no longer rejected by the reduction matrix
   (issue #85): `mean`/`median`/`quantile` on `Datetime`/`Duration`/`Time`
@@ -248,13 +261,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Date` return a naive `Datetime[us]`; `sum`/`std` on `Duration`
   preserve the unit (std keeps the issue-#60 ddof=1 always-nullable
   rule). All cells probed on polars 1.41.2, identical in select and
-  `group_by().agg()` contexts. The genuinely-invalid cells stay PLY011
+  `group_by().agg()` contexts. The genuinely-invalid cells stay pple-groupby
   with a precise message: `var` on `Duration` raises
   `InvalidOperationError` in both contexts, and `sum`/`std`/`var` on
   `Date`/`Datetime`/`Time` raise as whole-frame reductions while their
   grouped forms silently yield an unconditionally all-null column —
   never what the author meant, so both contexts stay rejected.
-  Expression-level aggregation errors are now tagged `[PLY011]` like
+  Expression-level aggregation errors are now tagged `[pple-groupby]` like
   every other `GroupByTypeError` site (one path appended untagged).
 - UDF expressions inside `group_by().agg()` now model the implicit list
   aggregation (issue #86): a terminal `map_elements` / `map_batches` /
@@ -270,13 +283,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before, and elementwise contexts (`select`/`with_columns`) keep the
   scalar typing. `pl.map_groups(exprs, fn, return_dtype=...)` is now
   inferred at all (output named after the first input expression;
-  missing `return_dtype=` falls back with `PLW001` like the Expr UDFs).
+  missing `return_dtype=` falls back with `pplw-missing-return-dtype` like the Expr UDFs).
   Probed identical on polars 1.41.2 and 1.37.0.
 
 - `group_by(...).map_groups(fn)` no longer dies into the generic
   "Could not infer return type" (issue #87): the output schema depends
   on the group function's body — statically unknowable, same family as
-  `pivot`/`to_dummies` — so it now gets the `PLW005`
+  `pivot`/`to_dummies` — so it now gets the `pplw-data-dependent-schema`
   assign-to-an-annotated-variable guidance (suggesting
   `LazyFrame[Schema]` on a lazy receiver), and the annotated-assignment
   escape hatch keeps working. `GroupBy.apply`, the old alias, no longer
@@ -291,13 +304,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Required pins keep proving strict-extra violations.
 
 - Undeclared-column references inside functions with non-strict declared
-  schemas are reported honestly (issue #83): new code `PLY042` replaces
-  `PLY001` there, naming the schema and stating the truth — a
+  schemas are reported honestly (issue #83): new code `pple-undeclared-column` replaces
+  `pple-column-not-found` there, naming the schema and stating the truth — a
   `strict=False` schema admits caller extras at runtime, so the
   reference is an undeclared dependency against the function's declared
   interface ("checked island"), not a provable runtime failure. The
   declaration remains enforced (the corpus's missing-column detection is
-  unchanged in strength); `PLY001`'s runtime-certainty wording is now
+  unchanged in strength); `pple-column-not-found`'s runtime-certainty wording is now
   reserved for exact frames (strict schemas, `select` outputs, open-frame
   negative knowledge), and shape-determining calls re-anchor exactness.
   Row-polymorphic helpers keep their two honest spellings: declare the
@@ -311,7 +324,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   schemas bind as OPEN frames (issue #81): pandera's `check_types`
   passes the caller's extra columns through such a return, so the
   row-polymorphic helper pattern no longer turns the caller's own
-  columns into PLY001/PLY040 errors — they resolve through the rest
+  columns into pple-column-not-found/pple-return-type errors — they resolve through the rest
   (dtype Unknown, visible leniency). `strict = True` returns stay
   closed, keeping select-style proofs; applies to direct calls, method
   calls and `df.pipe(helper)`.
@@ -328,7 +341,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `visited` skip in the import merger, so `from m import Base as B0` +
   `class C(B0)` only worked when that was the module's FIRST import
   statement — any earlier import of `m` dropped the alias, leaving the
-  subclass unregistered and its functions skipped with PLW006. Each
+  subclass unregistered and its functions skipped with pplw-unknown-schema. Each
   file's pass-1 registry is now cached per invocation so repeat import
   statements still bind their aliases.
 
@@ -367,8 +380,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   strict schemas no longer reject correct code with phantom
   "Extra column" errors and open schemas no longer pass wrong dtypes
   against a vanished column — and every function referencing the schema
-  gets a new `PLW011` warning naming the field and annotation. A warning
-  rather than a `PLY041` error because the name may be a runtime alias of
+  gets a new `pplw-unrecognized-annotation` warning naming the field and annotation. A warning
+  rather than a `pple-broken-schema-annotation` error because the name may be a runtime alias of
   a real dtype (`MyAlias = pl.Int64` resolves fine in pandera); if it
   genuinely does not resolve, pandera raises TypeError at first schema
   use, which the warning text points at.
@@ -407,20 +420,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Float64?` declaration and the false negative on a wrong `Int64?` one
   are gone. Probed-invalid receivers (Binary / Categorical / Enum /
   List / Array / Struct — the Struct cell is a process-aborting rust
-  crash) flag `PLY016`.
+  crash) flag `pple-non-numeric-operand`.
 - `not_()` / `~` is no longer Boolean-returning unconditionally (issue
   #72): per the documented `Expr.not_` contract it negates Booleans but
   operates **bitwise** on integers, preserving the dtype (`~Int64 ->
   Int64`). Every other receiver (floats included) is a probed runtime
-  `InvalidOperationError` -> `PLY016`. `~` on a non-Boolean column used
-  in a `filter(...)` predicate now correctly flags `PLY008` as a bonus.
+  `InvalidOperationError` -> `pple-non-numeric-operand`. `~` on a non-Boolean column used
+  in a `filter(...)` predicate now correctly flags `pple-non-boolean-predicate` as a bonus.
 - `dt.epoch(...)` return dtype follows its `time_unit` argument (issue
   #73): `"d"` infers `Int32` (probed; days since epoch), the sub-second
   units and the no-arg default stay `Int64`, and a non-literal or
   invalid argument degrades to `Unknown` instead of claiming `Int64`.
 - `Annotated[pl.Decimal, 12, 4]` schema annotations register the declared
   precision/scale instead of the bare `Decimal(38, 0)` default, so
-  exactly-matching code is no longer rejected with `PLY033` and real
+  exactly-matching code is no longer rejected with `pple-annotation-conflict` and real
   mismatches report the true declared dtype (issue #65; a `None` literal
   takes the polars default, wrong arity — a pandera runtime TypeError —
   degrades to `Unknown`).
@@ -454,12 +467,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   included — polars lands on signed), Float16 keeps its width through
   select-context reductions, and the four probed rust-panic cells
   (grouped `mean`/`median`/`quantile` on Float16, grouped `product` on
-  UInt128 — including `.over()` windows) are now `PLY011` errors instead
+  UInt128 — including `.over()` windows) are now `pple-groupby` errors instead
   of accepted crashes.
 - `Array` widths are now tracked (closing the issue #53 "width ignored"
   gap): `pl.Array(pl.Int64, 3)` declared against an inferred width 5 is
   an error (probed: pandera rejects the mismatch and coerce cannot
-  repair it), width-changing casts flag `PLY013` ("cannot cast Array to
+  repair it), width-changing casts flag `pple-invalid-cast` ("cannot cast Array to
   a different width" raises in both strict modes), and the `.arr`
   namespace preserves the receiver's width. A width the analyzer cannot
   resolve (non-literal or multi-dimensional `shape=`) acts as a wildcard
@@ -478,5 +491,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   registry stays flat: plain imports mount the imported module's schemas
   under their dotted spelling as written at the annotation site. A
   qualified name that still doesn't resolve (third-party module, nested
-  class like `DataFrame[Outer.Inner]`) now warns `PLW006` with the full
+  class like `DataFrame[Outer.Inner]`) now warns `pplw-unknown-schema` with the full
   dotted name instead of being silently ignored.

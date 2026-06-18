@@ -10,7 +10,7 @@ stopping the helper from silently dropping them (a runtime
 
 The `@rowpoly` decorator recovers both. It names a **row variable** — the
 helper's "rest" row — and threads it from input to output with real dtypes,
-while a soundness check (`PLY043`) confirms the body actually preserves it.
+while a soundness check (`pple-rowpoly-not-preserved`) confirms the body actually preserves it.
 
 > **Opt-in dialect, static only.** `@rowpoly` is a **polypolarism dialect**:
 > mypy, pyright and Pandera all see a plain open `DataFrame`. The threading is
@@ -95,7 +95,7 @@ $ polypolarism why_strict_false.py
   use_plain (line 45): OK
   add_score (line 51): OK
   use_rowpoly (line 55): FAIL
-    - [PLY040] Column 'region' has type Utf8, but declared type is Int64
+    - [pple-return-type] Column 'region' has type Utf8, but declared type is Int64
 ```
 
 With plain `strict = False`, `use_plain` **passes** — a false negative. The
@@ -105,10 +105,10 @@ declaration. There is no annotation you can add to the non-strict schemas that
 recovers `region`'s real `Utf8` type at the call site: the column simply is not
 part of either declared schema.
 
-With `@rowpoly("R")`, `use_rowpoly` **fails `PLY040`**: the row variable threads
+With `@rowpoly("R")`, `use_rowpoly` **fails `pple-return-type`**: the row variable threads
 `region` into the result *with its real `Utf8` dtype*, so the lying `int`
 declaration is caught. That precision — and the matching obligation that the
-body actually preserve `region` (the [`PLY043`](#ply043--the-preservation-check)
+body actually preserve `region` (the [`pple-rowpoly-not-preserved`](#ply043--the-preservation-check)
 check below) — is exactly what `strict = False` alone cannot say.
 
 ## The hard constraint: Pandera stays the runtime authority
@@ -254,7 +254,7 @@ def caller(wide: DataFrame[Wide]) -> DataFrame[OutScore]:
 $ polypolarism threading.py
   add_score (line 32): OK
   caller (line 36): FAIL
-    - [PLY009] arithmetic 'Utf8 + Int64' is not supported — polars raises InvalidOperationError at runtime; cast an operand first
+    - [pple-incompatible-operands] arithmetic 'Utf8 + Int64' is not supported — polars raises InvalidOperationError at runtime; cast an operand first
 ```
 
 Threading rules:
@@ -268,12 +268,12 @@ Threading rules:
   `@rowpoly` on a strict-return helper is a no-op (the surface is only
   meaningful with a non-strict / open return).
 
-## `PLY043` — the preservation check
+## `pple-rowpoly-not-preserved` — the preservation check
 
 Threading *trusts* that the body preserves the row variable. The preservation
 check verifies it: it skolemizes the row variable by injecting a distinct
 sentinel column into the parameter frame, re-analyzes the body, and flags
-`PLY043` for any return point that **provably drops** the sentinel (a closed
+`pple-rowpoly-not-preserved` for any return point that **provably drops** the sentinel (a closed
 frame lacking it — e.g. a `select` of a fixed column set, or a
 `group_by().agg()` that collapses the schema):
 
@@ -287,7 +287,7 @@ def add_score(df: DataFrame[InId]) -> DataFrame[OutScore]:
 ```text
 $ polypolarism ply043.py
   add_score (line 24): FAIL
-    - [PLY043] @rowpoly: helper does not preserve row variable 'R' (parameter 'df') — the frame returned at line 26 provably drops it. A row-polymorphic helper must keep every column of 'df' (use with_columns / pl.all() rather than selecting a fixed set), or remove 'R' from @rowpoly.
+    - [pple-rowpoly-not-preserved] @rowpoly: helper does not preserve row variable 'R' (parameter 'df') — the frame returned at line 26 provably drops it. A row-polymorphic helper must keep every column of 'df' (use with_columns / pl.all() rather than selecting a fixed set), or remove 'R' from @rowpoly.
 ```
 
 The check is conservative — it only fires on a **provable** drop:
@@ -302,15 +302,15 @@ The check is conservative — it only fires on a **provable** drop:
 Without `@rowpoly`, the same dropping body type-checks **silently** — its
 non-strict return matches `OutScore`, and nothing records that it was supposed
 to preserve the caller's columns. `strict = False` cannot express that
-obligation; `PLY043` is the check that does.
+obligation; `pple-rowpoly-not-preserved` is the check that does.
 
 Because the property is relative to the *caller* (did the helper keep columns
 the caller supplied?), Pandera cannot check it at runtime — an input
-synthesized from the parameter schema alone has no extras to drop. `PLY043` is
+synthesized from the parameter schema alone has no extras to drop. `pple-rowpoly-not-preserved` is
 therefore **static-only**, and the invalid fixture is skipped by the
 runtime-differential harness.
 
-To fix a `PLY043`: keep every input column (use `with_columns` /
+To fix a `pple-rowpoly-not-preserved`: keep every input column (use `with_columns` /
 `select(pl.all())` instead of selecting a fixed set), or — if the helper
 genuinely does not preserve the row — drop the row variable from `@rowpoly`.
 

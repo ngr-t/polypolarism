@@ -32,7 +32,7 @@ Two distinct failure classes emerged:
 - **Behavior changes** (`upsample` row counts, `over` inside `agg`,
   Bool/String schema differences): the *same code* produces *different
   schemas or errors* across the boundary. polypolarism's dispatch tables
-  and probed rule matrices (PLY009/PLY013/PLY016 layers, supertype,
+  and probed rule matrices (pple-incompatible-operands/pple-invalid-cast/pple-non-numeric-operand layers, supertype,
   rolling/cum nullability, …) are all probed against ≥1.37 polars; below
   the boundary the analyzer would assert claims that are simply wrong,
   and no `hasattr`-style guard can absorb a behavior change.
@@ -49,7 +49,7 @@ method-availability guards are added.
    deliberate decision backed by corpus evidence (a future ADR or an
    amendment here).
 2. **Everything below 1.37 is best-effort**, surfaced via the existing
-   `PLW010` warning on exact-source detections. The pre-1.0 surface
+   `pplw-unsupported-version` warning on exact-source detections. The pre-1.0 surface
    remains explicitly out of scope (unchanged from ADR-0001).
 3. **The probed rule matrices target ≥1.37 semantics.** When a probe is
    version-sensitive within the supported range, the newest behavior is
@@ -59,7 +59,7 @@ method-availability guards are added.
 
 ## Consequences
 
-- Users on 1.37–1.38 stop receiving a spurious `PLW010` (under the old
+- Users on 1.37–1.38 stop receiving a spurious `pplw-unsupported-version` (under the old
   window they were "unsupported" the moment 1.40/1.41 shipped, despite
   the analysis being accurate for them).
 - The floor stops silently ratcheting upward with every
