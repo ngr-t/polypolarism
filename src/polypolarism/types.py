@@ -649,8 +649,8 @@ class FrameType:
     from (parameter binding, ``Schema.validate`` narrowing). Such a
     schema admits extra columns at runtime, so a missing-column lookup
     is an interface violation against the declaration ("checked island"
-    — flagged PLY042 with honest wording) rather than a provable runtime
-    failure (PLY001). Cleared by shape-determining calls (``select``,
+    — flagged pple-undeclared-column with honest wording) rather than a provable runtime
+    failure (pple-column-not-found). Cleared by shape-determining calls (``select``,
     aggregations — their outputs are exact). Excluded from ``__eq__``.
     """
 
@@ -675,7 +675,7 @@ class FrameType:
     # ANNOTATION node (``AnnAssign.annotation``), as opposed to the whole
     # ``name: ann = pa.Field(...)`` line in ``column_spans`` (issue #113).
     # Set ONLY on the function's declared-RETURN frame (from a schema's
-    # ``field_annotation_spans``); it is the range the PLY040 retype quick fix
+    # ``field_annotation_spans``); it is the range the pple-return-type retype quick fix
     # replaces, so the field name and any ``= pa.Field(...)`` survive. Not a
     # constructor parameter — like ``column_spans`` it is attached after
     # construction by ``declared_return_frame`` and defaults empty everywhere
@@ -695,7 +695,7 @@ class FrameType:
     # reduction could have dropped an unknown caller extra, so the frame's
     # ``rest`` no longer faithfully represents "every caller column survived"
     # — it is row-variable-NOT-provably-preserved. The @rowpoly preservation
-    # check (PLY043) reads this on a return frame; nothing else consults it,
+    # check (pple-rowpoly-not-preserved) reads this on a return frame; nothing else consults it,
     # and like ``is_lazy`` / ``absent`` it never perturbs ``__eq__`` so frame
     # comparisons and branch merges are untouched. Sticky across later
     # add-only / rename ops (with_columns, rename) — once the row variable's
@@ -704,7 +704,7 @@ class FrameType:
     # @rowpoly ``drops=`` provenance (no semantic effect, excluded from
     # ``__eq__``): when ``row_var_dropped`` was set by a SINGLE column-reducing
     # ``select`` / ``drop`` over this frame, the ``(node, method)`` of that
-    # reduction — so the @rowpoly preservation check (PLY043) can compare the
+    # reduction — so the @rowpoly preservation check (pple-rowpoly-not-preserved) can compare the
     # body's reduction against a declared ``drops=`` selector and accept a drop
     # the helper explicitly declared. ``None`` when the drop is not attributable
     # to one resolvable reduction (e.g. two stacked predicate reductions, or an

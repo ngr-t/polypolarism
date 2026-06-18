@@ -575,7 +575,7 @@ def unrecognized_field_spec(annotation: ast.expr) -> ColumnSpec:
     Instead the column registers with ``Unknown`` dtype — it EXISTS, just
     with an unknowable dtype. Optional/Series wrappers still contribute
     their requiredness. The caller (``pandera_schema._parse_schema``)
-    records a definition warning so the degrade stays loud (PLW011).
+    records a definition warning so the degrade stays loud (pplw-unrecognized-annotation).
     """
     node = annotation
     required = True

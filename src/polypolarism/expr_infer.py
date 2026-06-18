@@ -46,21 +46,21 @@ class ColumnNotFoundError(Exception):
     """Raised when a column is not found in the FrameType.
 
     ``code`` is the diagnostic code the analyzer should tag the message
-    with: ``PLY001`` (a provable runtime miss on an exact frame) by
-    default, ``PLY042`` when the frame is the checked island of a
+    with: ``pple-column-not-found`` (a provable runtime miss on an exact frame) by
+    default, ``pple-undeclared-column`` when the frame is the checked island of a
     non-strict declared schema (issue #83) — there the lookup is an
     interface violation, not a runtime certainty.
 
     ``column`` / ``schema`` carry the structured info the message already
     embeds (the looked-up column name; the non-strict schema name for the
-    PLY042 island case), so the analyzer can surface them on the JSON
+    pple-undeclared-column island case), so the analyzer can surface them on the JSON
     diagnostic without re-parsing the message text.
     """
 
     def __init__(
         self,
         message: str,
-        code: str = "PLY001",
+        code: str = "pple-column-not-found",
         column: str | None = None,
         schema: str | None = None,
     ) -> None:
@@ -136,7 +136,7 @@ def infer_col(column_name: str, frame: FrameType) -> DataType:
                     f"does not promise it. Declare the column on the schema, or "
                     f"take a bare pl.DataFrame parameter for row-polymorphic "
                     f"helpers",
-                    code="PLY042",
+                    code="pple-undeclared-column",
                     column=column_name,
                     schema=frame.nonstrict_schema,
                 )
@@ -158,7 +158,7 @@ def infer_col(column_name: str, frame: FrameType) -> DataType:
                 f"does not promise it. Declare the column on the schema, or "
                 f"take a bare pl.DataFrame parameter for row-polymorphic "
                 f"helpers",
-                code="PLY042",
+                code="pple-undeclared-column",
                 column=column_name,
                 schema=frame.nonstrict_schema,
             )

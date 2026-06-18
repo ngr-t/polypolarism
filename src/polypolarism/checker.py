@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from polypolarism.analyzer import FunctionAnalysis, _cast_verdict, analyze_source
-from polypolarism.diagnostics import PLY040, tag
+from polypolarism.diagnostics import RETURN_TYPE, tag
 from polypolarism.types import (
     NUMERIC_DTYPES,
     Array,
@@ -27,7 +27,7 @@ class TypeMismatch:
     """Base class for type mismatch errors.
 
     The whole declared-vs-inferred return-type family shares one diagnostic
-    code, ``PLY040`` (issue #70); the message distinguishes the kind.
+    code, ``pple-return-type`` (issue #70); the message distinguishes the kind.
 
     ``primary`` / ``declared_span`` are per-column source spans (issue #110),
     excluded from equality so they never perturb the error comparisons the
@@ -44,7 +44,7 @@ class TypeMismatch:
     frame's ``column_annotation_spans`` side map.
     """
 
-    code = PLY040
+    code = RETURN_TYPE
 
     # Declared here (not as dataclass fields) so the subclasses can attach
     # them with ``compare=False`` without each restating the contract.
@@ -107,7 +107,7 @@ class TypeDifference(TypeMismatch):
 class InferenceFailure:
     """Error when return type could not be inferred."""
 
-    code = PLY040
+    code = RETURN_TYPE
 
     message: str
 
@@ -382,7 +382,7 @@ def _check_one_frame(
         actual_kind = "LazyFrame" if inferred.is_lazy else "DataFrame"
         fix = ".collect() before returning" if inferred.is_lazy else ".lazy() before returning"
         errors.append(
-            f"[PLY032] Return type expected {expected_kind}[...] but inferred "
+            f"[pple-eager-lazy-mismatch] Return type expected {expected_kind}[...] but inferred "
             f"{actual_kind}[...]; {fix}."
         )
 
@@ -492,15 +492,15 @@ def _check_one_frame(
     return errors, leniency
 
 
-_ANY_CODE = _re.compile(r"\[(PL[YW]\d{3})\]")
+_ANY_CODE = _re.compile(r"\[(ppl[ew]-[a-z-]+)\]")
 
 
 def _code_of(err: CheckError | str) -> str | None:
-    """Extract the PLY/PLW code from any error value.
+    """Extract the diagnostic code from any error value.
 
     Handles typed errors (``TypeMismatch``/``InferenceFailure`` with a
-    ``.code`` attribute), tagged strings (``"[PLY040] ..."``), and the
-    multi-return prefix form (``"at line N: [PLY040] ..."``).
+    ``.code`` attribute), tagged strings (``"[pple-return-type] ..."``), and the
+    multi-return prefix form (``"at line N: [pple-return-type] ..."``).
     """
     if isinstance(err, str):
         m = _ANY_CODE.search(err)

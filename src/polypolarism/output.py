@@ -56,14 +56,14 @@ class Diagnostic:
     #
     # ``column_name`` is the DataFrame column the diagnostic is about (named
     # to avoid colliding with ``column``, the 0-indexed *source* position).
-    # ``schema`` is the declaring schema (PLY042). ``declared_type`` /
+    # ``schema`` is the declaring schema (pple-undeclared-column). ``declared_type`` /
     # ``inferred_type`` are the canonical ``str`` renders of the dtypes the
-    # PLY040 family already carries (the same text the message shows).
+    # pple-return-type family already carries (the same text the message shows).
     column_name: str | None = None
     schema: str | None = None
     declared_type: str | None = None
     inferred_type: str | None = None
-    # Fix metadata for a PLY040 "retype the schema field" quick fix (Batch B,
+    # Fix metadata for a pple-return-type "retype the schema field" quick fix (Batch B,
     # Request 3). ``suggested_annotation`` is a ready-to-insert pandera
     # annotation STRING for the INFERRED dtype (e.g. ``"pl.Float64"``);
     # ``None`` when the dtype is unrenderable → the key is omitted (never a
@@ -74,13 +74,13 @@ class Diagnostic:
     # annotation; ``None`` when the span is unknown (e.g. a string forward-ref).
     suggested_annotation: str | None = None
     declared_annotation_range: dict | None = None
-    # Fix object for a PLY042 "declare the column on the schema" quick fix
+    # Fix object for a pple-undeclared-column "declare the column on the schema" quick fix
     # (Batch B, Request 2): ``{schema, column, schema_file, schema_insert_line,
     # suggested_dtype?}``. ``None`` when the fix cannot be determined soundly
     # (unknown schema file) → the key is omitted.
     fix: dict | None = None
     # "Relax the param" helper fields (Batch B, Request 4): the parameter
-    # whose annotation a PLY042 suggests loosening and its annotation
+    # whose annotation a pple-undeclared-column suggests loosening and its annotation
     # ``{line, column, end_line, end_column}`` range. Both ``None`` when not
     # cleanly determinable → the keys are omitted.
     param_name: str | None = None
@@ -235,13 +235,13 @@ def _structured_fields(error) -> dict[str, str]:
     ``declared_type`` / ``inferred_type`` that apply; absent fields are left
     out so the JSON stays minimal.
 
-    - PLY040 family (typed errors): ``TypeDifference`` carries the column
+    - pple-return-type family (typed errors): ``TypeDifference`` carries the column
       plus both dtypes; ``MissingColumn`` the column + its declared
       ``expected_type``; ``ExtraColumn`` the column + its ``inferred_type``.
       Each dtype is rendered via canonical ``str(...)`` — the same text the
       message already shows.
-    - PLY042 / PLY001 (analyzer ``TaggedError`` strings): carry ``column``
-      and, for the non-strict-island PLY042, the ``schema`` name.
+    - pple-undeclared-column / pple-column-not-found (analyzer ``TaggedError`` strings): carry ``column``
+      and, for the non-strict-island pple-undeclared-column, the ``schema`` name.
     """
     fields: dict[str, str] = {}
     if isinstance(error, TypeDifference):
@@ -267,7 +267,7 @@ def _structured_fields(error) -> dict[str, str]:
 
 
 def _retype_fix_fields(error) -> tuple[str | None, dict | None]:
-    """Fix metadata for a PLY040 retype quick fix (Batch B, Request 3):
+    """Fix metadata for a pple-return-type retype quick fix (Batch B, Request 3):
     ``(suggested_annotation, declared_annotation_range)``.
 
     Only a :class:`TypeDifference` is a "retype the field" mismatch (the

@@ -39,7 +39,7 @@ class Schema:
     # frames pass), output-shape-wise like strict=True (the result has
     # exactly the declared columns) — so ``strict`` stays False and the
     # output binds closed without island provenance (removed-column
-    # lookups are PLY001 proofs).
+    # lookups are pple-column-not-found proofs).
     filters_extras: bool = False
     coerce: bool = False
     bases: list[str] = field(default_factory=list)
@@ -47,7 +47,7 @@ class Schema:
     # field name -> detail from ``annotated_arity_error``. Inherited from
     # parents; a child re-declaring the field with a healthy annotation
     # clears the entry (probed: the override repairs the schema). The
-    # analyzer surfaces these as PLY041 on every function that references
+    # analyzer surfaces these as pple-broken-schema-annotation on every function that references
     # the schema.
     definition_errors: dict[str, str] = field(default_factory=dict)
     # Field annotations polypolarism cannot translate to a dtype (issue
@@ -57,7 +57,7 @@ class Schema:
     # FNs on open ones. NOT an error: a bare name may be a runtime alias
     # of a real dtype (``MyAlias = pl.Int64`` resolves fine in pandera),
     # so unresolvability is not provable statically. The analyzer
-    # surfaces these as PLW011 on every function that references the
+    # surfaces these as pplw-unrecognized-annotation on every function that references the
     # schema. Inheritance/repair semantics mirror ``definition_errors``.
     definition_warnings: dict[str, str] = field(default_factory=dict)
     # Issue #90: the schema's columns could not be derived statically at
@@ -65,7 +65,7 @@ class Schema:
     # unreadable DataFrameSchema arguments). The schema still EXISTS and
     # validate runs at runtime, so it binds as a fully OPEN assumption
     # frame (no island lint — nothing is declared to lint against) and
-    # PLW011 surfaces the degrade via ``definition_warnings``.
+    # pplw-unrecognized-annotation surfaces the degrade via ``definition_warnings``.
     unresolved: bool = False
     # Per-field source ``Span`` for the ``AnnAssign`` that declared the
     # column (issue #110): used as the SECONDARY ("declared here") location
@@ -76,7 +76,7 @@ class Schema:
     # Per-field source ``Span`` for JUST the ANNOTATION node of the
     # ``AnnAssign`` (``AnnAssign.annotation`` — ``int`` / ``pl.Int64`` /
     # ``Annotated[...]``), NOT the whole ``name: ann = pa.Field(...)`` line
-    # (issue #113). This is the range the PLY040 retype quick fix replaces
+    # (issue #113). This is the range the pple-return-type retype quick fix replaces
     # with the suggested annotation, so a ``total: int`` becomes
     # ``total: pl.Float64`` (the field name and any ``= pa.Field(...)`` are
     # preserved). A field whose annotation is a string forward-ref has no
@@ -87,7 +87,7 @@ class Schema:
     field_annotation_spans: dict[str, Span] = field(default_factory=dict)
     # Absolute path (as ``str``) of the file that DEFINES this schema's class,
     # and the 1-indexed line of the ``class`` header (Batch B, Request 2).
-    # Diagnostic provenance only — used to build the PLY042 "declare the
+    # Diagnostic provenance only — used to build the pple-undeclared-column "declare the
     # column" quick fix's ``schema_file`` / ``schema_insert_line``. ``None``
     # when the schema was parsed without a known source file (e.g.
     # ``collect_schemas`` on a bare string). Set to the IMPORTED module's
@@ -99,16 +99,16 @@ class Schema:
         # Checked-island semantics (issue #83, user-approved): a
         # strict=False schema binds CLOSED with ``nonstrict_schema``
         # provenance — the declaration is the contract; undeclared
-        # lookups flag PLY042 with honest wording. strict=True and
+        # lookups flag pple-undeclared-column with honest wording. strict=True and
         # strict="filter" (issue #88) bind closed and island-free: their
         # outputs hold exactly the declared columns, so missing-column
-        # lookups are PLY001 proofs. VALIDATE-RESULT bindings additionally
+        # lookups are pple-column-not-found proofs. VALIDATE-RESULT bindings additionally
         # open the non-strict frame (see ``validate_result_frame``) —
         # runtime extras provably flow through a non-strict validate, so
         # frame-level subtyping there is value-dependent, not provable.
         if self.unresolved:
             # Issue #90: columns unknowable — a fully open assumption
-            # frame (validate still narrows; PLW011 carries the degrade).
+            # frame (validate still narrows; pplw-unrecognized-annotation carries the degrade).
             return FrameType({}, rest=RowVar(self.name), coerce=self.coerce, schema_name=self.name)
         if self.strict or self.filters_extras:
             return FrameType(
@@ -151,9 +151,9 @@ class Schema:
         ISLAND: ``rest`` keeps frame-level subtyping lenient
         (missing-column claims against the result are value-dependent),
         while the ``nonstrict_schema`` provenance keeps undeclared
-        lookups flagged as the PLY042 interface lint. strict=True and
+        lookups flagged as the pple-undeclared-column interface lint. strict=True and
         strict="filter" results are exactly the declared columns —
-        closed, island-free (filter's removed-column lookups are PLY001
+        closed, island-free (filter's removed-column lookups are pple-column-not-found
         proofs).
         """
         ft = self.to_frame_type()
@@ -170,7 +170,7 @@ class SchemaRegistry:
     schemas: dict[str, Schema] = field(default_factory=dict)
     # Names bound by a from-import whose module did NOT resolve to a
     # project-local file, mapped to the import spelling ("pkg.mod",
-    # ".sibling"). Lets PLW006 say the import was seen but unresolved
+    # ".sibling"). Lets pplw-unknown-schema say the import was seen but unresolved
     # instead of suggesting an import the user already wrote.
     failed_imports: dict[str, str] = field(default_factory=dict)
     # ``from pandera.typing.polars import DataFrame as DF`` style aliases:
@@ -307,7 +307,7 @@ def collect_schemas(tree: ast.Module, source_file: Path | None = None) -> Schema
     """Walk a module AST and return the set of Pandera schemas defined at top level.
 
     ``source_file`` (when given) is recorded on each parsed schema as its
-    defining file (Batch B, Request 2) — used to build the PLY042 quick fix's
+    defining file (Batch B, Request 2) — used to build the pple-undeclared-column quick fix's
     ``schema_file``. Resolved to an absolute path so the editor edits the
     right file regardless of cwd.
     """
@@ -359,7 +359,7 @@ def _parse_object_column(node: ast.expr) -> tuple[ColumnSpec, str | None]:
     fields). Anything statically unreadable — a non-``Column`` value, a
     string dtype alias (``pa.Column("int64")``, accepted by pandera but
     not modeled), a non-literal ``nullable``/``required`` — degrades to
-    an ``Unknown`` column with a warning detail (the PLW011 channel,
+    an ``Unknown`` column with a warning detail (the pplw-unrecognized-annotation channel,
     mirroring issue #77's loud-degrade rule).
     """
     if not (
@@ -568,7 +568,7 @@ def _collect_object_schemas(tree: ast.Module, registry: SchemaRegistry) -> None:
     - ``NAME = pa.DataFrameSchema(<columns>, strict=..., coerce=...)``
       registers like a class schema, keyed by the variable name — the
       whole downstream machinery (``validate`` narrowing, checked-island
-      ``nonstrict_schema`` provenance, cross-file import merging, PLW011
+      ``nonstrict_schema`` provenance, cross-file import merging, pplw-unrecognized-annotation
       definition warnings) applies uniformly.
     - ``NAME = other.add_columns({...})`` / ``other.remove_columns([...])``
       derive a NEW schema from a registered one (probed: pandera's object
@@ -617,7 +617,7 @@ def _collect_object_schemas(tree: ast.Module, registry: SchemaRegistry) -> None:
         if schema is None:
             # Issue #90: a schema-SHAPED value we cannot fold must not
             # vanish silently — register it as unresolved (open
-            # assumption frame + PLW011) so validate sites stay loud.
+            # assumption frame + pplw-unrecognized-annotation) so validate sites stay loud.
             schema = _unresolved_object_schema(name, value, registry)
         if schema is not None:
             registry.schemas[name] = schema
@@ -806,7 +806,7 @@ def _parse_schema(
     """Parse a single ClassDef into a Schema, merging parent fields.
 
     ``source_file`` (an absolute path ``str`` or ``None``) and the class
-    header line are recorded as PLY042 quick-fix provenance (Batch B,
+    header line are recorded as pple-undeclared-column quick-fix provenance (Batch B,
     Request 2)."""
     _aliases = aliases or {}
     schema = Schema(name=node.name, source_file=source_file, header_line=node.lineno)
@@ -879,8 +879,8 @@ def _parse_schema(
             elif arity_error is None:
                 # Issue #77: an unrecognized annotation must not silently
                 # drop the field. Register the column with Unknown dtype
-                # and record a definition warning (surfaced as PLW011).
-                # Arity-broken fields are excluded — PLY041 already
+                # and record a definition warning (surfaced as pplw-unrecognized-annotation).
+                # Arity-broken fields are excluded — pple-broken-schema-annotation already
                 # carries their verdict.
                 schema.columns[field_name] = unrecognized_field_spec(stmt.annotation)
                 schema.definition_warnings[field_name] = (
@@ -1175,7 +1175,7 @@ def _merge_module_imports(
     ``from base import ReExported`` — faithful to Python attribute
     access on modules). ``import pkg`` followed by ``pkg.sub.Schema``
     (attribute access through an un-imported submodule) is *not*
-    resolved and falls through to the PLW006 unresolved-schema warning.
+    resolved and falls through to the pplw-unknown-schema unresolved-schema warning.
     """
     try:
         current_real = current_file.resolve()

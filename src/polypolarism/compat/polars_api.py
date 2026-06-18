@@ -647,7 +647,7 @@ class ContainerAggInvalid:
 
     The (namespace, method, element) combination is a probed runtime error
     — InvalidOperationError, ComputeError, or a rust panic, depending on
-    the cell. The analyzer flags PLY016 and degrades the output to Unknown.
+    the cell. The analyzer flags pple-non-numeric-operand and degrades the output to Unknown.
     """
 
     __slots__ = ()
@@ -760,7 +760,7 @@ def container_agg_return(
 
     - a ``DataType``: the probed result dtype;
     - ``CONTAINER_AGG_INVALID``: a probed runtime error (the caller flags
-      PLY016 and degrades the output to Unknown);
+      pple-non-numeric-operand and degrades the output to Unknown);
     - ``None``: unprobed or deliberately unclaimed — the caller degrades
       to Unknown silently.
     """
@@ -945,7 +945,7 @@ IDENTITY_FRAME_METHODS: frozenset[str] = frozenset(
 
 
 # Methods that exist only on LazyFrame. Calling them on a DataFrame
-# raises AttributeError at runtime — statically we surface PLY031.
+# raises AttributeError at runtime — statically we surface pple-lazy-only-method.
 LAZY_ONLY_METHODS: frozenset[str] = frozenset(
     {
         "collect",
@@ -968,7 +968,7 @@ LAZY_ONLY_METHODS: frozenset[str] = frozenset(
 
 
 # Methods that exist only on DataFrame. Calling them on a LazyFrame
-# triggers PLY030 with a ``.collect()`` hint.
+# triggers pple-eager-only-method with a ``.collect()`` hint.
 EAGER_ONLY_METHODS: frozenset[str] = frozenset(
     {
         "to_pandas",
@@ -1022,7 +1022,7 @@ EAGER_ONLY_METHODS: frozenset[str] = frozenset(
 # Frame methods probed to RETURN a frame (DataFrame or LazyFrame), one set
 # per receiver class. Consumed by the analyzer's frame-method dispatch
 # fall-through (backlog N-3): an unmodeled method in the receiver's set
-# means schema tracking silently dies — PLW007. Names NOT in the set stay
+# means schema tracking silently dies — pplw-unmodeled-method. Names NOT in the set stay
 # silent: terminal methods (``to_dicts``, ``write_*``, ``item``,
 # ``height``, ...) legitimately return non-frames, and unknown names
 # (typos, plugin namespaces) are unknowable (conservative). Modeled

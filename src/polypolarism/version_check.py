@@ -20,7 +20,7 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-from polypolarism.diagnostics import PLW010, tag
+from polypolarism.diagnostics import UNSUPPORTED_VERSION, tag
 
 
 @dataclass(order=True, frozen=True)
@@ -80,7 +80,7 @@ def _leading_digits(s: str) -> int | None:
 # Bool/String schema differences) that no analyzer guard can paper over.
 # When polars ships a new minor, bump ``POLARS_LATEST_KNOWN``; only move
 # ``POLARS_FLOOR`` deliberately, with corpus evidence. Anything below the
-# floor triggers a PLW010 warning.
+# floor triggers a pplw-unsupported-version warning.
 POLARS_LATEST_KNOWN = Version(1, 41, 0)
 POLARS_FLOOR = Version(1, 37, 0)
 POLARS_SUPPORT_NOTE = (
@@ -357,7 +357,7 @@ def check_versions(info: VersionInfo) -> list[VersionWarning]:
     either: ``polars>=1.0`` only says the project *tolerates* 1.0, not that
     it runs 1.0 — the resolver almost always installs something newer. The
     floor is still surfaced in ``VersionInfo`` for callers that want it; it
-    just isn't evidence enough for a PLW010.
+    just isn't evidence enough for a pplw-unsupported-version.
     """
     warnings: list[VersionWarning] = []
     if info.polars is not None and info.polars.exact and info.polars.version < POLARS_FLOOR:
@@ -367,7 +367,7 @@ def check_versions(info: VersionInfo) -> list[VersionWarning]:
                 detected=info.polars,
                 floor=POLARS_FLOOR,
                 message=tag(
-                    PLW010,
+                    UNSUPPORTED_VERSION,
                     f"detected polars {info.polars.version} (from {info.polars.source}); "
                     f"{POLARS_SUPPORT_NOTE}. Type-check accuracy is best-effort below this — "
                     "use --polars-version to override.",
@@ -381,7 +381,7 @@ def check_versions(info: VersionInfo) -> list[VersionWarning]:
                 detected=info.pandera,
                 floor=PANDERA_FLOOR,
                 message=tag(
-                    PLW010,
+                    UNSUPPORTED_VERSION,
                     f"detected pandera {info.pandera.version} (from {info.pandera.source}); "
                     f"{PANDERA_SUPPORT_NOTE}. Use --pandera-version to override.",
                 ),

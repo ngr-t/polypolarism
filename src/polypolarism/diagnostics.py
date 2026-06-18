@@ -1,90 +1,155 @@
 """Stable diagnostic codes for analyzer errors.
 
 The codes are intended for IDE / CI consumption — never repurpose a code,
-only add new ones. Format: ``[PLY###] message``.
+only add new ones. Format: ``[<code>] message``, where ``<code>`` is a
+semantic slug: ``pple-<slug>`` for errors, ``pplw-<slug>`` for warnings
+(kebab-case). The ``ppl`` stem plus the ``e`` / ``w`` namespace keeps the
+codes from colliding with mypy / ruff inside ``# type: ignore[...]``.
 """
 
 from __future__ import annotations
 
 import re
 
-# Expression / column lookup
-PLY001 = "PLY001"  # Column not found in expression (pl.col / cs.*)
+# Expression / column lookup. One shared code for the whole "a referenced
+# column does not exist on the frame" family: pl.col / cs.* lookups, drop,
+# rename source, cast, drop_nulls subset, sort, and unique subset all describe
+# the same provable runtime miss — the message text distinguishes the kind.
+COLUMN_NOT_FOUND = "pple-column-not-found"
 
-# Frame reshape — column reference errors
-PLY002 = "PLY002"  # drop: column not found
-PLY003 = "PLY003"  # rename: source column not found
-PLY004 = "PLY004"  # cast: column not found
-PLY005 = "PLY005"  # drop_nulls: subset column not found
-PLY006 = "PLY006"  # with_row_index: name collides with existing column
-PLY007 = "PLY007"  # sort: column not found
-PLY008 = "PLY008"  # filter predicate / when condition dtype is not Boolean
-PLY009 = "PLY009"  # binary operation between incompatible dtypes (arithmetic, comparison, is_in)
-PLY013 = "PLY013"  # cast between structurally incompatible dtypes
-PLY014 = "PLY014"  # unique: subset column not found
-PLY015 = "PLY015"  # duplicate output column name in select/with_columns/rename
-PLY016 = "PLY016"  # numeric-only operation applied to a non-numeric column
-PLY017 = "PLY017"  # list literal mixed with other positional expression arguments
+# Frame reshape — other column-reference errors
+COLUMN_NAME_COLLISION = (
+    "pple-column-name-collision"  # with_row_index: name collides with existing column
+)
+NON_BOOLEAN_PREDICATE = (
+    "pple-non-boolean-predicate"  # filter predicate / when condition dtype is not Boolean
+)
+INCOMPATIBLE_OPERANDS = "pple-incompatible-operands"  # binary operation between incompatible dtypes (arithmetic, comparison, is_in)
+INVALID_CAST = "pple-invalid-cast"  # cast between structurally incompatible dtypes
+DUPLICATE_COLUMN = (
+    "pple-duplicate-column"  # duplicate output column name in select/with_columns/rename
+)
+NON_NUMERIC_OPERAND = (
+    "pple-non-numeric-operand"  # numeric-only operation applied to a non-numeric column
+)
+LIST_LITERAL_MISUSE = (
+    "pple-list-literal-misuse"  # list literal mixed with other positional expression arguments
+)
 
 # Join
-PLY010 = "PLY010"  # join key error (missing or dtype mismatch)
+JOIN_KEY = "pple-join-key"  # join key error (missing or dtype mismatch)
 
 # GroupBy / aggregation
-PLY011 = "PLY011"  # group_by key missing or aggregation type error
+GROUPBY = "pple-groupby"  # group_by key missing or aggregation type error
 
 # Expression namespaces
-PLY012 = "PLY012"  # namespace accessor (.str/.dt/.list/.arr/.struct/.bin/.cat) on a wrong dtype
+WRONG_NAMESPACE_DTYPE = "pple-wrong-namespace-dtype"  # namespace accessor (.str/.dt/.list/.arr/.struct/.bin/.cat) on a wrong dtype
 
 # Concat / explode / unpivot
-PLY020 = "PLY020"  # concat schema mismatch / horizontal overlap
-PLY021 = "PLY021"  # explode: column missing or not List/Array
-PLY022 = "PLY022"  # unpivot: column missing / value dtype unification failure
+CONCAT_MISMATCH = "pple-concat-mismatch"  # concat schema mismatch / horizontal overlap
+EXPLODE = "pple-explode"  # explode: column missing or not List/Array
+UNPIVOT = "pple-unpivot"  # unpivot: column missing / value dtype unification failure
 
 # Eager / lazy distinction
-PLY030 = "PLY030"  # eager-only method called on a LazyFrame (suggest .collect())
-PLY031 = "PLY031"  # lazy-only method called on a DataFrame (suggest .lazy())
-PLY032 = "PLY032"  # function expected DataFrame[S] but got LazyFrame[S] (or vice versa)
-PLY033 = (
-    "PLY033"  # variable annotation re-interprets the inferred frame as an unrelated type (ADR-0005)
+EAGER_ONLY_METHOD = (
+    "pple-eager-only-method"  # eager-only method called on a LazyFrame (suggest .collect())
 )
+LAZY_ONLY_METHOD = (
+    "pple-lazy-only-method"  # lazy-only method called on a DataFrame (suggest .lazy())
+)
+EAGER_LAZY_MISMATCH = "pple-eager-lazy-mismatch"  # function expected DataFrame[S] but got LazyFrame[S] (or vice versa)
+ANNOTATION_CONFLICT = "pple-annotation-conflict"  # variable annotation re-interprets the inferred frame as an unrelated type (ADR-0005)
 
 # Declared vs inferred return type comparison (checker.py). One shared code
 # for the whole family (issue #70): missing column, extra column, dtype
 # difference, and could-not-infer all describe the same declared-return-type
 # check; the message distinguishes the kind.
-PLY040 = "PLY040"  # declared return type does not match the inferred return type
+RETURN_TYPE = "pple-return-type"  # declared return type does not match the inferred return type
 
 # Schema definition
-PLY041 = "PLY041"  # schema field annotation provably crashes pandera at runtime (Annotated arity, issue #69)
+BROKEN_SCHEMA_ANNOTATION = "pple-broken-schema-annotation"  # schema field annotation provably crashes pandera at runtime (Annotated arity, issue #69)
 
 # Declared-schema interface ("checked island", issue #83)
-PLY042 = "PLY042"  # column not declared in the function's (non-strict) schema — an undeclared dependency, not a provable runtime failure
+UNDECLARED_COLUMN = "pple-undeclared-column"  # column not declared in the function's (non-strict) schema — an undeclared dependency, not a provable runtime failure
 
 # Row polymorphism (C-14)
-PLY043 = "PLY043"  # @rowpoly helper body provably drops the row variable — caller's extra columns are not preserved
+ROWPOLY_NOT_PRESERVED = "pple-rowpoly-not-preserved"  # @rowpoly helper body provably drops the row variable — caller's extra columns are not preserved
 
 
-# Warnings (PLW###): inference is imprecise here, but the user can usually
+# Warnings (pplw-*): inference is imprecise here, but the user can usually
 # fix it by adding a type annotation or an explicit dtype argument.
-PLW001 = "PLW001"  # map_elements / map_batches without ``return_dtype=`` keyword
-PLW002 = "PLW002"  # ``df.pipe(callable)`` where the callable can't be resolved
-PLW003 = "PLW003"  # function call to a name that isn't in the analysed module
-PLW004 = "PLW004"  # lambda / inline callable used where its return dtype is unknowable
-PLW005 = "PLW005"  # pivot / to_dummies result schema is data-dependent; user should annotate
-PLW006 = "PLW006"  # DataFrame[X] / LazyFrame[X] annotation references an unknown schema
-PLW007 = "PLW007"  # method not modeled (or experimental polars API); result degrades to Unknown
-PLW008 = "PLW008"  # variable annotation narrows the inferred RHS without runtime backing (ADR-0005)
+MISSING_RETURN_DTYPE = (
+    "pplw-missing-return-dtype"  # map_elements / map_batches without ``return_dtype=`` keyword
+)
+UNRESOLVED_PIPE = (
+    "pplw-unresolved-pipe"  # ``df.pipe(callable)`` where the callable can't be resolved
+)
+UNKNOWN_FUNCTION = (
+    "pplw-unknown-function"  # function call to a name that isn't in the analysed module
+)
+UNTYPED_CALLABLE = (
+    "pplw-untyped-callable"  # lambda / inline callable used where its return dtype is unknowable
+)
+DATA_DEPENDENT_SCHEMA = "pplw-data-dependent-schema"  # pivot / to_dummies result schema is data-dependent; user should annotate
+UNKNOWN_SCHEMA = (
+    "pplw-unknown-schema"  # DataFrame[X] / LazyFrame[X] annotation references an unknown schema
+)
+UNMODELED_METHOD = "pplw-unmodeled-method"  # method not modeled (or experimental polars API); result degrades to Unknown
+UNBACKED_NARROWING = "pplw-unbacked-narrowing"  # variable annotation narrows the inferred RHS without runtime backing (ADR-0005)
 
 # Environment / version
-PLW010 = "PLW010"  # detected polars or pandera version below polypolarism's supported floor
+UNSUPPORTED_VERSION = "pplw-unsupported-version"  # detected polars or pandera version below polypolarism's supported floor
 
-PLW011 = "PLW011"  # schema field annotation unrecognized; column degrades to Unknown dtype (#77)
+UNRECOGNIZED_ANNOTATION = "pplw-unrecognized-annotation"  # schema field annotation unrecognized; column degrades to Unknown dtype (#77)
 
-PLW012 = "PLW012"  # grouped aggregation provably yields an all-null column (probed; probably a bug) (#91)
+ALL_NULL_AGGREGATION = "pplw-all-null-aggregation"  # grouped aggregation provably yields an all-null column (probed; probably a bug) (#91)
 
-PLW013 = "PLW013"  # typing.cast(DataFrame[Schema], ...) is not honored as a schema assertion (#102)
+IGNORED_CAST = "pplw-ignored-cast"  # typing.cast(DataFrame[Schema], ...) is not honored as a schema assertion (#102)
 
-PLW014 = "PLW014"  # imported @rowpoly helper does not provably preserve its row variable; its extras are not threaded (#112)
+ROWPOLY_NOT_THREADED = "pplw-rowpoly-not-threaded"  # imported @rowpoly helper does not provably preserve its row variable; its extras are not threaded (#112)
+
+
+# Registry of every defined slug — used by the fixture coverage gate so a new
+# code can't silently lose its end-to-end test.
+ALL_CODES: frozenset[str] = frozenset(
+    {
+        COLUMN_NOT_FOUND,
+        COLUMN_NAME_COLLISION,
+        NON_BOOLEAN_PREDICATE,
+        INCOMPATIBLE_OPERANDS,
+        INVALID_CAST,
+        DUPLICATE_COLUMN,
+        NON_NUMERIC_OPERAND,
+        LIST_LITERAL_MISUSE,
+        JOIN_KEY,
+        GROUPBY,
+        WRONG_NAMESPACE_DTYPE,
+        CONCAT_MISMATCH,
+        EXPLODE,
+        UNPIVOT,
+        EAGER_ONLY_METHOD,
+        LAZY_ONLY_METHOD,
+        EAGER_LAZY_MISMATCH,
+        ANNOTATION_CONFLICT,
+        RETURN_TYPE,
+        BROKEN_SCHEMA_ANNOTATION,
+        UNDECLARED_COLUMN,
+        ROWPOLY_NOT_PRESERVED,
+        MISSING_RETURN_DTYPE,
+        UNRESOLVED_PIPE,
+        UNKNOWN_FUNCTION,
+        UNTYPED_CALLABLE,
+        DATA_DEPENDENT_SCHEMA,
+        UNKNOWN_SCHEMA,
+        UNMODELED_METHOD,
+        UNBACKED_NARROWING,
+        UNSUPPORTED_VERSION,
+        UNRECOGNIZED_ANNOTATION,
+        ALL_NULL_AGGREGATION,
+        IGNORED_CAST,
+        ROWPOLY_NOT_THREADED,
+    }
+)
 
 
 _TYPE_IGNORE = re.compile(r"#\s*type:\s*ignore(?:\[([^\]]*)\])?")
@@ -95,7 +160,7 @@ def parse_type_ignore(line: str) -> frozenset[str] | None:
 
     Returns:
         ``None``           — blanket ignore (suppress all diagnostics)
-        ``frozenset(...)`` — suppress only the listed PLY/PLW codes
+        ``frozenset(...)`` — suppress only the listed diagnostic codes
         ``frozenset()``    — no ``type: ignore`` present; nothing suppressed
     """
     m = _TYPE_IGNORE.search(line)
@@ -118,7 +183,7 @@ def tag(code: str, message: str) -> str:
 class TaggedError(str):
     """A tagged analyzer error string that also carries structured fields.
 
-    The analyzer collects errors as plain ``str`` (``"[PLY###] message"``);
+    The analyzer collects errors as plain ``str`` (``"[<code>] message"``);
     this subclass keeps that exact text — every ``str`` operation (equality,
     ``str(...)``, regex, ``f"at line N: {e}"`` wrapping, suppression code
     extraction) behaves byte-for-byte the same — while attaching the
@@ -129,16 +194,16 @@ class TaggedError(str):
     omits absent fields and never invents one a code doesn't have.
 
     ``fix`` is an optional structured quick-fix payload (Batch B, Request 2):
-    the PLY042 "declare the column on the schema" object
+    the ``pple-undeclared-column`` "declare the column on the schema" object
     (``{schema, column, schema_file, schema_insert_line, suggested_dtype?}``).
     ``None`` when no sound fix could be built; the JSON layer omits it.
 
     ``param_name`` / ``param_annotation_range`` are the "relax the param"
     helper fields (Batch B, Request 4): the parameter whose annotation the
-    diagnostic suggests loosening (e.g. PLY042's "take a bare pl.DataFrame
-    parameter") and its annotation's ``{line, column, end_line, end_column}``
-    range. Both ``None`` when not cleanly determinable; the JSON layer omits
-    absent ones.
+    diagnostic suggests loosening (e.g. ``pple-undeclared-column``'s "take a
+    bare pl.DataFrame parameter") and its annotation's
+    ``{line, column, end_line, end_column}`` range. Both ``None`` when not
+    cleanly determinable; the JSON layer omits absent ones.
     """
 
     column: str | None
@@ -173,11 +238,11 @@ def tagged_error(
     return err
 
 
-_TAGGED_MESSAGE = re.compile(r"^\[(PL[YW]\d{3})\]")
+_TAGGED_MESSAGE = re.compile(r"^\[(ppl[ew]-[a-z-]+)\]")
 
 
 def extract_code(message: str) -> str | None:
-    """Return the leading ``PLY###`` / ``PLW###`` code of a tagged message.
+    """Return the leading ``pple-*`` / ``pplw-*`` slug of a tagged message.
 
     ``None`` for untagged diagnostics (e.g. parse / read failures). Used by
     JSON output to expose the code structurally (issue #70) — consumers

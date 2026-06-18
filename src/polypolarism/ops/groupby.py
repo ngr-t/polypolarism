@@ -169,9 +169,9 @@ GROUPED_PANIC_CELLS: dict[AggFunction, tuple[type[DataType], ...]] = {
 # unconditionally all-null column of the receiver dtype, while the same
 # reduction raises InvalidOperationError as a whole-frame (select)
 # reduction (issue #91; probed identical on polars 1.37.0/1.39.3/1.40.1/
-# 1.41.2). The select-context rejection stays a PLY011 proof; the grouped
+# 1.41.2). The select-context rejection stays a pple-groupby proof; the grouped
 # context accepts with Nullable(receiver) and the analyzer surfaces a
-# PLW012 "provably all-null" advisory.
+# pplw-all-null-aggregation "provably all-null" advisory.
 GROUPED_ALL_NULL_TEMPORAL: dict[AggFunction, tuple[type[DataType], ...]] = {
     AggFunction.SUM: (Date, Datetime, Time),
     AggFunction.STD: (Date, Datetime, Time),

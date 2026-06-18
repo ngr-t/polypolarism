@@ -47,45 +47,39 @@ from polypolarism.compat.polars_api import (
     time_unit_refines,
 )
 from polypolarism.diagnostics import (
-    PLW001,
-    PLW002,
-    PLW003,
-    PLW004,
-    PLW005,
-    PLW006,
-    PLW007,
-    PLW008,
-    PLW011,
-    PLW012,
-    PLW013,
-    PLW014,
-    PLY001,
-    PLY002,
-    PLY003,
-    PLY004,
-    PLY005,
-    PLY006,
-    PLY007,
-    PLY008,
-    PLY009,
-    PLY010,
-    PLY011,
-    PLY012,
-    PLY013,
-    PLY014,
-    PLY015,
-    PLY016,
-    PLY017,
-    PLY020,
-    PLY021,
-    PLY022,
-    PLY030,
-    PLY031,
-    PLY032,
-    PLY033,
-    PLY041,
-    PLY042,
-    PLY043,
+    ALL_NULL_AGGREGATION,
+    ANNOTATION_CONFLICT,
+    BROKEN_SCHEMA_ANNOTATION,
+    COLUMN_NAME_COLLISION,
+    COLUMN_NOT_FOUND,
+    CONCAT_MISMATCH,
+    DATA_DEPENDENT_SCHEMA,
+    DUPLICATE_COLUMN,
+    EAGER_LAZY_MISMATCH,
+    EAGER_ONLY_METHOD,
+    EXPLODE,
+    GROUPBY,
+    IGNORED_CAST,
+    INCOMPATIBLE_OPERANDS,
+    INVALID_CAST,
+    JOIN_KEY,
+    LAZY_ONLY_METHOD,
+    LIST_LITERAL_MISUSE,
+    MISSING_RETURN_DTYPE,
+    NON_BOOLEAN_PREDICATE,
+    NON_NUMERIC_OPERAND,
+    ROWPOLY_NOT_PRESERVED,
+    ROWPOLY_NOT_THREADED,
+    UNBACKED_NARROWING,
+    UNDECLARED_COLUMN,
+    UNKNOWN_FUNCTION,
+    UNKNOWN_SCHEMA,
+    UNMODELED_METHOD,
+    UNPIVOT,
+    UNRECOGNIZED_ANNOTATION,
+    UNRESOLVED_PIPE,
+    UNTYPED_CALLABLE,
+    WRONG_NAMESPACE_DTYPE,
     TaggedError,
     parse_type_ignore,
     tag,
@@ -424,14 +418,14 @@ def _base_is_unknown(dtype: DataType) -> bool:
 
 
 def _all_null_agg_warning(func: AggFunction, receiver: DataType) -> str:
-    """PLW012 text for a probed grouped all-null aggregation cell (issue #91).
+    """pplw-all-null-aggregation text for a probed grouped all-null aggregation cell (issue #91).
 
     The grouped reduction SUCCEEDS at runtime — unlike its select-context
     twin, which raises — but every output value is null regardless of the
     input, which is never what the author meant.
     """
     return tag(
-        PLW012,
+        ALL_NULL_AGGREGATION,
         f"{func.name.lower()} on {receiver} in a grouped context always yields "
         f"an all-null column (probed; the same reduction raises in a plain "
         f"select) — this is probably not intended",
@@ -439,7 +433,7 @@ def _all_null_agg_warning(func: AggFunction, receiver: DataType) -> str:
 
 
 def _unmodeled_method_warning(call_desc: str, *, frame: bool = False) -> str:
-    """PLW007 text for an unmodeled method call (backlog B-4 / N-3).
+    """pplw-unmodeled-method text for an unmodeled method call (backlog B-4 / N-3).
 
     Emitted only when the receiver was precisely known — the call is the
     exact point where inference gives up and downstream checks weaken.
@@ -449,14 +443,14 @@ def _unmodeled_method_warning(call_desc: str, *, frame: bool = False) -> str:
     """
     if frame:
         return tag(
-            PLW007,
+            UNMODELED_METHOD,
             f"`{call_desc}` is not modeled by polypolarism — the frame's "
             f"schema is no longer tracked and downstream checks go silent. "
             f"Validate the result against a schema "
             f"(`Schema.validate(...)`) to keep checking precise.",
         )
     return tag(
-        PLW007,
+        UNMODELED_METHOD,
         f"`{call_desc}` is not modeled by polypolarism — the result dtype "
         f"degrades to Unknown and downstream dtype checks weaken. Pin the "
         f"dtype with `.cast(...)` after the call, or validate the frame "
@@ -489,7 +483,7 @@ def _wrap_nullable_if_any(result: DataType, operands: list[DataType]) -> DataTyp
 # false negatives here.
 
 # Sentinel: both operand bases are understood and polars rejects the pair+op
-# at runtime (InvalidOperationError) — report PLY009.
+# at runtime (InvalidOperationError) — report pple-incompatible-operands.
 _ARITH_INVALID = object()
 
 _OP_SYMBOLS: dict[type[ast.operator], str] = {
@@ -1021,7 +1015,7 @@ _CAST_ALWAYS_PAIRS: frozenset[tuple[str, str]] = frozenset(
 
 # Three-way cast classification (issues #34 / #58):
 # - "never":  polars provably rejects the cast even with ``strict=False``
-#             (structural — the PLY013 trigger);
+#             (structural — the pple-invalid-cast trigger);
 # - "always": the cast is probed value-independent (the coerce-tolerance
 #             trigger);
 # - "value-dependent": everything in between, plus every cell outside the
@@ -1132,7 +1126,7 @@ def _lazy_like(result: FrameType | None, source: FrameType | None) -> FrameType 
     about laziness — the analyser post-processes their output through this
     helper so the eager/lazy distinction is preserved across the operation.
 
-    Also propagates the @rowpoly ``row_var_dropped`` flag (PLY043): once a
+    Also propagates the @rowpoly ``row_var_dropped`` flag (pple-rowpoly-not-preserved): once a
     predicate-keyed reduction may have dropped an unknown caller extra, no
     downstream frame method restores it, so the diagnostic mark is sticky
     across the chain. Only meaningful while the frame stays OPEN — a closed
@@ -1172,19 +1166,19 @@ def _missing_column_diag(frame: FrameType, name: str) -> tuple[str, str]:
 
     Checked-island semantics (issue #83): on a frame bound from a
     non-strict declared schema the lookup is an interface violation
-    against the declaration (PLY042, honest wording — the schema admits
+    against the declaration (pple-undeclared-column, honest wording — the schema admits
     caller extras at runtime); on an exact frame it is a provable
-    runtime miss (PLY001).
+    runtime miss (pple-column-not-found).
     """
     if frame.nonstrict_schema is not None:
-        return PLY042, (
+        return UNDECLARED_COLUMN, (
             f"column '{name}' is not declared in schema "
             f"'{frame.nonstrict_schema}' — the (non-strict) schema admits "
             f"extra columns at runtime, but this function's declaration "
             f"does not promise it. Declare the column on the schema, or "
             f"take a bare pl.DataFrame parameter for row-polymorphic helpers"
         )
-    return PLY001, (
+    return COLUMN_NOT_FOUND, (
         f"Column '{name}' not found{frame.origin_note()}. "
         f"Available columns: {list(frame.columns.keys())}"
     )
@@ -1196,7 +1190,7 @@ def _ply042_fix(
     schema_registry: SchemaRegistry | None,
     suggested_dtype: str | None = None,
 ) -> dict | None:
-    """Build the PLY042 "declare the column on the schema" quick-fix object
+    """Build the pple-undeclared-column "declare the column on the schema" quick-fix object
     (Batch B, Request 2), or ``None`` when it can't be built soundly.
 
     Shape: ``{schema, column, schema_file, schema_insert_line,
@@ -1241,7 +1235,7 @@ def _relax_param_fields(
     frame: FrameType,
     param_relax_info: dict[str, tuple[str, Span]] | None,
 ) -> tuple[str | None, dict | None]:
-    """``(param_name, param_annotation_range)`` for the PLY042 "relax the
+    """``(param_name, param_annotation_range)`` for the pple-undeclared-column "relax the
     param" helper (Batch B, Request 4), or ``(None, None)`` when the frame's
     source parameter can't be cleanly identified.
 
@@ -1278,17 +1272,17 @@ def _missing_column_tagged(
     """:func:`_missing_column_diag` as a structured :class:`TaggedError`.
 
     Same byte-for-byte text as ``tag(*_missing_column_diag(frame, name))``;
-    additionally carries the looked-up ``column`` and, for the PLY042 island
+    additionally carries the looked-up ``column`` and, for the pple-undeclared-column island
     case, the non-strict ``schema`` name (sourced from ``nonstrict_schema``,
     not parsed from the message), the structured ``fix`` quick-fix object
     (Batch B, Request 2 — only when ``schema_registry`` resolves the defining
     file), and the "relax the param" helper fields (Request 4)."""
     code, msg = _missing_column_diag(frame, name)
-    schema = frame.nonstrict_schema if code == PLY042 else None
+    schema = frame.nonstrict_schema if code == UNDECLARED_COLUMN else None
     fix = None
     param_name = None
     param_range = None
-    if code == PLY042 and schema is not None:
+    if code == UNDECLARED_COLUMN and schema is not None:
         fix = _ply042_fix(schema, name, schema_registry)
         param_name, param_range = _relax_param_fields(frame, param_relax_info)
     return tagged_error(
@@ -1311,17 +1305,17 @@ def _column_not_found_tagged(
     :class:`TaggedError`, preserving the message text exactly while exposing
     the exception's ``column`` / ``schema`` for JSON consumers.
 
-    For the PLY042 island case the structured ``fix`` quick-fix object (Batch
+    For the pple-undeclared-column island case the structured ``fix`` quick-fix object (Batch
     B, Request 2 — only when ``schema_registry`` resolves the defining file)
     and the "relax the param" helper fields (Request 4 — keyed by the
     exception's schema) are attached too."""
-    code = getattr(e, "code", PLY001)
+    code = getattr(e, "code", COLUMN_NOT_FOUND)
     column = getattr(e, "column", None)
     schema = getattr(e, "schema", None)
     fix = None
     param_name = None
     param_range = None
-    if code == PLY042 and schema is not None and column is not None:
+    if code == UNDECLARED_COLUMN and schema is not None and column is not None:
         fix = _ply042_fix(schema, column, schema_registry)
         if param_relax_info is not None:
             entry = param_relax_info.get(schema)
@@ -1510,7 +1504,7 @@ def _contains_name_accessor(node: ast.expr) -> bool:
 def _nonboolean_predicate_error(
     dtype: DataType | None, op: str = "filter", noun: str = "predicate"
 ) -> str | None:
-    """Return a PLY008 message when a filter predicate's / when-condition's
+    """Return a pple-non-boolean-predicate message when a filter predicate's / when-condition's
     dtype is known and not Boolean (issues #28 / #37).
 
     ``None`` (unresolved) and ``Unknown`` dtypes are never flagged — we don't
@@ -1524,7 +1518,7 @@ def _nonboolean_predicate_error(
     if isinstance(inner, (Boolean, Unknown)):
         return None
     return tag(
-        PLY008,
+        NON_BOOLEAN_PREDICATE,
         f"{op}: {noun} has dtype {dtype}, expected Boolean — "
         f"polars only accepts boolean {noun}s "
         f"(use a comparison or `.is_*()` method)",
@@ -1568,7 +1562,7 @@ _NAMESPACE_EXPECTED_DESC: dict[str, str] = {
     "cat": "a Categorical or Enum column",
 }
 
-# Exception polars raises for a wrong receiver dtype — named in the PLY012
+# Exception polars raises for a wrong receiver dtype — named in the pple-wrong-namespace-dtype
 # message. Every namespace raises InvalidOperationError except ``.cat``
 # (probed: SchemaError "expected an Enum or Categorical type").
 _NAMESPACE_RUNTIME_ERROR: dict[str, str] = {
@@ -1869,7 +1863,7 @@ def _flatten_expr_args(args: list[ast.expr]) -> list[ast.expr]:
     ``pl.struct([pl.col("a"), pl.col("b")])``. Expanding top-level
     ``ast.List`` / ``ast.Tuple`` args lets the caller analyze both forms
     uniformly (issue #16). MIXED forms (a list/tuple literal next to other
-    positional args) never reach this helper — they are flagged PLY017 by
+    positional args) never reach this helper — they are flagged pple-list-literal-misuse by
     ``_mixed_list_args`` first (issue #59).
     """
     out: list[ast.expr] = []
@@ -2253,7 +2247,7 @@ def _is_match_all_regex(pattern: str) -> bool:
 
 
 # A selector/regex classification used by the @rowpoly preservation check
-# (PLY043). ``select`` / ``drop`` reductions are sound to leave UNFLAGGED only
+# (pple-rowpoly-not-preserved). ``select`` / ``drop`` reductions are sound to leave UNFLAGGED only
 # when they touch an explicit set of KNOWN column names — an unknown caller
 # extra can never fall on the dropped side. A reduction keyed by a PREDICATE
 # (regex / dtype / name-pattern selector) could match (drop, for ``drop``) or
@@ -2282,7 +2276,7 @@ _PREDICATE_SELECTOR_NAMES = frozenset(
 
 
 def _classify_selector(node: ast.expr) -> _SelectorClass | None:
-    """Classify a single ``select`` / ``drop`` argument for the PLY043 guard.
+    """Classify a single ``select`` / ``drop`` argument for the pple-rowpoly-not-preserved guard.
 
     Frame-independent on purpose: the question is whether the argument's
     SHAPE could touch an unknown caller extra, not which known columns it
@@ -2371,7 +2365,7 @@ def _classify_selector(node: ast.expr) -> _SelectorClass | None:
 
 
 def _classify_exclude_args(args: list[ast.expr]) -> _SelectorClass | None:
-    """Classify the args of an ``exclude`` / ``by_name`` form for PLY043.
+    """Classify the args of an ``exclude`` / ``by_name`` form for pple-rowpoly-not-preserved.
 
     All args are explicit literal column names -> ``"literal"``. Any arg is an
     anchored ``^...$`` regex string, or a nested predicate selector ->
@@ -2411,7 +2405,7 @@ def _classify_exclude_args(args: list[ast.expr]) -> _SelectorClass | None:
 def _reduction_drops_unknown_extras(node: ast.Call, method: Literal["select", "drop"]) -> bool:
     """True when a ``select``/``drop`` call could drop an unknown caller extra.
 
-    The @rowpoly preservation guard (PLY043): a reduction is provably
+    The @rowpoly preservation guard (pple-rowpoly-not-preserved): a reduction is provably
     preserving ONLY when it touches an explicit set of KNOWN column names.
 
     - ``select(<predicate>)`` keeps only the predicate's matches, so any
@@ -2452,7 +2446,7 @@ def _row_var_drop_node(
 ) -> tuple[object, str] | None:
     """The single ``(reducing-call, method)`` to attribute a row-variable drop to.
 
-    Used by the @rowpoly ``drops=`` relaxation: the preservation check (PLY043)
+    Used by the @rowpoly ``drops=`` relaxation: the preservation check (pple-rowpoly-not-preserved)
     compares the body's reduction against the declared ``drops=`` selector, so
     it must know WHICH reduction caused the drop. Returns ``(node, method)`` only
     when THIS ``select`` / ``drop`` is the SOLE reduction — i.e. it reduces and
@@ -2489,7 +2483,7 @@ class FunctionSignature:
     param_row_vars: dict[str, str] = field(default_factory=dict)
     # Declared ``drops=`` restriction of a positional ``@rowpoly("R", drops=...)``
     # (the selector/regex AST node), else None. Names the pattern-class of caller
-    # extras the helper intentionally removes: relaxes the PLY043 preservation
+    # extras the helper intentionally removes: relaxes the pple-rowpoly-not-preserved preservation
     # check for that pattern and is excluded from the threaded caller extras.
     rowpoly_drops: ast.expr | None = None
 
@@ -2511,15 +2505,15 @@ class FunctionInfo:
     inferred_returns: dict[tuple, FrameType] = field(default_factory=dict)
     # True for a helper resolved from a project-local ``from X import f``
     # import (issue #112). The helper's own file is where its @rowpoly
-    # preservation (PLY043) fires; analyzing ONLY the caller never runs that
+    # preservation (pple-rowpoly-not-preserved) fires; analyzing ONLY the caller never runs that
     # check, so the call site must not trust the @rowpoly marker blindly.
     imported: bool = False
     # For an imported @rowpoly helper, the result of running the preservation
     # check on its (cross-module) def at registration time. ``None`` means it
     # was not checked (not an imported rowpoly helper, or it has no row
     # variable to verify); an EMPTY list means it provably preserves; a
-    # NON-EMPTY list holds the PLY043 strings of the drops found — the call
-    # site must NOT thread such a helper and surfaces PLW014 instead.
+    # NON-EMPTY list holds the pple-rowpoly-not-preserved strings of the drops found — the call
+    # site must NOT thread such a helper and surfaces pplw-rowpoly-not-threaded instead.
     rowpoly_preservation: list[str] | None = None
 
 
@@ -2798,7 +2792,7 @@ def _annotation_declares_frame(
 
 
 def _schema_definition_error(schema_name: str, schema_registry: SchemaRegistry) -> str | None:
-    """PLY041 message for a schema whose definition provably crashes pandera.
+    """pple-broken-schema-annotation message for a schema whose definition provably crashes pandera.
 
     Issue #69: a wrong-arity ``Annotated[pl.<Dtype>, ...]`` field makes
     pandera raise a deferred TypeError the first time the schema is used
@@ -2813,13 +2807,13 @@ def _schema_definition_error(schema_name: str, schema_registry: SchemaRegistry) 
         f"field '{field_name}': {detail}" for field_name, detail in schema.definition_errors.items()
     )
     return tag(
-        PLY041,
+        BROKEN_SCHEMA_ANNOTATION,
         f"schema '{schema_name}' cannot be used at runtime: {details}",
     )
 
 
 def _schema_definition_warning(schema_name: str, schema_registry: SchemaRegistry) -> str | None:
-    """PLW011 message for a schema with unrecognized field annotations.
+    """pplw-unrecognized-annotation message for a schema with unrecognized field annotations.
 
     Issue #77: a field annotation polypolarism cannot translate registers
     as a column of Unknown dtype instead of silently vanishing (which
@@ -2838,7 +2832,7 @@ def _schema_definition_warning(schema_name: str, schema_registry: SchemaRegistry
         for field_name, detail in schema.definition_warnings.items()
     )
     return tag(
-        PLW011,
+        UNRECOGNIZED_ANNOTATION,
         f"schema '{schema_name}' has unrecognized field annotations: {details} — "
         f"each column is treated as Unknown dtype (pandera raises TypeError at "
         f"first use if the annotation does not resolve to a dtype at runtime)",
@@ -2860,12 +2854,12 @@ class ExpressionAnalyzer(ast.NodeVisitor):
     ):
         self.current_frame = current_frame
         self.errors: list[str] = []
-        # Pandera schema registry, passed in by the body analyzer so a PLY042
+        # Pandera schema registry, passed in by the body analyzer so a pple-undeclared-column
         # island column-not-found can build its quick-fix object (Batch B,
         # Request 2). ``None`` when standalone — the fix is simply omitted.
         self.schema_registry = schema_registry
         # Schema name -> (param_name, annotation Span) for the "relax the
-        # param" PLY042 helper (Batch B, Request 4). ``None`` when standalone.
+        # param" pple-undeclared-column helper (Batch B, Request 4). ``None`` when standalone.
         self.param_relax_info: dict[str, tuple[str, Span]] = param_relax_info or {}
         # Shared advisory channel (passed in by the body analyzer so warnings
         # bubble up to FunctionAnalysis). New list when used standalone.
@@ -3091,7 +3085,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
     # - everything else (floats incl. Float16, Utf8, Binary, Date,
     #   Datetime, Time, Duration, Decimal, Categorical, Enum, List, Array,
     #   Struct, Null) raises InvalidOperationError
-    #   ("dtype `X` not supported in 'not' operation") -> PLY016 and the
+    #   ("dtype `X` not supported in 'not' operation") -> pple-non-numeric-operand and the
     #   output degrades to Unknown.
     _NOT_VALID_RECEIVERS = (
         Boolean,
@@ -3145,7 +3139,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
     # ---- cumulative reducers (issue #49) ------------------------------------
     # Probed (polars 1.41.2) receiver-dtype matrix for the cum_* family.
     # Receivers listed here raise InvalidOperationError at runtime
-    # ("'cum_sum' operation not supported for dtype 'str'") -> PLY016 and
+    # ("'cum_sum' operation not supported for dtype 'str'") -> pple-non-numeric-operand and
     # the output degrades to Unknown. ``cum_count`` is deliberately absent:
     # it returns UInt32 for EVERY receiver dtype (probed incl. String /
     # List / Struct / Null) and keeps its own branch. The Float64-returning
@@ -3187,7 +3181,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
     # ---- dtype-carrying rolling reducers (issue #57; deferred from #49) -----
     # Probed (polars 1.41.2) receiver-dtype matrix for rolling_sum/min/max.
     # Receivers listed here raise InvalidOperationError at runtime ->
-    # PLY016 and the output degrades to Unknown. rolling_min/max accept
+    # pple-non-numeric-operand and the output degrades to Unknown. rolling_min/max accept
     # Boolean and the temporals (dtype-preserving); rolling_sum rejects
     # them all except Boolean (-> UInt32).
     _ROLLING_INVALID_RECEIVERS: dict[str, tuple[type[DataType], ...]] = {
@@ -3218,7 +3212,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
     # Probed (polars 1.41.2) receiver-dtype matrix for the numeric-ish
     # members of ``_DTYPE_PRESERVING_METHODS``. Receivers listed here raise
     # InvalidOperationError at runtime (e.g. "rounding ('half_to_even') can
-    # only be used on numeric types") -> PLY016 and the output degrades to
+    # only be used on numeric types") -> pple-non-numeric-operand and the output degrades to
     # Unknown. Deliberately unlisted:
     # - round/floor/ceil on Decimal(p, s) -> Decimal(p, s) (preserving;
     #   floor/ceil are NOT float-only and are int-identity);
@@ -3291,7 +3285,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
 
     # Probed matrix for ``_FLOAT_RETURN_METHODS`` (issue #62). The error
     # class varies per cell (InvalidOperationError / ComputeError / rust
-    # panic) -> PLY016 and the output degrades to Unknown. Deliberately
+    # panic) -> pple-non-numeric-operand and the output degrades to Unknown. Deliberately
     # unlisted: String, Boolean, the temporals, Decimal and Null are
     # ACCEPTED by every member except entropy (polars casts them into
     # Float64 non-strictly; String yields all-null Float64) and must stay
@@ -3327,7 +3321,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
     # (InvalidOperationError / ComputeError: "casting from X to Float64
     # not supported") — except Struct, which ABORTS the process in rust
     # (probed SIGSEGV, not a catchable error) — so the cell is flagged all
-    # the same -> PLY016 and the output degrades to Unknown.
+    # the same -> pple-non-numeric-operand and the output degrades to Unknown.
     _PCT_CHANGE_INVALID_RECEIVERS = (Binary, Categorical, Enum, ListT, Array, Struct)
 
     # ---- over(mapping_strategy="join") cardinality classification ----------
@@ -3436,7 +3430,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
 
         # Comparison expressions (==, !=, <, <=, >, >=) -> Boolean.
         # A Nullable operand makes the result Nullable (``null > 0`` is null).
-        # Probed-invalid dtype pairs flag PLY009 (issue #33) — each adjacent
+        # Probed-invalid dtype pairs flag pple-incompatible-operands (issue #33) — each adjacent
         # pair of a chained comparison is checked. The result stays Boolean:
         # the dtype is not in question, the error is the signal.
         if isinstance(inner_node, ast.Compare):
@@ -3454,7 +3448,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 if _comparison_invalid(left_inner, right_inner):
                     self.errors.append(
                         tag(
-                            PLY009,
+                            INCOMPATIBLE_OPERANDS,
                             f"comparison '{left_inner} {op_sym} {right_inner}' is not "
                             f"supported — polars rejects comparing these dtypes at "
                             f"runtime; cast an operand first",
@@ -3493,7 +3487,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         # Arithmetic binary operations like pl.col("x") * 2. Both operands
         # are resolved (keeping the missing-column error side-effects) and
         # classified three ways (issue #30): allowed -> result dtype,
-        # known-invalid -> PLY009 + Unknown output, otherwise the legacy
+        # known-invalid -> pple-incompatible-operands + Unknown output, otherwise the legacy
         # promote-or-keep-left fallback.
         if isinstance(inner_node, ast.BinOp):
             left_name, left_type = self.analyze_select_expr(inner_node.left)
@@ -3517,7 +3511,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                         op_sym = _OP_SYMBOLS.get(type(inner_node.op), "?")
                         self.errors.append(
                             tag(
-                                PLY009,
+                                INCOMPATIBLE_OPERANDS,
                                 f"arithmetic '{left_inner} {op_sym} {right_inner}' is not "
                                 f"supported — polars raises InvalidOperationError at "
                                 f"runtime; cast an operand first",
@@ -3620,7 +3614,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         if name in _MULTI_EXPR_HELPERS and _mixed_list_args(node.args):
             self.errors.append(
                 tag(
-                    PLY017,
+                    LIST_LITERAL_MISUSE,
                     f"pl.{name}: a list literal mixed with other positional "
                     f"arguments is not flattened — polars raises TypeError "
                     f"(or misparses the list as a nested literal) at runtime; "
@@ -3669,7 +3663,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         # dtype is the declared one; the implicit list-aggregation wrap in
         # agg context (and its ``returns_scalar=True`` exemption) is applied
         # by ``analyze_agg_expr``. Without it, polypolarism falls back to
-        # the first input column's dtype and warns (PLW001), mirroring
+        # the first input column's dtype and warns (pplw-missing-return-dtype), mirroring
         # map_elements / map_batches.
         if name == "map_groups":
             exprs_node: ast.expr | None = node.args[0] if node.args else None
@@ -3697,7 +3691,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                     )
             self.warnings.append(
                 tag(
-                    PLW001,
+                    MISSING_RETURN_DTYPE,
                     "map_groups: no `return_dtype=` was supplied, so polypolarism "
                     "falls back to the first input column's dtype. Add e.g. "
                     "`return_dtype=pl.Float64` to make the result type precise.",
@@ -3726,7 +3720,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                         context="agg" if self._in_agg_chain else "select",
                     )
                 except GroupByTypeError as e:
-                    self.errors.append(tag(PLY011, str(e)))
+                    self.errors.append(tag(GROUPBY, str(e)))
                     return col, None  # type: ignore[return-value]
                 if self._in_agg_chain and grouped_agg_always_null(agg_func, col_type):
                     self.warnings.append(_all_null_agg_warning(agg_func, col_type))
@@ -3816,7 +3810,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         polars treats a bare string in expression-input position as a column
         reference (``pl.coalesce(["a", "b"])`` ≡
         ``pl.coalesce(pl.col("a"), pl.col("b"))``), so strings resolve via
-        the frame — with PLY001 on closed frames, mirroring the ``pl.col``
+        the frame — with pple-column-not-found on closed frames, mirroring the ``pl.col``
         path. Everything else goes through ``analyze_select_expr``.
         """
         s = _str_constant(node)
@@ -3836,7 +3830,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         """Type-check a ``list.eval`` / ``arr.eval`` body (issue #44 / #53).
 
         Runs the body through a child analyzer with ``pl.element()`` bound
-        to the container's element dtype; the child's errors (e.g. PLY009
+        to the container's element dtype; the child's errors (e.g. pple-incompatible-operands
         from Int+String arithmetic) bubble up. Returns the body dtype, or
         ``None`` when it cannot be resolved.
         """
@@ -3860,7 +3854,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
     ) -> DataType | None:
         """Verdict for a ``list.<agg>()`` / ``arr.<agg>()`` reduction (issue #55).
 
-        Probed-invalid cells flag PLY016 — the runtime error class varies
+        Probed-invalid cells flag pple-non-numeric-operand — the runtime error class varies
         per cell (InvalidOperationError / ComputeError / rust panic) — and
         degrade the output to Unknown. Unclaimed cells return ``None``
         (silent Unknown downstream). The element's own Nullable wrapper
@@ -3873,7 +3867,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         if isinstance(verdict, ContainerAggInvalid):
             self.errors.append(
                 tag(
-                    PLY016,
+                    NON_NUMERIC_OPERAND,
                     f"{namespace}.{method}: operation not supported for dtype "
                     f"{receiver_inner} — polars raises an error at runtime",
                 )
@@ -3949,7 +3943,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 # ``list.eval(body)`` runs ``body`` element-wise with
                 # ``pl.element()`` bound to the list's inner dtype
                 # (issue #44). A child analyzer type-checks the body —
-                # its errors (e.g. PLY009 from Int+String arithmetic)
+                # its errors (e.g. pple-incompatible-operands from Int+String arithmetic)
                 # bubble up — and the result is List(body dtype);
                 # an unresolvable body degrades to List(Unknown).
                 body_dtype = self._eval_body_dtype(receiver_inner.inner, call_node)
@@ -4030,7 +4024,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                         else:
                             self.errors.append(
                                 tag(
-                                    PLY001,
+                                    COLUMN_NOT_FOUND,
                                     f"struct.field: '{field_name}' not found in "
                                     f"{receiver_inner}. Available fields: "
                                     f"{list(receiver_inner.fields.keys())}",
@@ -4074,7 +4068,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         ``_NOT_VALID_RECEIVERS``) is dtype-preserving — the receiver
         instance is returned so Nullable wrappers (and any future
         parameters) flow through. Invalid receivers are a guaranteed
-        runtime InvalidOperationError -> PLY016 and the output degrades
+        runtime InvalidOperationError -> pple-non-numeric-operand and the output degrades
         to Unknown; Unknown / unresolved receivers stay silent.
         """
         if receiver_type is None:
@@ -4086,7 +4080,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             return receiver_type
         self.errors.append(
             tag(
-                PLY016,
+                NON_NUMERIC_OPERAND,
                 f"{op_desc}: operation not supported for dtype {inner} — "
                 f"polars raises InvalidOperationError at runtime",
             )
@@ -4105,7 +4099,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         """Validate one ``over`` partition / order key (issue #32).
 
         A string constant is a column name — checked through ``infer_col``
-        so a missing column is PLY001 on a closed frame and silently
+        so a missing column is pple-column-not-found on a closed frame and silently
         ``Unknown`` on an open one. List/tuple literals are checked
         elementwise. Anything else (``pl.col(...)`` chains etc.) is walked
         through the expression analyzer for its error side effects; the
@@ -4286,7 +4280,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
 
         Probed (polars 1.41.2):
           - a non-Boolean condition raises ``SchemaError: expected Boolean``
-            -> PLY008, same gap class as ``filter`` (#28). Bare strings in
+            -> pple-non-boolean-predicate, same gap class as ``filter`` (#28). Bare strings in
             ``when(...)`` are column references; kwargs are equality
             constraints (boolean by construction).
           - the result dtype is the common supertype of every then-value
@@ -4321,7 +4315,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
 
         # Branches: fold the supertype over all then-values + otherwise
         # (issue #40). Every branch is walked even after one fails to
-        # resolve, so missing-column references keep surfacing PLY001.
+        # resolve, so missing-column references keep surfacing pple-column-not-found.
         branch_nodes = list(then_nodes)
         if otherwise_node is not None:
             branch_nodes.append(otherwise_node)
@@ -4451,7 +4445,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             unknowable = "column name" if method == "map" else "struct field names"
             self.warnings.append(
                 tag(
-                    PLW004,
+                    UNTYPED_CALLABLE,
                     f"name.{method}: the callable cannot be evaluated statically, "
                     f"so the output {unknowable} cannot be inferred. Rename with "
                     f"explicit `.alias(...)` / literal prefix-suffix methods to "
@@ -4466,7 +4460,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         return None, inner_type
 
     def _suggest_dtype_for_ply042(self, errors_before: int, target: DataType | None) -> None:
-        """Attach a ``suggested_dtype`` to a PLY042 fix raised since
+        """Attach a ``suggested_dtype`` to a pple-undeclared-column fix raised since
         ``errors_before`` (issue #114).
 
         ``target`` is a STATICALLY-known dtype the column reference is
@@ -4474,7 +4468,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         editor can declare on the schema. Renders it through the shared
         :func:`render_dtype_annotation`; an ``Unknown`` / otherwise
         unrenderable target leaves the fix untouched (no guessed dtype). Only
-        a PLY042 :class:`TaggedError` that already carries a ``fix`` object is
+        a pple-undeclared-column :class:`TaggedError` that already carries a ``fix`` object is
         enriched (an unknown schema file means there was no fix to complete).
         """
         if target is None:
@@ -4486,7 +4480,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             fix = getattr(err, "fix", None)
             if (
                 isinstance(err, str)
-                and err.startswith(f"[{PLY042}]")
+                and err.startswith(f"[{UNDECLARED_COLUMN}]")
                 and isinstance(fix, dict)
                 and "suggested_dtype" not in fix
             ):
@@ -4536,7 +4530,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                     runtime_error = _NAMESPACE_RUNTIME_ERROR.get(ns, "InvalidOperationError")
                     self.errors.append(
                         tag(
-                            PLY012,
+                            WRONG_NAMESPACE_DTYPE,
                             f"`.{ns}` accessor requires "
                             f"{_NAMESPACE_EXPECTED_DESC[ns]}, but {subject} is "
                             f"{col_type} — polars raises {runtime_error} "
@@ -4567,13 +4561,13 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             if name_result is not None:
                 return name_result
 
-        # Warning watermark: the ``cast`` branch below retracts a PLW007 the
+        # Warning watermark: the ``cast`` branch below retracts a pplw-unmodeled-method the
         # receiver analysis emits when the cast repairs the degradation.
         warnings_before_receiver = len(self.warnings)
         # Error watermark: a ``pl.col("x").cast(T)`` on an undeclared-column
-        # PLY042 island raises the PLY042 inside the receiver lookup (before
+        # pple-undeclared-column island raises the pple-undeclared-column inside the receiver lookup (before
         # the cast is seen). The explicit cast STATICALLY constrains the
-        # column to ``T``, so enrich that just-emitted PLY042 fix with a
+        # column to ``T``, so enrich that just-emitted pple-undeclared-column fix with a
         # ``suggested_dtype`` so the editor can write a complete field (issue
         # #114). Only the receiver's NEW errors are considered.
         errors_before_receiver = len(self.errors)
@@ -4582,7 +4576,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         if receiver_type is None and receiver_name is None:
             # Receiver wasn't recognised. Before bailing, if this is a
             # ``.cast(T)`` whose target is statically known, attach the
-            # suggested dtype to a PLY042 fix the receiver lookup raised
+            # suggested dtype to a pple-undeclared-column fix the receiver lookup raised
             # (issue #114).
             if method == "cast" and node.args:
                 self._suggest_dtype_for_ply042(
@@ -4606,7 +4600,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 if _is_in_invalid(receiver_inner, element_inner):
                     self.errors.append(
                         tag(
-                            PLY009,
+                            INCOMPATIBLE_OPERANDS,
                             f"is_in: cannot check for List({element_inner}) values in "
                             f"{receiver_inner} data — polars raises "
                             f"InvalidOperationError at runtime; cast an operand first",
@@ -4634,9 +4628,9 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         # ``Expr.filter(...)`` is row-subsetting: the dtype is preserved
         # (Nullable wrapper included — nulls may survive the predicate).
         # Predicate sub-expressions are validated so missing-column refs
-        # surface PLY001 (issue #23: conditional aggregation chains like
+        # surface pple-column-not-found (issue #23: conditional aggregation chains like
         # ``pl.col("v").filter(pred).sum()``) and a known non-Boolean
-        # predicate dtype surfaces PLY008 (issue #28). A bare string is a
+        # predicate dtype surfaces pple-non-boolean-predicate (issue #28). A bare string is a
         # column reference, not a Utf8 literal. Kwargs are equality
         # constraints — boolean by construction, no dtype flag.
         if method == "filter":
@@ -4669,7 +4663,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             ):
                 self.errors.append(
                     tag(
-                        PLY016,
+                        NON_NUMERIC_OPERAND,
                         f"{method}: operation not supported for dtype {inner} — "
                         f"polars raises an error at runtime",
                     )
@@ -4710,7 +4704,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 if over_agg is not None and grouped_agg_panics(over_agg, receiver_type):
                     self.errors.append(
                         tag(
-                            PLY011,
+                            GROUPBY,
                             f"over: {receiver.func.attr} on {receiver_type} panics in "
                             f"rust at runtime in a grouped (window) context — probed "
                             f"(polars 1.41.2). The same reduction is valid in a plain "
@@ -4740,7 +4734,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         # Dtype-preserving methods. The numeric-only elementwise members
         # are strictly typed (issue #62) — see the probed matrix on
         # ``_ELEMENTWISE_INVALID_RECEIVERS``. An invalid receiver dtype is
-        # a guaranteed runtime InvalidOperationError -> PLY016 and the
+        # a guaranteed runtime InvalidOperationError -> pple-non-numeric-operand and the
         # output degrades to Unknown; Unknown receivers stay silent.
         if method in self._DTYPE_PRESERVING_METHODS and receiver_type is not None:
             invalid = self._ELEMENTWISE_INVALID_RECEIVERS.get(method)
@@ -4751,7 +4745,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 if isinstance(inner, invalid):
                     self.errors.append(
                         tag(
-                            PLY016,
+                            NON_NUMERIC_OPERAND,
                             f"{method}: operation not supported for dtype {inner} — "
                             f"polars raises InvalidOperationError at runtime",
                         )
@@ -4761,7 +4755,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
 
         # Cumulative reducers are strictly typed (issue #49) — see the
         # probed matrix on ``_CUM_INVALID_RECEIVERS``. An invalid receiver
-        # dtype is a guaranteed runtime InvalidOperationError -> PLY016 and
+        # dtype is a guaranteed runtime InvalidOperationError -> pple-non-numeric-operand and
         # the output degrades to Unknown; Unknown receivers stay silent.
         if method in self._CUM_INVALID_RECEIVERS and receiver_type is not None:
             inner = receiver_type.inner if isinstance(receiver_type, Nullable) else receiver_type
@@ -4770,7 +4764,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             if isinstance(inner, self._CUM_INVALID_RECEIVERS[method]):
                 self.errors.append(
                     tag(
-                        PLY016,
+                        NON_NUMERIC_OPERAND,
                         f"{method}: operation not supported for dtype {inner} — "
                         f"polars raises InvalidOperationError at runtime",
                     )
@@ -4797,7 +4791,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         # the shift-like family below). Probed matrix on
         # ``_PCT_CHANGE_INVALID_RECEIVERS``: float receivers keep their
         # width, every other accepted receiver yields Float64, invalid
-        # receivers flag PLY016. The head slot is always null and there is
+        # receivers flag pple-non-numeric-operand. The head slot is always null and there is
         # no fill_value parameter, so the result is always Nullable.
         if method == "pct_change" and receiver_type is not None:
             inner = receiver_type.inner if isinstance(receiver_type, Nullable) else receiver_type
@@ -4806,7 +4800,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             if isinstance(inner, self._PCT_CHANGE_INVALID_RECEIVERS):
                 self.errors.append(
                     tag(
-                        PLY016,
+                        NON_NUMERIC_OPERAND,
                         f"pct_change: operation not supported for dtype {inner} — "
                         f"polars raises an error at runtime",
                     )
@@ -4881,7 +4875,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
 
         # Dtype-carrying rolling reducers (rolling_sum/min/max): strictly
         # typed receivers — the probed matrix on
-        # ``_ROLLING_INVALID_RECEIVERS`` flags PLY016 and degrades the
+        # ``_ROLLING_INVALID_RECEIVERS`` flags pple-non-numeric-operand and degrades the
         # output to Unknown (issue #57; the family was deferred in #49).
         # Valid cells follow the same windowed-nullability rule as the
         # Float64 family above; rolling_sum upcasts narrow ints to Int64
@@ -4894,7 +4888,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             if isinstance(inner, self._ROLLING_INVALID_RECEIVERS[method]):
                 self.errors.append(
                     tag(
-                        PLY016,
+                        NON_NUMERIC_OPERAND,
                         f"{method}: operation not supported for dtype {inner} — "
                         f"polars raises InvalidOperationError at runtime",
                     )
@@ -4936,7 +4930,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         # ``pl.col("x").map_elements(fn, return_dtype=pl.Float64)`` /
         # ``map_batches(fn, return_dtype=...)``. The return type is what the
         # user declared; without ``return_dtype`` it's uninferable, so we
-        # fall back to the receiver dtype and emit ``PLW001`` so the user
+        # fall back to the receiver dtype and emit ``pplw-missing-return-dtype`` so the user
         # knows to add the kwarg.
         if method in ("map_elements", "map_batches"):
             for kw in node.keywords:
@@ -4948,7 +4942,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                         return receiver_name, declared
             self.warnings.append(
                 tag(
-                    PLW001,
+                    MISSING_RETURN_DTYPE,
                     f"{method}: no `return_dtype=` was supplied, so polypolarism "
                     f"falls back to the receiver dtype. Add e.g. "
                     f"`return_dtype=pl.Float64` to make the result type precise.",
@@ -4972,7 +4966,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 # Unknown callable in expr.pipe — uninferable.
                 self.warnings.append(
                     tag(
-                        PLW002,
+                        UNRESOLVED_PIPE,
                         f"expr.pipe: callable '{callable_arg.id}' is not annotated "
                         f"or not in this module. The expression's return dtype "
                         f"cannot be inferred precisely.",
@@ -4982,7 +4976,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             if isinstance(callable_arg, ast.Lambda):
                 self.warnings.append(
                     tag(
-                        PLW004,
+                        UNTYPED_CALLABLE,
                         "expr.pipe: a lambda was passed; promote it to a top-level "
                         "function with a typed signature so polypolarism can infer "
                         "the return dtype.",
@@ -5019,7 +5013,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                     context="agg" if self._in_agg_chain else "select",
                 )
             except GroupByTypeError as e:
-                self.errors.append(tag(PLY011, str(e)))
+                self.errors.append(tag(GROUPBY, str(e)))
                 return receiver_name, receiver_type
             if self._in_agg_chain and grouped_agg_always_null(agg_map[method], receiver_type):
                 self.warnings.append(_all_null_agg_warning(agg_map[method], receiver_type))
@@ -5040,7 +5034,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             return receiver_name, result_type
 
         # ``cast(pl.<dtype>)`` chained directly on column. A structurally
-        # impossible source -> target pair flags PLY013 (issue #34) and the
+        # impossible source -> target pair flags pple-invalid-cast (issue #34) and the
         # output degrades to Unknown — fabricating the target dtype would
         # hide declared-type mismatches downstream. ``strict=False`` exempts
         # nothing: the probed-invalid pairs fail in both modes.
@@ -5053,7 +5047,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 if _cast_invalid(receiver_inner, target):
                     self.errors.append(
                         tag(
-                            PLY013,
+                            INVALID_CAST,
                             f"cast: {receiver_inner} cannot be cast to {target} — "
                             f"polars raises InvalidOperationError even with "
                             f"strict=False",
@@ -5064,12 +5058,12 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             if target is not None:
                 # Receiver dtype was uninferable (e.g. ``.interpolate()``)
                 # but the explicit cast pins the result dtype. The cast is
-                # exactly the repair PLW007 asks for, so retract any PLW007
+                # exactly the repair pplw-unmodeled-method asks for, so retract any pplw-unmodeled-method
                 # the receiver chain just emitted (backlog B-4).
                 self.warnings[warnings_before_receiver:] = [
                     w
                     for w in self.warnings[warnings_before_receiver:]
-                    if not w.startswith(f"[{PLW007}]")
+                    if not w.startswith(f"[{UNMODELED_METHOD}]")
                 ]
                 return receiver_name, target
 
@@ -5307,8 +5301,8 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         self.input_types = input_types
         self.errors = errors
         # Schema name -> (param_name, annotation Span) for the "relax the
-        # param" PLY042 helper (Batch B, Request 4). Only carries schemas
-        # bound to exactly one frame-typed parameter, so a PLY042 on a frame
+        # param" pple-undeclared-column helper (Batch B, Request 4). Only carries schemas
+        # bound to exactly one frame-typed parameter, so a pple-undeclared-column on a frame
         # from that schema can name the parameter and its annotation range.
         # Empty for nested / probe analyses — the helper fields are then
         # simply omitted.
@@ -5316,14 +5310,14 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         # Inference trace sink (``--verbose``). ``None`` disables
         # collection entirely so the default path pays no rendering cost.
         self.trace = trace
-        # Schema names already flagged PLY041 for this function (issue #69).
+        # Schema names already flagged pple-broken-schema-annotation for this function (issue #69).
         # Shared with ``analyze_function`` (signature sites) so a broken
         # schema is reported once per function however many annotation /
         # validate sites reference it.
         self._reported_broken_schemas: set[str] = (
             reported_broken_schemas if reported_broken_schemas is not None else set()
         )
-        # Same dedup contract for PLW011 (issue #77): schemas with
+        # Same dedup contract for pplw-unrecognized-annotation (issue #77): schemas with
         # unrecognized field annotations, warned once per function.
         self._reported_degraded_schemas: set[str] = (
             reported_degraded_schemas if reported_degraded_schemas is not None else set()
@@ -5371,20 +5365,20 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         # top level. We toggle this off when descending into if/for/while/try.
         self._narrowing_enabled = True
         # Source positions (lineno, col_offset, method) that already got the
-        # frame-level PLW007 — some call paths analyze the same node twice
+        # frame-level pplw-unmodeled-method — some call paths analyze the same node twice
         # (``.group_by(...).agg(...)`` infers the grouped receiver both for
         # its laziness and inside ``_infer_agg_call``), and the warning must
         # fire once per source call, not once per analysis.
         self._warned_frame_calls: set[tuple[int, int, str]] = set()
 
     def _note_schema_use(self, schema_name: str) -> None:
-        """Flag PLY041 when a body site references a runtime-broken schema.
+        """Flag pple-broken-schema-annotation when a body site references a runtime-broken schema.
 
         Issue #69: ``x: DataFrame[Broken] = ...`` and ``Broken.validate(df)``
         crash at runtime even when the function signature is healthy. Once
         per schema per function (shared dedup set with the signature sites).
 
-        Issue #77: the same body sites surface PLW011 when the schema has
+        Issue #77: the same body sites surface pplw-unrecognized-annotation when the schema has
         fields whose annotation degraded to Unknown dtype.
         """
         if schema_name not in self._reported_broken_schemas:
@@ -5604,7 +5598,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 )
 
     def _note_frame_cast(self, raw_value: ast.expr, inner_types: list[FrameType | None]) -> None:
-        """Emit PLW013 when ``typing.cast(DataFrame[Schema], value)`` is used
+        """Emit pplw-ignored-cast when ``typing.cast(DataFrame[Schema], value)`` is used
         in a return / assignment position (issue #102).
 
         polypolarism does NOT honor the cast as a schema assertion: it infers
@@ -5634,7 +5628,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         if unverified:
             self.warnings.append(
                 tag(
-                    PLW013,
+                    IGNORED_CAST,
                     f"typing.cast to frame schema '{schema_name}' over an "
                     f"unknown/open frame was accepted as an UNVERIFIED assumption: "
                     f"polypolarism does not honor cast as a schema assertion and "
@@ -5644,10 +5638,10 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         else:
             self.warnings.append(
                 tag(
-                    PLW013,
+                    IGNORED_CAST,
                     f"typing.cast to frame schema '{schema_name}' is not honored as "
                     f"a schema assertion; polypolarism checks the cast argument's "
-                    f"actual inferred schema instead. Use # type: ignore[PLY040] to "
+                    f"actual inferred schema instead. Use # type: ignore[pple-return-type] to "
                     f"suppress a resulting mismatch if the cast is intentional.",
                 )
             )
@@ -5862,7 +5856,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 if annotated_schema is not None:
                     self._note_schema_use(annotated_schema)
                 self.var_types[var_name] = frame_type
-                # Walk the RHS so expression-level warnings (e.g. PLW005
+                # Walk the RHS so expression-level warnings (e.g. pplw-data-dependent-schema
                 # from pivot) and column-resolution errors surface, and
                 # check the annotation against the inferred frame
                 # (ADR-0005). The annotation wins for the variable's
@@ -5908,9 +5902,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
 
         - ``declared <: inferred`` holds — a pure *narrowing assertion*
           (non-null over nullable, required over optional): allowed,
-          surfaced as PLW008 with the runtime-backed upgrade.
+          surfaced as pplw-unbacked-narrowing with the runtime-backed upgrade.
         - neither direction holds (unrelated dtype, provably-absent
-          column, strict extras, eager/lazy mismatch): PLY033 error — the
+          column, strict extras, eager/lazy mismatch): pple-annotation-conflict error — the
           annotation re-interprets the frame as something it provably is
           not.
         """
@@ -5987,7 +5981,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         if contradictions:
             self.errors.append(
                 tag(
-                    PLY033,
+                    ANNOTATION_CONFLICT,
                     f"annotation `{ast.unparse(annotation)}` re-interprets the "
                     "inferred frame as an unrelated type: "
                     + "; ".join(contradictions)
@@ -5997,7 +5991,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         if narrowings:
             self.warnings.append(
                 tag(
-                    PLW008,
+                    UNBACKED_NARROWING,
                     f"annotation `{ast.unparse(annotation)}` narrows the "
                     "inferred schema without runtime backing: "
                     + "; ".join(narrowings)
@@ -6205,7 +6199,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             # df.pipe(callable) — resolve in this order:
             #   1) ``Schema.validate``                      → schema's FrameType
             #   2) a typed/untyped helper in the registry   → its return type
-            #   3) anything else                            → identity, with a PLW002
+            #   3) anything else                            → identity, with a pplw-unresolved-pipe
             if method_name == "pipe":
                 receiver_type = self._infer_expr_type(receiver)
                 piped = self._infer_pipe_call(node, receiver_type)
@@ -6220,7 +6214,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 if receiver_type is not None and not receiver_type.is_lazy:
                     self.errors.append(
                         tag(
-                            PLY031,
+                            LAZY_ONLY_METHOD,
                             f"`.{method_name}()` is only available on LazyFrame, "
                             f"but the receiver is a DataFrame. Drop the call — "
                             f"it's already eager.",
@@ -6242,7 +6236,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             # ``group_by(...).map_groups(fn)`` (issue #87): the output
             # schema depends on the group function's body — statically
             # unknowable, same family as pivot/to_dummies — so emit the
-            # PLW005 annotate-the-result guidance instead of dying into the
+            # pplw-data-dependent-schema annotate-the-result guidance instead of dying into the
             # generic "Could not infer return type". The annotated-
             # assignment escape then applies the user's schema through the
             # AnnAssign path. (``GroupBy.apply``, the old alias, no longer
@@ -6257,7 +6251,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 kind = "LazyFrame" if source is not None and source.is_lazy else "DataFrame"
                 self.warnings.append(
                     tag(
-                        PLW005,
+                        DATA_DEPENDENT_SCHEMA,
                         f"group_by(...).map_groups: the output schema depends "
                         f"on the group function's body, so polypolarism cannot "
                         f"infer it. Assign the result to a "
@@ -6352,7 +6346,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     # unknown names (typos, plugin namespaces) silent; the
                     # receiver's laziness picks the probe set so a
                     # wrong-side call (eager-only method on a LazyFrame)
-                    # keeps its precise PLY030/PLY031 without a warning
+                    # keeps its precise pple-eager-only-method/pple-lazy-only-method without a warning
                     # piled on top. Deduped per source call: ``.agg()``
                     # chains analyze the grouped receiver twice (laziness
                     # probe + _infer_agg_call).
@@ -6367,12 +6361,12 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         return None
 
     def _validate_eager_lazy_method(self, method: str, receiver: FrameType, node: ast.Call) -> None:
-        """Surface PLY030 / PLY031 when an eager-only or lazy-only method is
+        """Surface pple-eager-only-method / pple-lazy-only-method when an eager-only or lazy-only method is
         called on the wrong side of the eager / lazy split."""
         if receiver.is_lazy and method in _EAGER_ONLY_METHODS:
             self.errors.append(
                 tag(
-                    PLY030,
+                    EAGER_ONLY_METHOD,
                     f"`.{method}()` is only available on DataFrame, but the "
                     f"receiver is a LazyFrame. Insert `.collect()` before "
                     f"`.{method}()` or work with the eager API throughout.",
@@ -6381,7 +6375,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         elif (not receiver.is_lazy) and method in _LAZY_ONLY_METHODS:
             self.errors.append(
                 tag(
-                    PLY031,
+                    LAZY_ONLY_METHOD,
                     f"`.{method}()` is only available on LazyFrame, but the "
                     f"receiver is a DataFrame. Call `.lazy()` before "
                     f"`.{method}()` or use the eager equivalent.",
@@ -6432,7 +6426,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             # nullable check is VALUE-based — a Nullable-typed column with
             # no actual nulls passes a non-nullable schema, and validating
             # a post-join nullable into a non-null schema is exactly the
-            # narrowing assertion PLW008 prescribes. Compare base dtypes;
+            # narrowing assertion pplw-unbacked-narrowing prescribes. Compare base dtypes;
             # a base conflict (e.g. Int64 into a Utf8 schema, coerce off)
             # stays a proof.
             arg_base = (
@@ -6475,7 +6469,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         if ft is None or not node.args:
             return ft
         # The validation retypes the result to the schema — exactly the
-        # repair PLW007 recommends — so a PLW007 emitted while analyzing the
+        # repair pplw-unmodeled-method recommends — so a pplw-unmodeled-method emitted while analyzing the
         # wrapped argument (``Schema.validate(df.interpolate())``) is
         # retracted: the frame-level analog of the expression-level cast
         # retraction (backlog N-3). A warning fired on an EARLIER statement
@@ -6484,7 +6478,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         warnings_before_arg = len(self.warnings)
         arg_type = self._infer_expr_type(node.args[0])
         self.warnings[warnings_before_arg:] = [
-            w for w in self.warnings[warnings_before_arg:] if not w.startswith(f"[{PLW007}]")
+            w
+            for w in self.warnings[warnings_before_arg:]
+            if not w.startswith(f"[{UNMODELED_METHOD}]")
         ]
         declared = self.schema_registry.to_frame_type(schema_node.id)
         if declared is not None:
@@ -6506,7 +6502,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
           we treat the call like ``my_helper(df, *args, **kwargs)`` and
           delegate to the same inference path used by direct calls.
         - Anything else (``df.pipe(lambda d: ...)`` / ``df.pipe(some_import)``
-          where the callable isn't analysable) → emit ``PLW002`` and return
+          where the callable isn't analysable) → emit ``pplw-unresolved-pipe`` and return
           ``None`` so the caller falls back to identity.
         """
         if not node.args:
@@ -6546,7 +6542,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             # Unknown name — likely an external import. Warn.
             self.warnings.append(
                 tag(
-                    PLW002,
+                    UNRESOLVED_PIPE,
                     f"pipe: callable '{callable_arg.id}' is not annotated or not "
                     f"in this module; treating as identity. To make polypolarism "
                     f"check it, define '{callable_arg.id}' here with a "
@@ -6559,7 +6555,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         if isinstance(callable_arg, ast.Lambda):
             self.warnings.append(
                 tag(
-                    PLW004,
+                    UNTYPED_CALLABLE,
                     "pipe: a lambda was passed as the callable; polypolarism cannot "
                     "infer its return type. Promote the lambda to a top-level "
                     "function with a DataFrame[Schema] return annotation.",
@@ -6585,7 +6581,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             if args_with_frame:
                 self.warnings.append(
                     tag(
-                        PLW003,
+                        UNKNOWN_FUNCTION,
                         f"call to '{func_name}': function isn't defined in this "
                         f"module so polypolarism cannot infer its return type. "
                         f"Define '{func_name}' here with a DataFrame[Schema] "
@@ -6623,7 +6619,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     )
                     self.errors.append(
                         tag(
-                            PLY032,
+                            EAGER_LAZY_MISMATCH,
                             f"Argument '{param_name}' expected {expected_kind}[...] "
                             f"but got {actual_kind}[...]; {fix}.",
                         )
@@ -6673,14 +6669,14 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                                     f"parameter schema is strict"
                                 )
             result = _call_result_frame(sig.return_type, func_name)
-            # Issue #112: an IMPORTED @rowpoly helper's preservation (PLY043)
+            # Issue #112: an IMPORTED @rowpoly helper's preservation (pple-rowpoly-not-preserved)
             # is only checked in its own file. We established it at
             # registration (FunctionInfo.rowpoly_preservation); a non-empty
             # result means the body provably drops the row variable (or its
             # schema didn't resolve cross-module). Threading would then claim
             # caller extras the helper deletes at runtime — a soundness false
             # negative. Refuse to thread (degrade to today's non-rowpoly
-            # result) and surface PLW014 so the caller isn't silent. A
+            # result) and surface pplw-rowpoly-not-threaded so the caller isn't silent. A
             # genuinely-preserving import (empty list) still threads precisely.
             if (
                 func_info.imported
@@ -6689,12 +6685,12 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             ):
                 self.warnings.append(
                     tag(
-                        PLW014,
+                        ROWPOLY_NOT_THREADED,
                         f"call to imported @rowpoly helper '{func_name}': it does not "
                         f"provably preserve its row variable across modules, so its "
                         f"caller extras are NOT threaded (downstream references to "
                         f"those columns are not tracked). Analyze the helper's own "
-                        f"module to see the PLY043 reason and fix the helper.",
+                        f"module to see the pple-rowpoly-not-preserved reason and fix the helper.",
                     )
                 )
                 return result
@@ -6830,7 +6826,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 coalesce=coalesce,
             )
         except JoinError as e:
-            self.errors.append(tag(PLY010, str(e)))
+            self.errors.append(tag(JOIN_KEY, str(e)))
             return None
 
     def _infer_join_asof_call(self, left_type: FrameType, node: ast.Call) -> FrameType | None:
@@ -6871,7 +6867,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 coalesce=on is not None,
             )
         except JoinError as e:
-            self.errors.append(tag(PLY010, str(e)))
+            self.errors.append(tag(JOIN_KEY, str(e)))
             return None
 
     def _infer_agg_call(self, groupby_receiver: ast.expr, node: ast.Call) -> FrameType | None:
@@ -6999,7 +6995,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     result.column_spans[name] = span
             return result
         except GroupByTypeError as e:
-            self.errors.append(tag(PLY011, str(e)))
+            self.errors.append(tag(GROUPBY, str(e)))
             return None
 
     def _resolve_plural_col(self, node: ast.expr) -> list[str] | None:
@@ -7124,7 +7120,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         output_name: str | None = None,
     ) -> str | None:
         """Resolve a bare string column name in ``select`` — equivalent to
-        ``pl.col(name)``. Missing names error on closed frames (PLY001);
+        ``pl.col(name)``. Missing names error on closed frames (pple-column-not-found);
         on an open frame the column may exist among the unknown extras,
         so it is selected as ``Unknown``.
 
@@ -7132,7 +7128,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         form: ``select(x="a")`` selects column ``a`` under the name ``x``.
 
         Returns the output column name actually registered, or ``None``
-        when the name was missing on a closed frame (PLY001 emitted)."""
+        when the name was missing on a closed frame (pple-column-not-found emitted)."""
         spec = input_frame.columns.get(name)
         if spec is not None:
             result_columns[output_name or name] = spec.dtype
@@ -7143,7 +7139,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 # drop/rename — a guaranteed runtime miss.
                 self.errors.append(
                     tag(
-                        PLY001,
+                        COLUMN_NOT_FOUND,
                         f"Column '{name}' not found — it was removed earlier "
                         f"in this chain (drop/rename)",
                     )
@@ -7180,7 +7176,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         if name in seen:
             self.errors.append(
                 tag(
-                    PLY015,
+                    DUPLICATE_COLUMN,
                     f"duplicate output column '{name}' in {call_name} — "
                     f"polars rejects duplicate output names at runtime; "
                     f"rename one with `.alias(...)`",
@@ -7343,7 +7339,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         self._stamp_positional_alias_spans(node, column_spans)
 
         if result_columns or has_opaque_outputs:
-            # @rowpoly preservation (PLY043): a predicate-keyed select keeps
+            # @rowpoly preservation (pple-rowpoly-not-preserved): a predicate-keyed select keeps
             # only the predicate's matches, so a caller extra (modeled by the
             # open ``rest`` OR by a skolem sentinel column) not matching it is
             # dropped — preservation is no longer provable. Sticky: carry a
@@ -7416,7 +7412,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     self._track_output_name(c, seen_outputs, "with_columns")
                 continue
             # Bare string / list-of-strings — equivalent to ``pl.col(name)``,
-            # a re-selection of existing columns. Validate existence (PLY001
+            # a re-selection of existing columns. Validate existence (pple-column-not-found
             # on closed frames) but leave the schema unchanged. Constant-bound
             # names resolve the same way (issue #22); an unknown bare
             # ``ast.Name`` falls through to expression analysis.
@@ -7545,7 +7541,10 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             if name not in result_columns:
                 if input_frame.rest is None:
                     self.errors.append(
-                        tag(PLY002, f"drop: column '{name}' not found{input_frame.origin_note()}")
+                        tag(
+                            COLUMN_NOT_FOUND,
+                            f"drop: column '{name}' not found{input_frame.origin_note()}",
+                        )
                     )
                 elif name in input_frame.absent:
                     # Negative knowledge (issue #78): the column was
@@ -7553,7 +7552,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     # raises ColumnNotFoundError on every execution.
                     self.errors.append(
                         tag(
-                            PLY002,
+                            COLUMN_NOT_FOUND,
                             f"drop: column '{name}' not found — it was removed "
                             f"earlier in this chain (drop/rename)",
                         )
@@ -7567,7 +7566,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         # afterwards — even targets that were never pinned (they may have
         # existed among the extras; either way the name is gone).
         absent = input_frame.absent | set(targets) if input_frame.rest is not None else None
-        # @rowpoly preservation (PLY043): a predicate-keyed drop removes the
+        # @rowpoly preservation (pple-rowpoly-not-preserved): a predicate-keyed drop removes the
         # predicate's matches, so a caller extra (open ``rest`` OR a skolem
         # sentinel) that matches is dropped. ``drop("name")`` removes only
         # named columns (unknown extras survive) and never sets this. Sticky.
@@ -7600,7 +7599,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 continue
             mapping[old] = new
 
-        # Provable duplicate-output detection (reuses PLY015). polars raises
+        # Provable duplicate-output detection (reuses pple-duplicate-column). polars raises
         # DuplicateError at runtime when a rename yields two columns of the
         # same name. Two cases are provable from literal names:
         #   1. two sources mapped to the SAME target;
@@ -7623,7 +7622,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 flagged_dups.add(new)
                 self.errors.append(
                     tag(
-                        PLY015,
+                        DUPLICATE_COLUMN,
                         f"duplicate output column '{new}' in rename — "
                         f"polars rejects duplicate output names at runtime; "
                         f"rename one with a distinct name",
@@ -7642,7 +7641,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                         # provably removed column always raises.
                         self.errors.append(
                             tag(
-                                PLY003,
+                                COLUMN_NOT_FOUND,
                                 f"rename: column '{old}' not found — it was "
                                 f"removed earlier in this chain (drop/rename)",
                             )
@@ -7654,7 +7653,10 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     result_columns.setdefault(new, ColumnSpec(dtype=Unknown()))
                     continue
                 self.errors.append(
-                    tag(PLY003, f"rename: column '{old}' not found{input_frame.origin_note()}")
+                    tag(
+                        COLUMN_NOT_FOUND,
+                        f"rename: column '{old}' not found{input_frame.origin_note()}",
+                    )
                 )
         # Issue #78: a renamed-away old name is provably absent afterwards
         # — unless some other entry renames INTO it (a swap). Rename
@@ -7697,7 +7699,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                         # provably removed column always raises.
                         self.errors.append(
                             tag(
-                                PLY004,
+                                COLUMN_NOT_FOUND,
                                 f"cast: column '{col}' not found — it was removed "
                                 f"earlier in this chain (drop/rename)",
                             )
@@ -7709,7 +7711,10 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     result_columns[col] = ColumnSpec(dtype=target)
                     continue
                 self.errors.append(
-                    tag(PLY004, f"cast: column '{col}' not found{input_frame.origin_note()}")
+                    tag(
+                        COLUMN_NOT_FOUND,
+                        f"cast: column '{col}' not found{input_frame.origin_note()}",
+                    )
                 )
                 continue
             source_inner = spec.dtype.inner if isinstance(spec.dtype, Nullable) else spec.dtype
@@ -7719,7 +7724,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 # ``strict=False`` exempts nothing (probed).
                 self.errors.append(
                     tag(
-                        PLY013,
+                        INVALID_CAST,
                         f"cast: column '{col}' with dtype {source_inner} cannot be "
                         f"cast to {target} — polars raises InvalidOperationError "
                         f"even with strict=False",
@@ -7763,7 +7768,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 if col_name not in input_frame.columns and subset is not None:
                     self.errors.append(
                         tag(
-                            PLY005,
+                            COLUMN_NOT_FOUND,
                             f"drop_nulls: column '{col_name}' not found{input_frame.origin_note()}",
                         )
                     )
@@ -7778,7 +7783,8 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 if s not in input_frame.columns:
                     self.errors.append(
                         tag(
-                            PLY005, f"drop_nulls: column '{s}' not found{input_frame.origin_note()}"
+                            COLUMN_NOT_FOUND,
+                            f"drop_nulls: column '{s}' not found{input_frame.origin_note()}",
                         )
                     )
         return FrameType(
@@ -7821,13 +7827,13 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             if how in ("diagonal", "diagonal_relaxed"):
                 return concat_diagonal(frames)
         except ReshapeError as e:
-            self.errors.append(tag(PLY020, str(e)))
+            self.errors.append(tag(CONCAT_MISMATCH, str(e)))
             return None
         # Unsupported how — treat as vertical with a warning.
         try:
             return concat_vertical(frames)
         except ReshapeError as e:
-            self.errors.append(tag(PLY020, str(e)))
+            self.errors.append(tag(CONCAT_MISMATCH, str(e)))
             return None
 
     def _infer_frame_literal(self, node: ast.Call, lazy: bool) -> FrameType | None:
@@ -7912,7 +7918,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         try:
             return concat_vertical([input_frame, other])
         except ReshapeError as e:
-            self.errors.append(tag(PLY020, str(e)))
+            self.errors.append(tag(CONCAT_MISMATCH, str(e)))
             return None
 
     def _infer_hstack_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
@@ -7924,7 +7930,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         try:
             return concat_horizontal([input_frame, other])
         except ReshapeError as e:
-            self.errors.append(tag(PLY020, str(e)))
+            self.errors.append(tag(CONCAT_MISMATCH, str(e)))
             return None
 
     def _infer_explode_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
@@ -7949,7 +7955,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 if input_frame.rest is not None:
                     result_columns[col] = ColumnSpec(dtype=Unknown())
                     continue
-                self.errors.append(tag(PLY021, f"explode: column '{col}' not found"))
+                self.errors.append(tag(EXPLODE, f"explode: column '{col}' not found"))
                 continue
             inner = spec.dtype
             outer_nullable = isinstance(inner, Nullable)
@@ -7967,7 +7973,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             # Array(Int64, 3) explodes to Int64; issue #53).
             if not isinstance(inner, (ListT, Array)):
                 self.errors.append(
-                    tag(PLY021, f"explode: column '{col}' is {spec.dtype}, not List/Array")
+                    tag(EXPLODE, f"explode: column '{col}' is {spec.dtype}, not List/Array")
                 )
                 continue
             elem_dtype: DataType = inner.inner
@@ -8020,7 +8026,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 value_name=value_name,
             )
         except ReshapeError as e:
-            self.errors.append(tag(PLY022, str(e)))
+            self.errors.append(tag(UNPIVOT, str(e)))
             return None
 
     def _infer_pivot_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
@@ -8028,7 +8034,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
 
         The output schema depends on the *runtime values* of the ``on``
         column, which polypolarism cannot see. Instead of guessing, we emit
-        ``PLW005`` with a copy-pasteable annotation suggestion built from
+        ``pplw-data-dependent-schema`` with a copy-pasteable annotation suggestion built from
         the call site. Users who assign the result to a
         ``DataFrame[Schema]``-annotated variable get the schema applied
         through the existing ``AnnAssign`` path.
@@ -8075,7 +8081,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
 
         self.warnings.append(
             tag(
-                PLW005,
+                DATA_DEPENDENT_SCHEMA,
                 "pivot: output schema depends on the runtime values of the "
                 "`on` column, so polypolarism cannot infer it. Assign the "
                 "result to a `DataFrame[Schema]`-annotated variable to give "
@@ -8090,7 +8096,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         The output columns are one UInt8 indicator per *runtime value* of
         each dummied column (``c`` -> ``c_a``, ``c_b``, ...; probed on
         polars 1.41.2, identical on 1.37.0), which polypolarism cannot
-        see. Same treatment as ``pivot``: emit ``PLW005`` with an
+        see. Same treatment as ``pivot``: emit ``pplw-data-dependent-schema`` with an
         annotation suggestion instead of silently failing inference.
         """
         # ``columns`` is the only positional parameter (probed signature:
@@ -8136,7 +8142,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
 
         self.warnings.append(
             tag(
-                PLW005,
+                DATA_DEPENDENT_SCHEMA,
                 "to_dummies: output column names depend on the runtime "
                 "values of the dummied columns, so polypolarism cannot "
                 "infer the schema. Assign the result to a "
@@ -8172,7 +8178,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         its dtype (Datetime unit included) and stays non-null; ``group_by``
         columns are filled per group and stay non-null; everything else
         gains nulls. Eager-only — ``pl.LazyFrame`` has no ``upsample``
-        (PLY030 is raised by the eager/lazy gate before this runs).
+        (pple-eager-only-method is raised by the eager/lazy gate before this runs).
         """
         # Keys: ``time_column`` (the only positional parameter; probed
         # signature ``upsample(time_column, *, every, group_by=None,
@@ -8213,7 +8219,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         reserves the right to change silently. Instead of the old hard
         "Could not infer return type" we return an OPEN frame (correct
         code passes via the open-frame leniency, visibly) and surface a
-        PLW007 so the degradation is reviewable. The observed schema —
+        pplw-unmodeled-method so the degradation is reviewable. The observed schema —
         left + right columns with ``_right`` suffix on collisions, probed
         identical on polars 1.37.0–1.41.2 — is a candidate for precise
         inference if/when polars stabilizes the API.
@@ -8229,7 +8235,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             self._warned_frame_calls.add(key)
             self.warnings.append(
                 tag(
-                    PLW007,
+                    UNMODELED_METHOD,
                     "`.join_where()` is experimental in polars (its schema "
                     "may change without notice), so polypolarism does not "
                     "track its result schema — downstream checks weaken. "
@@ -8260,7 +8266,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 # On an open frame the column may exist among the unknown
                 # extras — its fields stay unknown, the frame stays open.
                 if input_frame.rest is None:
-                    self.errors.append(tag(PLY021, f"unnest: column '{col}' not found"))
+                    self.errors.append(tag(EXPLODE, f"unnest: column '{col}' not found"))
                 continue
             inner = spec.dtype
             outer_nullable = isinstance(inner, Nullable)
@@ -8275,7 +8281,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 continue
             if not isinstance(inner, Struct):
                 self.errors.append(
-                    tag(PLY021, f"unnest: column '{col}' is {spec.dtype}, not Struct{{...}}")
+                    tag(EXPLODE, f"unnest: column '{col}' is {spec.dtype}, not Struct{{...}}")
                 )
                 continue
             del result_columns[col]
@@ -8295,8 +8301,8 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         """Identity-typed, but validate every predicate (issue #28).
 
         Each positional predicate is walked through the expression analyzer
-        (so missing-column refs keep surfacing PLY001) and its resolved
-        dtype is checked: a known non-Boolean predicate is PLY008. A bare
+        (so missing-column refs keep surfacing pple-column-not-found) and its resolved
+        dtype is checked: a known non-Boolean predicate is pple-non-boolean-predicate. A bare
         string constant (or a constant-bound name) is a column reference,
         not a Utf8 literal. Unresolved / Unknown dtypes are never flagged.
         Kwarg constraints (``filter(a=1)``) are equality comparisons —
@@ -8315,15 +8321,15 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             col_ref = self._const_str(arg)
             if col_ref is not None:
                 # ``filter("flag")`` ≡ ``filter(pl.col("flag"))``: resolve
-                # against the frame — PLY001 on closed frames, Unknown on
+                # against the frame — pple-column-not-found on closed frames, Unknown on
                 # open ones (the column may be among the unseen extras).
                 try:
                     dtype = infer_col(col_ref, input_frame)
                 except ColumnNotFoundError as e:
-                    # Hardcoded PLY001 here (closed-frame filter path);
+                    # Hardcoded pple-column-not-found here (closed-frame filter path);
                     # carry the column structurally without touching the text.
                     expr_analyzer.errors.append(
-                        tagged_error(PLY001, str(e), column=getattr(e, "column", None))
+                        tagged_error(COLUMN_NOT_FOUND, str(e), column=getattr(e, "column", None))
                     )
                     continue
             else:
@@ -8343,8 +8349,8 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         constants, list/tuple-of-string literals, constant-bound names,
         selectors (which resolve against the frame, so they can't name a
         missing column) and ``pl.col(...)`` expressions (walked through the
-        expression analyzer so PLY001 fires). A string key missing from a
-        closed frame is PLY007; open frames stay error-free. The modifier
+        expression analyzer so pple-column-not-found fires). A string key missing from a
+        closed frame is pple-column-not-found; open frames stay error-free. The modifier
         kwargs (``descending=`` / ``nulls_last=`` / ``maintain_order=`` /
         ``multithreaded=``) are ignored.
         """
@@ -8368,13 +8374,16 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             names = [single] if single is not None else self._const_str_list(key_node)
             if names is None:
                 # Expression key (``pl.col(...)`` chains etc.) — walk it for
-                # its PLY001 side effects; anything unrecognised stays silent.
+                # its pple-column-not-found side effects; anything unrecognised stays silent.
                 expr_analyzer.analyze_select_expr(key_node)
                 continue
             for name in names:
                 if name not in input_frame.columns and input_frame.rest is None:
                     self.errors.append(
-                        tag(PLY007, f"sort: column '{name}' not found{input_frame.origin_note()}")
+                        tag(
+                            COLUMN_NOT_FOUND,
+                            f"sort: column '{name}' not found{input_frame.origin_note()}",
+                        )
                     )
         self.errors.extend(expr_analyzer.errors)
         return input_frame
@@ -8386,7 +8395,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         passed positionally or as the ``subset=`` kwarg: a string constant, a
         list/tuple of strings, a constant-bound name, or a selector (which
         resolves against the frame, so it can't name a missing column). A
-        subset column missing from a closed frame is PLY014 — polars raises
+        subset column missing from a closed frame is pple-column-not-found — polars raises
         ColumnNotFoundError at runtime; open frames stay lenient. The
         ``keep=`` / ``maintain_order=`` modifiers are ignored.
         """
@@ -8406,7 +8415,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 continue
             for name in names:
                 if name not in input_frame.columns and input_frame.rest is None:
-                    self.errors.append(tag(PLY014, f"unique: subset column '{name}' not found"))
+                    self.errors.append(
+                        tag(COLUMN_NOT_FOUND, f"unique: subset column '{name}' not found")
+                    )
         return input_frame
 
     def _infer_with_row_index_call(
@@ -8426,7 +8437,9 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         result_columns: dict[str, ColumnSpec] = {name: ColumnSpec(dtype=UInt32())}
         for col_name, spec in input_frame.columns.items():
             if col_name == name:
-                self.errors.append(tag(PLY006, f"with_row_index: column '{name}' already exists"))
+                self.errors.append(
+                    tag(COLUMN_NAME_COLLISION, f"with_row_index: column '{name}' already exists")
+                )
                 continue
             result_columns[col_name] = spec
         return FrameType(
@@ -8557,7 +8570,7 @@ def _rowpoly_drops(node: ast.FunctionDef | ast.AsyncFunctionDef) -> ast.expr | N
     ``drops=`` lets a helper DECLARE that it intentionally removes a
     pattern-class of the caller's extras (a sanitizer stripping every
     ``_internal_*`` column) while preserving everything else. The declared
-    selector relaxes the PLY043 preservation check for exactly that pattern and
+    selector relaxes the pple-rowpoly-not-preserved preservation check for exactly that pattern and
     is excluded from the threaded caller extras at the call site.
 
     Returns the selector/regex AST node when ``drops=`` is a RECOGNISED
@@ -8741,13 +8754,13 @@ def _frame_has_row_skolem(frame: FrameType) -> bool:
     A predicate-keyed reduction over such a frame could drop a DIFFERENT
     arbitrary extra even when this specific sentinel survives the predicate
     (the regex/dtype/name-pattern can't tell one caller extra from another), so
-    its presence — not just the open ``rest`` — is what licenses the PLY043
+    its presence — not just the open ``rest`` — is what licenses the pple-rowpoly-not-preserved
     pattern-drop mark."""
     return any(name.startswith(_ROW_SKOLEM_PREFIX) for name in frame.columns)
 
 
 def _row_var_may_be_dropped(frame: FrameType) -> bool:
-    """Gate for the PLY043 pattern-drop mark: this frame admits a caller extra
+    """Gate for the pple-rowpoly-not-preserved pattern-drop mark: this frame admits a caller extra
     that a predicate reduction could silently drop — either an OPEN ``rest``
     (genuine unknown extras) or a skolemized row-variable sentinel (the probe's
     stand-in for one). Closed frames with no sentinel have an exact pinned set,
@@ -8879,7 +8892,7 @@ def _reduction_within_declared_drop(
 ) -> bool:
     """True when a body reduction provably drops ONLY columns the declared
     ``@rowpoly(..., drops=...)`` selector matches — the precise relaxation of
-    PLY043 (C-14 follow-up).
+    pple-rowpoly-not-preserved (C-14 follow-up).
 
     ``drop_node`` is the ``(select|drop call, method)`` that caused the
     row-variable drop (``None`` when the drop is not attributable to one
@@ -9015,7 +9028,7 @@ def _check_row_preservation(
 
     For every (parameter -> row variable) in ``row_var_by_param``, skolemize
     the parameter by injecting a DISTINCT sentinel column, analyze the body
-    once, and flag PLY043 for any row variable whose sentinel is PROVABLY
+    once, and flag pple-rowpoly-not-preserved for any row variable whose sentinel is PROVABLY
     dropped at a return point (a closed frame lacking it — e.g. an explicit
     ``select`` / ``group_by().agg()``). An open result is not a provable drop,
     so it stays silent (gradual). Distinct sentinels let a join helper confirm
@@ -9113,7 +9126,7 @@ def _check_row_preservation(
                     )
                 errors.append(
                     tag(
-                        PLY043,
+                        ROWPOLY_NOT_PRESERVED,
                         f"@rowpoly: helper does not preserve row variable '{row_var}' "
                         f"(parameter '{param}') — {detail}, or remove '{row_var}' "
                         f"from @rowpoly.",
@@ -9129,7 +9142,7 @@ def _imported_rowpoly_preservation(
     registry: FunctionRegistry,
     schema_registry: SchemaRegistry,
 ) -> list[str] | None:
-    """Establish the PLY043 preservation guarantee for an IMPORTED @rowpoly
+    """Establish the pple-rowpoly-not-preserved preservation guarantee for an IMPORTED @rowpoly
     helper at registration time (issue #112).
 
     A same-module @rowpoly helper's preservation is verified when its own file
@@ -9144,8 +9157,8 @@ def _imported_rowpoly_preservation(
                            call site behaves as before (no gating).
         ``[]``           — provably preserves: thread precisely (no regression
                            to the c318e03 win).
-        non-empty ``[]`` — the PLY043 drop strings: the call site must NOT
-                           thread and surfaces PLW014 instead.
+        non-empty ``[]`` — the pple-rowpoly-not-preserved drop strings: the call site must NOT
+                           thread and surfaces pplw-rowpoly-not-threaded instead.
 
     Soundness: if preservation can't be ESTABLISHED (the helper has a row
     variable but its parameter schemas don't resolve to frame types, so the
@@ -9194,7 +9207,7 @@ def _imported_rowpoly_preservation(
         # trust the marker.
         return [
             tag(
-                PLW014,
+                ROWPOLY_NOT_THREADED,
                 f"@rowpoly: could not verify that imported helper '{func_node.name}' "
                 f"preserves its row variable (its parameter schema did not resolve "
                 f"to a frame type across modules).",
@@ -9237,11 +9250,11 @@ def analyze_function(
     bare_return_head: str | None = None
     unresolved_schemas: list[str] = []
 
-    # Schema names already flagged PLY041 (issue #69): a schema whose
+    # Schema names already flagged pple-broken-schema-annotation (issue #69): a schema whose
     # ``Annotated`` field arity provably crashes pandera is reported once
     # per function, however many annotation sites reference it. Shared with
     # the body analyzer below. ``degraded_schemas_reported`` is the same
-    # dedup contract for PLW011 (issue #77: unrecognized field annotations
+    # dedup contract for pplw-unrecognized-annotation (issue #77: unrecognized field annotations
     # degraded to Unknown-dtype columns).
     broken_schemas_reported: set[str] = set()
     degraded_schemas_reported: set[str] = set()
@@ -9265,7 +9278,7 @@ def analyze_function(
 
     # Extract input parameter types
     # Frame-typed param -> annotation Span (Batch B, Request 4): the
-    # "relax the param" helper location for a PLY042 fix.
+    # "relax the param" helper location for a pple-undeclared-column fix.
     param_annotation_spans: dict[str, Span] = {}
     for arg in func_node.args.args:
         if arg.annotation:
@@ -9374,7 +9387,7 @@ def analyze_function(
                 f"module via `from <module> import {name}`. "
                 f"Stdlib/third-party imports aren't followed."
             )
-        warnings.append(tag(PLW006, hint))
+        warnings.append(tag(UNKNOWN_SCHEMA, hint))
 
     if trace_events is not None:
         for param_name, frame_type in input_types.items():
@@ -9420,7 +9433,7 @@ def analyze_function(
             )
             body_analyzer.errors.append(
                 tag(
-                    PLY032,
+                    EAGER_LAZY_MISMATCH,
                     f"Return type annotated bare pl.{bare_return_head} but inferred "
                     f"{actual_kind}[...]; {fix}.",
                 )
@@ -9674,25 +9687,25 @@ def analyze_source(
     # ``from <module> import f`` is registered under the name it's bound as so
     # a call ``f(...)`` resolves its DataFrame[Schema] return (and threads its
     # @rowpoly row variables) exactly like a same-module helper, instead of
-    # degrading to PLW003 / "could not infer return type". Only ADDS names a
+    # degrading to pplw-unknown-function / "could not infer return type". Only ADDS names a
     # local def hasn't already claimed — a same-module function shadows the
     # import (Python name binding). The schema_registry already carries the
     # imported module's schemas (collect_schemas_with_imports), so the
     # helper's annotation resolves against real dtypes. Stdlib / third-party /
-    # unresolvable imports never reach here, so they stay on the PLW003 path.
+    # unresolvable imports never reach here, so they stay on the pplw-unknown-function path.
     if file_path is not None:
         for bound_name, imported_func in collect_imported_function_defs(tree, file_path).items():
             if bound_name in registry.functions:
                 continue
             imported_sig = _extract_function_signature(imported_func, schema_registry)
             if imported_sig is None:
-                # No frame-typed signature — leave it to the PLW003 path
+                # No frame-typed signature — leave it to the pplw-unknown-function path
                 # rather than registering an untyped node whose body lives in
                 # another file (the body analyzer can only inline same-file
                 # nodes safely).
                 continue
             # Issue #112: threading an imported @rowpoly helper requires the
-            # PLY043 preservation guarantee, which only fires in the helper's
+            # pple-rowpoly-not-preserved preservation guarantee, which only fires in the helper's
             # OWN file. Establish it here, on the imported def, so the call
             # site can refuse to thread a helper that provably drops the row
             # variable (rather than trusting the marker). Memoized once per
@@ -9753,7 +9766,7 @@ def analyze_source(
             untyped_module_funcs.append(func_node)
 
     # Pass 4 (issue #110): out-of-function scopes. The same body analyzer that
-    # flags PLY001 / dtype misuse inside typed functions is run over additional
+    # flags pple-column-not-found / dtype misuse inside typed functions is run over additional
     # scopes, seeded ONLY from provably-known frames (a typed same-module call's
     # closed return, ``Schema.validate(...)``, or a ``pl.DataFrame`` literal).
     # No new diagnostic codes — soundness comes for free from the analyzer:
