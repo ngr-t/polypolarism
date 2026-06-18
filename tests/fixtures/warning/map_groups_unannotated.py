@@ -1,4 +1,4 @@
-"""group_by(...).map_groups emits PLW005 (issue #87).
+"""group_by(...).map_groups emits pplw-data-dependent-schema (issue #87).
 
 The output schema depends on the group function's body — statically
 unknowable, same family as pivot/to_dummies — so instead of the generic

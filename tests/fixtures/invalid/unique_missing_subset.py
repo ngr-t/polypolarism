@@ -1,4 +1,4 @@
-"""unique subset column doesn't exist (issue #35, PLY014)."""
+"""unique subset column doesn't exist (issue #35, pple-column-not-found)."""
 
 import pandera.polars as pa
 from pandera.typing.polars import DataFrame

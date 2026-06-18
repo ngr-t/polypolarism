@@ -2,7 +2,7 @@
 
 Probed on polars 1.41.2: ``pl.col("a").bin.encode("hex")`` with
 ``a: Int64`` raises ``SchemaError: invalid series dtype: expected
-`Binary`, got `i64``` -> PLY012.
+`Binary`, got `i64``` -> pple-wrong-namespace-dtype.
 """
 
 import pandera.polars as pa

@@ -4,7 +4,7 @@
 raises ``ComputeError: cannot compare string with numeric type`` at
 runtime. ``pl.col("a").is_in(["x", "y"])`` checks for String values in
 Int64 data — polars raises ``InvalidOperationError``. polypolarism flags
-both statically as PLY009.
+both statically as pple-incompatible-operands.
 """
 
 import pandera.polars as pa

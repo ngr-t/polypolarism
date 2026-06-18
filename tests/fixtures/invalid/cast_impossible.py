@@ -2,7 +2,7 @@
 
 ``pl.col("v").cast(pl.Int64)`` where ``v: List(Int64)`` — polars raises
 ``InvalidOperationError: cannot cast List type`` at runtime, even with
-``strict=False``. polypolarism flags it statically as PLY013, and the
+``strict=False``. polypolarism flags it statically as pple-invalid-cast, and the
 output degrades to Unknown instead of silently matching the declared
 ``v: int``.
 """

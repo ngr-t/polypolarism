@@ -6,7 +6,7 @@ check (which skolemizes the row variable and looks for a provable drop) finds
 none, so the decorator is accepted.
 
 Invalid twin: ``invalid/rowpoly_drops_row_variable.py``, where an explicit
-``select`` drops the extras and the same decorator is rejected (PLY043).
+``select`` drops the extras and the same decorator is rejected (pple-rowpoly-not-preserved).
 """
 
 import pandera.polars as pa

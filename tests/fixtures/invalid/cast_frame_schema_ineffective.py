@@ -1,10 +1,10 @@
 """typing.cast does not override the real schema; the mismatch still FAILs (issue #102).
 
 The cast claims ``DataFrame[KVa]`` but the argument's real schema is ``{k}`` —
-polypolarism checks the real schema, so PLY040 fires (the cast is inert,
-exactly as it is at runtime under ``@pa.check_types``). PLW013 accompanies the
+polypolarism checks the real schema, so pple-return-type fires (the cast is inert,
+exactly as it is at runtime under ``@pa.check_types``). pplw-ignored-cast accompanies the
 error to explain that ``typing.cast`` is not honored as an assertion and that
-``# type: ignore[PLY040]`` is the way to suppress it if intentional.
+``# type: ignore[pple-return-type]`` is the way to suppress it if intentional.
 """
 
 from __future__ import annotations

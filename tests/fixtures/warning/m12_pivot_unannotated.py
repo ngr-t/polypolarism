@@ -1,4 +1,4 @@
-"""pivot without an annotated assignment emits PLW005."""
+"""pivot without an annotated assignment emits pplw-data-dependent-schema."""
 
 import pandera.polars as pa
 import polars as pl

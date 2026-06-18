@@ -1,4 +1,4 @@
-"""`PLW008`: a variable annotation that NARROWS the inferred schema is an
+"""`pplw-unbacked-narrowing`: a variable annotation that NARROWS the inferred schema is an
 unverified assertion — allowed (ADR-0005), but surfaced with a pointer to
 ``Schema.validate`` for a runtime-backed narrowing.
 
@@ -50,7 +50,7 @@ class WithB(pa.DataFrameModel):
 
 def narrow_open(df: DataFrame[SrcOpen]) -> DataFrame[SrcOpen]:
     # Issue #63: 'b' is not PROVABLY absent (the non-strict input schema
-    # tolerates extra runtime columns) — narrowing, not PLY033.
+    # tolerates extra runtime columns) — narrowing, not pple-annotation-conflict.
     x: DataFrame[WithB] = df.filter(pl.col("a") > 0)  # noqa: F841
     return df
 
@@ -65,6 +65,6 @@ class StrOut(pa.DataFrameModel):
 
 def coerce_unbacked(df: DataFrame[SrcOpen]) -> DataFrame[SrcOpen]:
     # Issue #64: the annotation relies on coerce=True, but annotations
-    # never coerce at runtime — unbacked re-type, PLW008.
+    # never coerce at runtime — unbacked re-type, pplw-unbacked-narrowing.
     y: DataFrame[StrOut] = df.select(a=pl.col("a"))  # noqa: F841
     return df

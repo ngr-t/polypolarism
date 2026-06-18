@@ -709,7 +709,7 @@ class TestExprFilterChain:
         assert results[0].inferred_return_type == expected
 
     def test_filter_predicate_missing_column_errors(self):
-        """A predicate referencing a missing column surfaces PLY001."""
+        """A predicate referencing a missing column surfaces pple-column-not-found."""
         source = textwrap.dedent(
             PANDERA_HEADER
             + """
@@ -726,7 +726,7 @@ class TestExprFilterChain:
 
         results = analyze_source(source)
 
-        assert any("PLY042" in e for e in results[0].errors)
+        assert any("pple-undeclared-column" in e for e in results[0].errors)
         assert any("missing" in e for e in results[0].errors)
 
     def test_filter_kwarg_constraint_missing_column_is_validated(self):
@@ -747,7 +747,7 @@ class TestExprFilterChain:
 
         results = analyze_source(source)
 
-        assert any("PLY042" in e for e in results[0].errors)
+        assert any("pple-undeclared-column" in e for e in results[0].errors)
 
 
 class TestExprDropNullsChain:
@@ -2313,7 +2313,7 @@ class TestM4Unpivot:
         assert ft.columns["value"].dtype == Int64()
 
     def test_unpivot_value_columns_without_supertype_error(self):
-        # Probed surviving PLY022 case: List + scalar has no polars
+        # Probed surviving pple-unpivot case: List + scalar has no polars
         # supertype — unpivot raises
         # "InvalidOperationError: 'unpivot' not supported for dtype: list[i64]".
         source = textwrap.dedent(
@@ -2329,12 +2329,12 @@ class TestM4Unpivot:
         """
         )
         results = analyze_source(source)
-        assert any("PLY022" in e and "incompatible" in e for e in results[0].errors), results[
+        assert any("pple-unpivot" in e and "incompatible" in e for e in results[0].errors), results[
             0
         ].errors
 
     def test_unpivot_unknown_value_column_stays_silent(self):
-        # An Unknown-dtyped value column must not raise PLY022 — the value
+        # An Unknown-dtyped value column must not raise pple-unpivot — the value
         # dtype degrades to Unknown (gradual typing, no false positives).
         source = textwrap.dedent(
             PANDERA_HEADER
@@ -2404,7 +2404,7 @@ class TestCumulativeStrictDtypes:
     Probed (polars 1.41.2) receiver-dtype matrix:
 
     - invalid receivers raise InvalidOperationError at runtime — flagged
-      PLY016, output degrades to Unknown:
+      pple-non-numeric-operand, output degrades to Unknown:
         cum_sum:  Utf8, Date, Datetime, Time, List, Struct, Categorical,
                   Enum, Null
         cum_prod: the cum_sum set plus Duration and Decimal
@@ -2456,7 +2456,7 @@ class TestCumulativeStrictDtypes:
         analyzer = self._run(receiver, method)
         assert len(analyzer.errors) == 1, analyzer.errors
         err = analyzer.errors[0]
-        assert "PLY016" in err and method in err, err
+        assert "pple-non-numeric-operand" in err and method in err, err
         assert "InvalidOperationError" in err, err
         assert analyzer.var_types["out"].columns["c"].dtype == Unknown()
 
@@ -2540,7 +2540,7 @@ class TestCumulativeStrictDtypes:
         # Nullability does not rescue an invalid base dtype.
         analyzer = self._run(Nullable(Utf8()), "cum_sum")
         assert len(analyzer.errors) == 1, analyzer.errors
-        assert "PLY016" in analyzer.errors[0]
+        assert "pple-non-numeric-operand" in analyzer.errors[0]
         assert "Utf8" in analyzer.errors[0]
         assert analyzer.var_types["out"].columns["c"].dtype == Unknown()
 
@@ -3028,7 +3028,7 @@ class TestRollingStrictDtypes:
     Probed (polars 1.41.2) receiver-dtype matrix:
 
     - invalid receivers raise InvalidOperationError at runtime — flagged
-      PLY016, output degrades to Unknown:
+      pple-non-numeric-operand, output degrades to Unknown:
         rolling_sum:      Utf8, Date, Datetime, Time, Duration, Decimal,
                           List, Array, Struct, Categorical, Enum, Null
         rolling_min/max:  Utf8, Decimal, List, Array, Struct, Categorical,
@@ -3075,7 +3075,7 @@ class TestRollingStrictDtypes:
         analyzer = self._run(receiver, method)
         assert len(analyzer.errors) == 1, analyzer.errors
         err = analyzer.errors[0]
-        assert "PLY016" in err and method in err, err
+        assert "pple-non-numeric-operand" in err and method in err, err
         assert "InvalidOperationError" in err, err
         assert analyzer.var_types["out"].columns["c"].dtype == Unknown()
 
@@ -3174,7 +3174,7 @@ class TestNumericElementwiseStrictDtypes:
     strictly typed instead of blindly dtype-preserving (issue #62).
 
     Probed (polars 1.41.2) receiver-dtype matrix — invalid receivers raise
-    InvalidOperationError at runtime, flagged PLY016, output degrades to
+    InvalidOperationError at runtime, flagged pple-non-numeric-operand, output degrades to
     Unknown:
 
     - round/floor/ceil: every non-numeric dtype (Utf8, Binary, Boolean,
@@ -3225,14 +3225,14 @@ class TestNumericElementwiseStrictDtypes:
         assert len(analyzer.errors) == 1, analyzer.errors
         err = analyzer.errors[0]
         method = call.split("(")[0]
-        assert "PLY016" in err and method in err, err
+        assert "pple-non-numeric-operand" in err and method in err, err
         assert "InvalidOperationError" in err, err
         assert analyzer.var_types["out"].columns["c"].dtype == Unknown()
 
     def test_nullable_invalid_receiver_still_flags(self):
         analyzer = self._run(Nullable(Utf8()), "round(1)")
         assert len(analyzer.errors) == 1, analyzer.errors
-        assert "PLY016" in analyzer.errors[0], analyzer.errors
+        assert "pple-non-numeric-operand" in analyzer.errors[0], analyzer.errors
 
     def test_unknown_receiver_stays_silent(self):
         analyzer = self._run(Unknown(), "round(1)")
@@ -3286,7 +3286,7 @@ class TestFloatReturnStrictDtypes:
 
     Probed (polars 1.41.2) receiver-dtype matrix — the error class varies
     per cell (InvalidOperationError / ComputeError / rust panic), all
-    flagged PLY016 with output degrading to Unknown:
+    flagged pple-non-numeric-operand with output degrading to Unknown:
 
     - log/log10:   reject Binary, Categorical, Enum, List, Array, Struct
     - log1p/exp:   reject Binary, List, Array, Struct
@@ -3327,7 +3327,7 @@ class TestFloatReturnStrictDtypes:
         assert len(analyzer.errors) == 1, analyzer.errors
         err = analyzer.errors[0]
         method = call.split("(")[0]
-        assert "PLY016" in err and method in err, err
+        assert "pple-non-numeric-operand" in err and method in err, err
         assert analyzer.var_types["out"].columns["c"].dtype == Unknown()
 
     @pytest.mark.parametrize(
@@ -3697,7 +3697,7 @@ class TestExprListArgs:
         )
         results = analyze_source(source)
         assert results[0].has_errors is True
-        assert any("PLY017" in e and "struct" in e for e in results[0].errors)
+        assert any("pple-list-literal-misuse" in e and "struct" in e for e in results[0].errors)
         ft = results[0].inferred_return_type
         assert ft is not None
         assert ft.columns["ab"].dtype == Unknown()
@@ -3715,7 +3715,7 @@ class TestExprListArgs:
         )
         results = analyze_source(source)
         assert results[0].has_errors is True
-        assert any("PLY042" in e and "missing" in e for e in results[0].errors)
+        assert any("pple-undeclared-column" in e and "missing" in e for e in results[0].errors)
 
     def test_coalesce_list_default_output_name(self):
         source = textwrap.dedent(
@@ -3788,10 +3788,10 @@ class TestExprListArgs:
         )
         results = analyze_source(source)
         assert results[0].has_errors is True
-        assert any("PLY042" in e and "nope" in e for e in results[0].errors)
+        assert any("pple-undeclared-column" in e and "nope" in e for e in results[0].errors)
 
 
-class TestMixedListArgsPLY017:
+class TestMixedListArgsListLiteralMisuse:
     """Issue #59: a list/tuple literal mixed with further positional args.
 
     Probed (polars 1.41.2) for EVERY multi-expression helper (pl.struct,
@@ -3801,7 +3801,7 @@ class TestMixedListArgsPLY017:
     string-only lists in coalesce / concat_str / horizontal) or silently
     misparses the list as a nested *literal* column (string-only lists in
     struct / concat_list) — never the flatten polypolarism assumed. The mix
-    is flagged PLY017 and the output degrades to Unknown.
+    is flagged pple-list-literal-misuse and the output degrades to Unknown.
     """
 
     _SCHEMA = """
@@ -3838,7 +3838,7 @@ class TestMixedListArgsPLY017:
         """
         )
         results = analyze_source(source)
-        assert any("PLY017" in e for e in results[0].errors), results[0].errors
+        assert any("pple-list-literal-misuse" in e for e in results[0].errors), results[0].errors
         assert len(results[0].errors) == 1, results[0].errors
         ft = results[0].inferred_return_type
         assert ft is not None
@@ -4121,7 +4121,7 @@ class TestConcatListAndHorizontal:
         )
         results = analyze_source(source)
         assert results[0].has_errors is True
-        assert any("PLY042" in e and "nope" in e for e in results[0].errors)
+        assert any("pple-undeclared-column" in e and "nope" in e for e in results[0].errors)
 
 
 class TestM6Selectors:
@@ -4207,7 +4207,7 @@ class TestM6DiagnosticCodes:
         """
         )
         results = analyze_source(source)
-        assert any("[PLY042]" in e for e in results[0].errors)
+        assert any("[pple-undeclared-column]" in e for e in results[0].errors)
 
     def test_drop_unknown_has_code(self):
         source = textwrap.dedent(
@@ -4221,7 +4221,7 @@ class TestM6DiagnosticCodes:
         """
         )
         results = analyze_source(source)
-        assert any("[PLY002]" in e for e in results[0].errors)
+        assert any("[pple-column-not-found]" in e for e in results[0].errors)
 
 
 class TestM7PipeRegistry:
@@ -4288,7 +4288,7 @@ class TestM7PipeRegistry:
         )
         results = analyze_source(source)
         f = next(r for r in results if r.name == "f")
-        assert any("PLW002" in w for w in f.warnings)
+        assert any("pplw-unresolved-pipe" in w for w in f.warnings)
         assert any("external_helper" in w for w in f.warnings)
 
 
@@ -4336,7 +4336,7 @@ class TestM7MapElementsReturnDtype:
         )
         results = analyze_source(source)
         f = results[0]
-        assert any("PLW001" in w for w in f.warnings)
+        assert any("pplw-missing-return-dtype" in w for w in f.warnings)
         assert any("return_dtype" in w for w in f.warnings)
 
 
@@ -4422,12 +4422,12 @@ class TestAggUdfImplicitListWrap:
         assert ft.columns["x"].dtype == ListT(Float64())
 
     def test_no_return_dtype_fallback_is_list_wrapped_and_warns(self):
-        # The PLW001 receiver-dtype fallback is still a guess, but the
+        # The pplw-missing-return-dtype receiver-dtype fallback is still a guess, but the
         # implicit list aggregation applies to it like any other dtype.
         f, ft = self._inferred(
             'df.group_by("g").agg(x=pl.col("v").map_elements(lambda v: v * 2.0))'
         )
-        assert any("PLW001" in w for w in f.warnings)
+        assert any("pplw-missing-return-dtype" in w for w in f.warnings)
         assert ft.columns["x"].dtype == ListT(Int64())
 
     def test_pl_map_groups_in_agg_is_list_wrapped(self):
@@ -4466,7 +4466,7 @@ class TestM7ExternalHelperWarning:
         )
         results = analyze_source(source)
         f = results[0]
-        assert any("PLW003" in w for w in f.warnings)
+        assert any("pplw-unknown-function" in w for w in f.warnings)
         assert any("process" in w for w in f.warnings)
 
 
@@ -4557,7 +4557,7 @@ class TestM8AggChains:
         assert ft.columns["tag_upper"].dtype == Utf8()
 
     def test_chain_on_unknown_column_errors(self):
-        """A chain that references a missing column still surfaces PLY001."""
+        """A chain that references a missing column still surfaces pple-column-not-found."""
         source = textwrap.dedent(
             PANDERA_HEADER
             + """
@@ -4571,7 +4571,7 @@ class TestM8AggChains:
         """
         )
         results = analyze_source(source)
-        assert any("PLY042" in e for e in results[0].errors)
+        assert any("pple-undeclared-column" in e for e in results[0].errors)
         assert any("missing" in e for e in results[0].errors)
 
 
@@ -4939,7 +4939,7 @@ class TestM12Pivot:
         )
         results = analyze_source(source)
         f = results[0]
-        assert any("PLW005" in w for w in f.warnings)
+        assert any("pplw-data-dependent-schema" in w for w in f.warnings)
         # The message should mention pivot and a typed-annotation hint.
         assert any("pivot" in w and "DataFrame[" in w for w in f.warnings)
 
@@ -4964,8 +4964,8 @@ class TestM12Pivot:
         """
         )
         results = analyze_source(source)
-        # The pivot itself emits PLW005 …
-        assert any("PLW005" in w for w in results[0].warnings)
+        # The pivot itself emits pplw-data-dependent-schema …
+        assert any("pplw-data-dependent-schema" in w for w in results[0].warnings)
         # … but the function passes because the annotation gave us the schema.
         assert results[0].has_errors is False, results[0].errors
         ft = results[0].inferred_return_type
@@ -5138,13 +5138,13 @@ class TestUpsampleInference:
         """
         )
         results = analyze_source(source)
-        assert any("PLY030" in e for e in results[0].errors), results[0].errors
+        assert any("pple-eager-only-method" in e for e in results[0].errors), results[0].errors
 
 
 class TestJoinWhereDegradation:
     """``df.join_where(other, *predicates)`` (issue #74): polars documents
     the method as experimental ("may be changed at any point"), so instead
-    of encoding its schema we degrade to an OPEN frame and surface PLW007 —
+    of encoding its schema we degrade to an OPEN frame and surface pplw-unmodeled-method —
     correct code passes (no more hard "Could not infer return type"), and
     the degradation is visible.
 
@@ -5180,7 +5180,7 @@ class TestJoinWhereDegradation:
         assert ft is not None
         assert ft.columns == {}
         assert ft.rest is not None
-        plw007 = [w for w in results[0].warnings if "PLW007" in w]
+        plw007 = [w for w in results[0].warnings if "pplw-unmodeled-method" in w]
         assert len(plw007) == 1, results[0].warnings
         assert "join_where" in plw007[0] and "experimental" in plw007[0]
 
@@ -5225,7 +5225,9 @@ class TestJoinWhereDegradation:
         )
         results = analyze_source(source)
         assert results[0].errors == [], results[0].errors
-        assert not any("PLW007" in w for w in results[0].warnings), results[0].warnings
+        assert not any("pplw-unmodeled-method" in w for w in results[0].warnings), results[
+            0
+        ].warnings
 
     def test_join_where_warning_is_deduped_through_agg_chains(self):
         # .agg() chains analyze the grouped receiver twice (laziness probe
@@ -5237,14 +5239,14 @@ class TestJoinWhereDegradation:
             """
         )
         results = analyze_source(source)
-        plw007 = [w for w in results[0].warnings if "PLW007" in w]
+        plw007 = [w for w in results[0].warnings if "pplw-unmodeled-method" in w]
         assert len(plw007) == 1, results[0].warnings
 
 
 class TestToDummiesWarning:
     """``df.to_dummies(...)`` (issue #74): output column names depend on
     runtime values (``c`` -> ``c_a``, ``c_b``, ... UInt8), exactly like
-    pivot — so it gets the same PLW005 annotate-the-result nudge instead
+    pivot — so it gets the same pplw-data-dependent-schema annotate-the-result nudge instead
     of dying silently into "Could not infer return type"."""
 
     HEADER = textwrap.dedent(
@@ -5266,7 +5268,7 @@ class TestToDummiesWarning:
         results = analyze_source(source)
         f = results[0]
         assert f.errors == [], f.errors
-        assert any("PLW005" in w for w in f.warnings), f.warnings
+        assert any("pplw-data-dependent-schema" in w for w in f.warnings), f.warnings
         assert any("to_dummies" in w and "DataFrame[" in w for w in f.warnings)
         # The closed receiver yields a copy-pasteable hint: passthrough
         # columns keep their dtype, dummied columns are UInt8-per-value.
@@ -5281,7 +5283,7 @@ class TestToDummiesWarning:
         )
         results = analyze_source(source)
         f = results[0]
-        assert any("PLW005" in w for w in f.warnings), f.warnings
+        assert any("pplw-data-dependent-schema" in w for w in f.warnings), f.warnings
         # No passthrough column survives — the hint must not claim one.
         assert not any("n: pl.Int64" in w for w in f.warnings), f.warnings
 
@@ -5299,7 +5301,7 @@ class TestToDummiesWarning:
             """
         )
         results = analyze_source(source)
-        assert any("PLW005" in w for w in results[0].warnings)
+        assert any("pplw-data-dependent-schema" in w for w in results[0].warnings)
         assert results[0].has_errors is False, results[0].errors
         ft = results[0].inferred_return_type
         assert ft is not None
@@ -5309,7 +5311,7 @@ class TestToDummiesWarning:
 class TestGroupByMapGroupsWarning:
     """``group_by(...).map_groups(fn)`` (issue #87): the output schema
     depends on the group function's body — statically unknowable, same
-    family as pivot/to_dummies — so it gets the PLW005 annotate-the-result
+    family as pivot/to_dummies — so it gets the pplw-data-dependent-schema annotate-the-result
     nudge instead of the generic "Could not infer return type".
     (``GroupBy.apply`` no longer exists on probed polars 1.37.0/1.41.2,
     so there is no alias to cover.)"""
@@ -5333,7 +5335,7 @@ class TestGroupByMapGroupsWarning:
         results = analyze_source(source)
         f = results[0]
         assert f.errors == [], f.errors
-        assert any("PLW005" in w for w in f.warnings), f.warnings
+        assert any("pplw-data-dependent-schema" in w for w in f.warnings), f.warnings
         assert any("map_groups" in w and "DataFrame[" in w for w in f.warnings)
 
     def test_map_groups_lazy_receiver_suggests_lazyframe(self):
@@ -5345,7 +5347,9 @@ class TestGroupByMapGroupsWarning:
         )
         results = analyze_source(source)
         f = results[0]
-        assert any("PLW005" in w and "LazyFrame[" in w for w in f.warnings), f.warnings
+        assert any("pplw-data-dependent-schema" in w and "LazyFrame[" in w for w in f.warnings), (
+            f.warnings
+        )
 
     def test_map_groups_assigned_to_typed_var_uses_annotation(self):
         source = self.HEADER + textwrap.dedent(
@@ -5363,7 +5367,7 @@ class TestGroupByMapGroupsWarning:
             """
         )
         results = analyze_source(source)
-        assert any("PLW005" in w for w in results[0].warnings)
+        assert any("pplw-data-dependent-schema" in w for w in results[0].warnings)
         assert results[0].has_errors is False, results[0].errors
         ft = results[0].inferred_return_type
         assert ft is not None
@@ -5519,8 +5523,8 @@ class TestM14PartitionBy:
         """
         )
         results = analyze_source(source)
-        # No PLY001 — pl.col("v") was resolved using the loop var's element type.
-        assert not any("PLY001" in e for e in results[0].errors), results[0].errors
+        # No pple-column-not-found — pl.col("v") was resolved using the loop var's element type.
+        assert not any("pple-column-not-found" in e for e in results[0].errors), results[0].errors
 
     def test_partition_include_key_false_drops_key(self):
         source = textwrap.dedent(
@@ -5554,8 +5558,8 @@ class TestM14PartitionBy:
         """
         )
         results = analyze_source(source)
-        # k was excluded from each partition; selecting it now raises PLY001.
-        assert any("PLY001" in e and "'k'" in e for e in results[0].errors)
+        # k was excluded from each partition; selecting it now raises pple-column-not-found.
+        assert any("pple-column-not-found" in e and "'k'" in e for e in results[0].errors)
 
 
 class TestM15LazyEagerDistinction:
@@ -5579,7 +5583,7 @@ class TestM15LazyEagerDistinction:
         """
         )
         results = analyze_source(source)
-        assert any("PLY030" in e and "write_csv" in e for e in results[0].errors)
+        assert any("pple-eager-only-method" in e and "write_csv" in e for e in results[0].errors)
         assert any("collect" in e for e in results[0].errors)
 
     def test_sink_on_eager_emits_ply031(self):
@@ -5594,7 +5598,7 @@ class TestM15LazyEagerDistinction:
         """
         )
         results = analyze_source(source)
-        assert any("PLY031" in e and "sink_csv" in e for e in results[0].errors)
+        assert any("pple-lazy-only-method" in e and "sink_csv" in e for e in results[0].errors)
 
     def test_collect_on_eager_emits_ply031(self):
         source = textwrap.dedent(
@@ -5608,7 +5612,7 @@ class TestM15LazyEagerDistinction:
         """
         )
         results = analyze_source(source)
-        assert any("PLY031" in e for e in results[0].errors)
+        assert any("pple-lazy-only-method" in e for e in results[0].errors)
 
     def test_function_call_lazy_arg_to_eager_param_errors(self):
         source = textwrap.dedent(
@@ -5626,7 +5630,7 @@ class TestM15LazyEagerDistinction:
         )
         results = analyze_source(source)
         caller = next(r for r in results if r.name == "caller")
-        assert any("PLY032" in e for e in caller.errors)
+        assert any("pple-eager-lazy-mismatch" in e for e in caller.errors)
         assert any(".collect()" in e for e in caller.errors)
 
     def test_return_lazy_when_eager_declared_errors(self):
@@ -5644,7 +5648,7 @@ class TestM15LazyEagerDistinction:
         from polypolarism.checker import check_source
 
         results_chk = check_source(source)
-        assert any("PLY032" in str(e) for e in results_chk[0].errors)
+        assert any("pple-eager-lazy-mismatch" in str(e) for e in results_chk[0].errors)
 
     def test_lazy_to_eager_via_collect_is_clean(self):
         source = textwrap.dedent(
@@ -6364,7 +6368,7 @@ class TestJoinSuffix:
 
 
 class TestJoinMultiKey:
-    """``join(on=["x", "y"])`` resolves instead of raising a false PLY010."""
+    """``join(on=["x", "y"])`` resolves instead of raising a false pple-join-key."""
 
     def test_join_on_list_literal(self):
         source = textwrap.dedent(
@@ -6545,8 +6549,8 @@ class TestConstantResolution:
         )
         results = analyze_source(source)
         # ``key`` is no longer a known constant; the join keys are
-        # unresolvable, so the original PLY010 fires.
-        assert any("PLY010" in e for e in results[0].errors), results[0].errors
+        # unresolvable, so the original pple-join-key fires.
+        assert any("pple-join-key" in e for e in results[0].errors), results[0].errors
 
     def test_unpivot_on_module_constant(self):
         source = textwrap.dedent(
@@ -6564,7 +6568,7 @@ class TestConstantResolution:
         """
         )
         results = analyze_source(source)
-        assert not any("PLY022" in e for e in results[0].errors), results[0].errors
+        assert not any("pple-unpivot" in e for e in results[0].errors), results[0].errors
         ft = results[0].inferred_return_type
         assert ft is not None
         assert ft.columns["variable"].dtype == Utf8()
@@ -6671,8 +6675,8 @@ class TestConstantResolution:
         """
         )
         results = analyze_source(source)
-        # k was excluded from each partition; selecting it raises PLY001.
-        assert any("PLY001" in e and "'k'" in e for e in results[0].errors)
+        # k was excluded from each partition; selecting it raises pple-column-not-found.
+        assert any("pple-column-not-found" in e and "'k'" in e for e in results[0].errors)
 
     def test_annotated_local_constant_resolves(self):
         source = textwrap.dedent(
@@ -6876,7 +6880,7 @@ class TestArithmeticBinOpInference:
 
 
 class TestArithmeticIncompatibleDtypes:
-    """Issue #30: arithmetic between incompatible dtypes flags PLY009.
+    """Issue #30: arithmetic between incompatible dtypes flags pple-incompatible-operands.
 
     Ground truth verified against polars 1.41.2 by driving the full
     8-dtype x {+, -, *, /, //, %, **} product through ``df.select``
@@ -7040,7 +7044,7 @@ class TestArithmeticIncompatibleDtypes:
     def test_invalid_combination_flags_ply009(self, expr: str) -> None:
         analyzer = _run_body(self._frame(), f"out = df.select(r={expr})")
         assert len(analyzer.errors) == 1, analyzer.errors
-        assert "PLY009" in analyzer.errors[0]
+        assert "pple-incompatible-operands" in analyzer.errors[0]
         # The error is the signal — the output registers as Unknown.
         assert analyzer.var_types["out"].columns["r"].dtype == Unknown()
 
@@ -7069,7 +7073,7 @@ class TestArithmeticIncompatibleDtypes:
         """Classification unwraps Nullable: Nullable[Utf8] + Nullable[Int64] errors."""
         analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('ns') + pl.col('ni'))")
         assert len(analyzer.errors) == 1, analyzer.errors
-        assert "PLY009" in analyzer.errors[0]
+        assert "pple-incompatible-operands" in analyzer.errors[0]
         assert "Utf8 + Int64" in analyzer.errors[0]
 
     # -- silent fallback: not fully understood => no error ---------------------
@@ -7088,7 +7092,7 @@ class TestArithmeticIncompatibleDtypes:
         assert analyzer.errors == []
         assert analyzer.var_types["out"].columns["r"].dtype == Utf8()
 
-    # upgrade trigger: List operands get probed PLY009 cells in the arithmetic table
+    # upgrade trigger: List operands get probed pple-incompatible-operands cells in the arithmetic table
     @pytest.mark.imprecision
     def test_list_operand_is_silent(self):
         frame = FrameType({"xs": ListT(Int64()), "i": Int64()})
@@ -7127,7 +7131,7 @@ class TestDecimalArithmetic:
                  behave like Int64 columns);
                  Decimal x Null literal -> all-null Decimal(38, scale).
     ``// % **``  raise InvalidOperationError for Decimal x
-                 {Decimal, int, Null} -> PLY009.
+                 {Decimal, int, Null} -> pple-incompatible-operands.
     x float      -> Float64 for every operator except ``**`` (error),
                  both widths, either order.
     x Boolean    asymmetric: every cell errors (SchemaError "failed to
@@ -7136,7 +7140,7 @@ class TestDecimalArithmetic:
     x Utf8       ``+`` stringifies the Decimal and concatenates -> Utf8;
                  every other operator errors.
     x temporal / Categorical / Enum / List: every operator errors in
-                 both orders -> PLY009.
+                 both orders -> pple-incompatible-operands.
     Unprobed partners (Unknown, Struct, Binary, unresolved) keep the
     silent fallback.
     """
@@ -7221,7 +7225,7 @@ class TestDecimalArithmetic:
         assert analyzer.errors == [], analyzer.errors
         assert analyzer.var_types["out"].columns["r"].dtype == expected
 
-    # -- known-invalid combinations -> PLY009 ----------------------------------
+    # -- known-invalid combinations -> pple-incompatible-operands ----------------------------------
 
     @pytest.mark.parametrize(
         "expr",
@@ -7277,7 +7281,7 @@ class TestDecimalArithmetic:
     def test_invalid_combination_flags_ply009(self, expr: str) -> None:
         analyzer = _run_body(self._frame(), f"out = df.select(r={expr})")
         assert len(analyzer.errors) == 1, analyzer.errors
-        assert "PLY009" in analyzer.errors[0]
+        assert "pple-incompatible-operands" in analyzer.errors[0]
         # The error is the signal — the output registers as Unknown.
         assert analyzer.var_types["out"].columns["r"].dtype == Unknown()
 
@@ -7304,7 +7308,7 @@ class TestDecimalArithmetic:
         )
         analyzer = _run_body(frame, f"out = df.select(r={expr})")
         assert len(analyzer.errors) == 1, analyzer.errors
-        assert "PLY009" in analyzer.errors[0]
+        assert "pple-incompatible-operands" in analyzer.errors[0]
 
     def test_error_message_names_dtypes_and_op(self):
         analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('d') // pl.col('d2'))")
@@ -7330,7 +7334,7 @@ class TestDecimalArithmetic:
     def test_invalid_pair_detected_under_nullable_wrapper(self):
         analyzer = _run_body(self._frame(), "out = df.select(r=pl.col('nd') ** pl.col('i'))")
         assert len(analyzer.errors) == 1, analyzer.errors
-        assert "PLY009" in analyzer.errors[0]
+        assert "pple-incompatible-operands" in analyzer.errors[0]
 
     # -- silent fallback for unprobed partners ---------------------------------
 
@@ -7500,7 +7504,7 @@ class TestSemiAntiJoin:
 
     @pytest.mark.parametrize("how", ["semi", "anti"])
     def test_missing_key_still_errors(self, how: str):
-        """Key validation still fires: PLY010 on a missing join key."""
+        """Key validation still fires: pple-join-key on a missing join key."""
         source = textwrap.dedent(
             PANDERA_HEADER
             + f"""
@@ -7515,7 +7519,7 @@ class TestSemiAntiJoin:
         """
         )
         results = analyze_source(source)
-        assert any("PLY010" in e for e in results[0].errors), results[0].errors
+        assert any("pple-join-key" in e for e in results[0].errors), results[0].errors
 
     def test_multi_key_semi_join(self):
         source = textwrap.dedent(
@@ -7735,7 +7739,7 @@ class TestCrossJoinAnalyzer:
         assert results[0].inferred_return_type == FrameType({"id": Int64(), "rid": Int64()})
 
     def test_cross_join_with_keys_errors(self):
-        """Providing on= with how='cross' raises PLY010 like polars raises."""
+        """Providing on= with how='cross' raises pple-join-key like polars raises."""
         source = textwrap.dedent(
             PANDERA_HEADER
             + """
@@ -7751,7 +7755,7 @@ class TestCrossJoinAnalyzer:
         )
         results = analyze_source(source)
         assert any(
-            "PLY010" in e and "cross join takes no join keys" in e for e in results[0].errors
+            "pple-join-key" in e and "cross join takes no join keys" in e for e in results[0].errors
         ), results[0].errors
 
     def test_cross_join_lazy_receiver_stays_lazy(self):
@@ -7863,7 +7867,7 @@ class TestSeqVariants:
         assert analyzer.var_types["out"] == FrameType({"a": Int64(), "c": Int64()})
 
     def test_seq_variants_fire_no_eager_lazy_errors(self):
-        """Both methods exist on DataFrame AND LazyFrame — no PLY030/PLY031."""
+        """Both methods exist on DataFrame AND LazyFrame — no pple-eager-only-method/pple-lazy-only-method."""
         eager = FrameType({"a": Int64()})
         lazy = FrameType({"a": Int64()}, is_lazy=True)
         for frame in (eager, lazy):
@@ -8039,11 +8043,13 @@ class TestSelectConstantResolution:
         """
         )
         results = analyze_source(source)
-        assert any("PLY042" in str(e) and "ghost" in str(e) for e in results[0].errors)
+        assert any(
+            "pple-undeclared-column" in str(e) and "ghost" in str(e) for e in results[0].errors
+        )
 
     def test_select_unknown_name_still_falls_through(self):
         """A bare Name that is NOT a constant (e.g. a frame variable) keeps
-        going to expression analysis — no false PLY042."""
+        going to expression analysis — no false pple-undeclared-column."""
         frame = FrameType({"a": Int64()})
         analyzer = _run_body(frame, "out = df.select(mystery)")
         assert analyzer.errors == []
@@ -8080,7 +8086,9 @@ class TestSelectConstantResolution:
         """
         )
         results = analyze_source(source)
-        assert any("PLY042" in str(e) and "ghost" in str(e) for e in results[0].errors)
+        assert any(
+            "pple-undeclared-column" in str(e) and "ghost" in str(e) for e in results[0].errors
+        )
 
     def test_with_columns_kwarg_constant_is_column_reference(self):
         source = textwrap.dedent(
@@ -8251,7 +8259,7 @@ class TestImplicitListAggregation:
         )
 
     def test_missing_column_raises_ply011(self):
-        """A bare reference to a missing column still surfaces PLY011."""
+        """A bare reference to a missing column still surfaces pple-groupby."""
         source = self.HEADER + textwrap.dedent(
             """
             def f(df: DataFrame[In]):
@@ -8259,7 +8267,7 @@ class TestImplicitListAggregation:
             """
         )
         results = analyze_source(source)
-        assert any("PLY011" in e and "missing" in e for e in results[0].errors)
+        assert any("pple-groupby" in e and "missing" in e for e in results[0].errors)
 
 
 class TestFrameLiteralInference:
@@ -8394,7 +8402,7 @@ class TestFrameLiteralInference:
         assert ft.is_lazy is False
 
     def test_select_missing_column_on_literal_errors(self):
-        """The literal frame is closed — a missing column is PLY001."""
+        """The literal frame is closed — a missing column is pple-column-not-found."""
         source = self.HEADER + textwrap.dedent(
             """
             def f(df: DataFrame[In]):
@@ -8402,11 +8410,11 @@ class TestFrameLiteralInference:
             """
         )
         results = analyze_source(source)
-        assert any("PLY001" in e and "nope" in e for e in results[0].errors)
+        assert any("pple-column-not-found" in e and "nope" in e for e in results[0].errors)
 
 
 class TestFilterPredicateDtype:
-    """Issue #28: ``df.filter(...)`` with a non-boolean predicate is PLY008."""
+    """Issue #28: ``df.filter(...)`` with a non-boolean predicate is pple-non-boolean-predicate."""
 
     HEADER = textwrap.dedent(
         PANDERA_HEADER
@@ -8429,11 +8437,11 @@ class TestFilterPredicateDtype:
 
     def test_nonbool_column_expr_predicate_flags_ply008(self):
         results = self._analyze('df.filter(pl.col("a"))')
-        assert any("PLY008" in e and "Boolean" in e for e in results[0].errors)
+        assert any("pple-non-boolean-predicate" in e and "Boolean" in e for e in results[0].errors)
 
     def test_nonbool_bare_string_predicate_flags_ply008(self):
         results = self._analyze('df.filter("a")')
-        assert any("PLY008" in e for e in results[0].errors)
+        assert any("pple-non-boolean-predicate" in e for e in results[0].errors)
 
     def test_nonbool_const_name_predicate_flags_ply008(self):
         source = self.HEADER + textwrap.dedent(
@@ -8444,12 +8452,12 @@ class TestFilterPredicateDtype:
             """
         )
         results = analyze_source(source)
-        assert any("PLY008" in e for e in results[0].errors)
+        assert any("pple-non-boolean-predicate" in e for e in results[0].errors)
 
     def test_bare_string_missing_column_is_ply001_not_ply008(self):
         results = self._analyze('df.filter("ghost")')
-        assert any("PLY001" in e and "ghost" in e for e in results[0].errors)
-        assert not any("PLY008" in e for e in results[0].errors)
+        assert any("pple-column-not-found" in e and "ghost" in e for e in results[0].errors)
+        assert not any("pple-non-boolean-predicate" in e for e in results[0].errors)
 
     def test_boolean_column_expr_predicate_passes(self):
         results = self._analyze('df.filter(pl.col("flag"))')
@@ -8499,13 +8507,13 @@ class TestFilterPredicateDtype:
 
     def test_each_positional_predicate_is_checked(self):
         results = self._analyze('df.filter(pl.col("flag"), pl.col("a"))')
-        ply008 = [e for e in results[0].errors if "PLY008" in e]
+        ply008 = [e for e in results[0].errors if "pple-non-boolean-predicate" in e]
         assert len(ply008) == 1
 
     def test_kwarg_equality_constraint_not_flagged(self):
         # ``filter(a=1)`` is an equality constraint — boolean by construction.
         results = self._analyze("df.filter(a=1)")
-        assert not any("PLY008" in e for e in results[0].errors)
+        assert not any("pple-non-boolean-predicate" in e for e in results[0].errors)
 
     def test_filter_stays_identity_typed(self):
         results = self._analyze('df.filter(pl.col("flag"))')
@@ -8515,7 +8523,7 @@ class TestFilterPredicateDtype:
 
 
 class TestExprFilterPredicateDtype:
-    """Issue #28: ``Expr.filter(...)`` predicates get the same PLY008 check."""
+    """Issue #28: ``Expr.filter(...)`` predicates get the same pple-non-boolean-predicate check."""
 
     HEADER = textwrap.dedent(
         PANDERA_HEADER
@@ -8541,11 +8549,11 @@ class TestExprFilterPredicateDtype:
         results = self._analyze(
             'df.group_by("g").agg(pl.col("v").filter(pl.col("a")).sum().alias("s"))'
         )
-        assert any("PLY008" in e for e in results[0].errors)
+        assert any("pple-non-boolean-predicate" in e for e in results[0].errors)
 
     def test_nonbool_bare_string_predicate_flags_ply008(self):
         results = self._analyze('df.select(pl.col("v").filter("a").alias("x"))')
-        assert any("PLY008" in e for e in results[0].errors)
+        assert any("pple-non-boolean-predicate" in e for e in results[0].errors)
 
     def test_boolean_predicate_passes(self):
         results = self._analyze('df.select(pl.col("v").filter(pl.col("flag")).alias("x"))')
@@ -8561,12 +8569,12 @@ class TestExprFilterPredicateDtype:
 
     def test_missing_column_string_predicate_is_ply001_not_ply008(self):
         results = self._analyze('df.select(pl.col("v").filter("ghost").alias("x"))')
-        assert any("PLY042" in e and "ghost" in e for e in results[0].errors)
-        assert not any("PLY008" in e for e in results[0].errors)
+        assert any("pple-undeclared-column" in e and "ghost" in e for e in results[0].errors)
+        assert not any("pple-non-boolean-predicate" in e for e in results[0].errors)
 
 
 class TestSortKeyValidation:
-    """Issue #29: ``sort`` validates key columns like drop/rename do (PLY007)."""
+    """Issue #29: ``sort`` validates key columns like drop/rename do (pple-column-not-found)."""
 
     HEADER = textwrap.dedent(
         PANDERA_HEADER
@@ -8592,7 +8600,7 @@ class TestSortKeyValidation:
 
     def test_missing_string_key_flags_ply007(self):
         results = self._analyze('df.sort("ghost")')
-        assert any("PLY007" in e and "ghost" in e for e in results[0].errors)
+        assert any("pple-column-not-found" in e and "ghost" in e for e in results[0].errors)
 
     def test_existing_string_key_passes(self):
         results = self._analyze('df.sort("a")')
@@ -8600,15 +8608,15 @@ class TestSortKeyValidation:
 
     def test_varargs_keys_each_checked(self):
         results = self._analyze('df.sort("a", "ghost")')
-        assert any("PLY007" in e and "ghost" in e for e in results[0].errors)
+        assert any("pple-column-not-found" in e and "ghost" in e for e in results[0].errors)
 
     def test_list_keys_each_checked(self):
         results = self._analyze('df.sort(["a", "ghost"])')
-        assert any("PLY007" in e and "ghost" in e for e in results[0].errors)
+        assert any("pple-column-not-found" in e and "ghost" in e for e in results[0].errors)
 
     def test_by_kwarg_missing_key_flags_ply007(self):
         results = self._analyze('df.sort(by="ghost")')
-        assert any("PLY007" in e and "ghost" in e for e in results[0].errors)
+        assert any("pple-column-not-found" in e and "ghost" in e for e in results[0].errors)
 
     def test_by_kwarg_list_passes(self):
         results = self._analyze('df.sort(by=["a", "b"])')
@@ -8623,11 +8631,11 @@ class TestSortKeyValidation:
             """
         )
         results = analyze_source(source)
-        assert any("PLY007" in e and "ghost" in e for e in results[0].errors)
+        assert any("pple-column-not-found" in e and "ghost" in e for e in results[0].errors)
 
     def test_pl_col_missing_key_flags_ply001(self):
         results = self._analyze('df.sort(pl.col("ghost"))')
-        assert any("PLY042" in e and "ghost" in e for e in results[0].errors)
+        assert any("pple-undeclared-column" in e and "ghost" in e for e in results[0].errors)
 
     def test_pl_col_existing_key_passes(self):
         results = self._analyze('df.sort(pl.col("a"))')
@@ -8674,7 +8682,7 @@ class TestSortKeyValidation:
 
 
 class TestNamespaceReceiverDtype:
-    """Issue #31: namespace accessors validate the receiver dtype (PLY012).
+    """Issue #31: namespace accessors validate the receiver dtype (pple-wrong-namespace-dtype).
 
     Verified against polars 1.41.2: ``.str`` rejects every non-String
     receiver at runtime (Categorical/Enum included: "expected String type,
@@ -8752,7 +8760,10 @@ class TestNamespaceReceiverDtype:
     )
     def test_wrong_receiver_dtype_flags_ply012(self, expr: str):
         results = self._analyze(expr)
-        assert any("PLY012" in e for e in results[0].errors), (expr, results[0].errors)
+        assert any("pple-wrong-namespace-dtype" in e for e in results[0].errors), (
+            expr,
+            results[0].errors,
+        )
 
     @pytest.mark.parametrize(
         "expr",
@@ -8789,7 +8800,7 @@ class TestNamespaceReceiverDtype:
     def test_message_names_namespace_column_and_dtype(self):
         results = self._analyze('pl.col("i").str.contains("x")')
         err = results[0].errors[0]
-        assert "PLY012" in err
+        assert "pple-wrong-namespace-dtype" in err
         assert ".str" in err
         assert "'i'" in err
         assert "Int64" in err
@@ -8821,7 +8832,7 @@ class TestNamespaceReceiverDtype:
             """
         )
         results = analyze_source(source)
-        assert any("PLY012" in e for e in results[0].errors), results[0].errors
+        assert any("pple-wrong-namespace-dtype" in e for e in results[0].errors), results[0].errors
 
     # upgrade trigger: open frames gain row-var bounds (provably-absent columns)
     @pytest.mark.imprecision
@@ -8848,7 +8859,7 @@ class TestNamespaceReceiverDtype:
     def test_chained_receiver_dtype_is_validated(self):
         """`.dt` after an aggregation chain sees the chain's result dtype."""
         results = self._analyze('pl.col("i").max().dt.year()')
-        assert any("PLY012" in e for e in results[0].errors), results[0].errors
+        assert any("pple-wrong-namespace-dtype" in e for e in results[0].errors), results[0].errors
 
     def test_chained_receiver_valid_dtype_passes(self):
         results = self._analyze('pl.col("ts").max().dt.year()')
@@ -8857,14 +8868,14 @@ class TestNamespaceReceiverDtype:
     def test_arr_on_list_message_names_array_requirement(self):
         results = self._analyze('pl.col("xs").arr.sum()')
         err = results[0].errors[0]
-        assert "PLY012" in err
+        assert "pple-wrong-namespace-dtype" in err
         assert "an Array column" in err
         assert "List[Int64]" in err
 
     def test_list_on_array_message_names_list_requirement(self):
         results = self._analyze('pl.col("q").list.sum()')
         err = results[0].errors[0]
-        assert "PLY012" in err
+        assert "pple-wrong-namespace-dtype" in err
         assert "a List column" in err
         assert "Array[Int64, 3]" in err
 
@@ -8873,7 +8884,7 @@ class TestNamespaceReceiverDtype:
         # InvalidOperationError — the message says so.
         results = self._analyze('pl.col("i").cat.get_categories()')
         err = results[0].errors[0]
-        assert "PLY012" in err
+        assert "pple-wrong-namespace-dtype" in err
         assert "a Categorical or Enum column" in err
         assert "SchemaError" in err
 
@@ -8917,7 +8928,7 @@ class TestNamespaceReceiverDtype:
             """
         )
         results = analyze_source(source)
-        assert any("PLY012" in e for e in results[0].errors), results[0].errors
+        assert any("pple-wrong-namespace-dtype" in e for e in results[0].errors), results[0].errors
 
 
 class TestArrNamespaceReturns:
@@ -9030,7 +9041,7 @@ class TestArrNamespaceReturns:
             """
         )
         results = analyze_source(source)
-        assert any("PLY009" in e for e in results[0].errors), results[0].errors
+        assert any("pple-incompatible-operands" in e for e in results[0].errors), results[0].errors
 
     def test_arr_eval_as_list_bad_body_bubbles_error(self):
         # The body is type-checked for ``as_list=True`` too — the old
@@ -9044,7 +9055,7 @@ class TestArrNamespaceReturns:
             """
         )
         results = analyze_source(source)
-        assert any("PLY009" in e for e in results[0].errors), results[0].errors
+        assert any("pple-incompatible-operands" in e for e in results[0].errors), results[0].errors
 
     # upgrade trigger: non-literal as_list values gain constant propagation
     @pytest.mark.imprecision
@@ -9114,7 +9125,7 @@ class TestContainerAggMatrix:
 
     Probed on polars 1.41.2 (see ``compat.polars_api.container_agg_return``):
     valid cells keep the probed result dtype; probed-invalid cells (runtime
-    InvalidOperationError / ComputeError / rust panic) flag PLY016 and the
+    InvalidOperationError / ComputeError / rust panic) flag pple-non-numeric-operand and the
     output degrades to Unknown; unclaimed cells (degenerate all-null
     results, unprobed dtypes) stay silent with an Unknown output.
     """
@@ -9221,7 +9232,7 @@ class TestContainerAggMatrix:
     )
     def test_probed_invalid_cells_flag_ply016(self, expr: str):
         errors, dtype = self._analyze(expr)
-        assert any("PLY016" in e for e in errors), (expr, errors)
+        assert any("pple-non-numeric-operand" in e for e in errors), (expr, errors)
         # The output column still exists at runtime semantics-wise; it is
         # registered as Unknown so downstream lookups resolve.
         assert dtype == Unknown(), (expr, dtype)
@@ -9258,7 +9269,7 @@ class TestContainerAggMatrix:
             """
         )
         results = analyze_source(source)
-        assert any("PLY016" in e for e in results[0].errors), results[0].errors
+        assert any("pple-non-numeric-operand" in e for e in results[0].errors), results[0].errors
 
 
 class TestCatNamespaceReturns:
@@ -9312,7 +9323,7 @@ class TestCatNamespaceReturns:
 
 
 class TestOverKeyValidation:
-    """Issue #32: ``over`` validates partition/order keys exist (PLY001).
+    """Issue #32: ``over`` validates partition/order keys exist (pple-column-not-found).
 
     Verified against polars 1.41.2: positional string args, the
     ``partition_by=`` kwarg and the ``order_by=`` kwarg all resolve strings
@@ -9342,7 +9353,7 @@ class TestOverKeyValidation:
 
     def test_missing_literal_key_flags_ply001(self):
         results = self._analyze('df.select(pl.col("v").sum().over("ghost"))')
-        assert any("PLY042" in e and "ghost" in e for e in results[0].errors)
+        assert any("pple-undeclared-column" in e and "ghost" in e for e in results[0].errors)
 
     def test_existing_literal_key_passes(self):
         results = self._analyze('df.select(pl.col("v").sum().over("s"))')
@@ -9350,7 +9361,7 @@ class TestOverKeyValidation:
 
     def test_varargs_keys_each_checked(self):
         results = self._analyze('df.select(pl.col("v").sum().over("s", "ghost"))')
-        assert any("PLY042" in e and "ghost" in e for e in results[0].errors)
+        assert any("pple-undeclared-column" in e and "ghost" in e for e in results[0].errors)
 
     def test_multiple_existing_keys_pass(self):
         results = self._analyze('df.select(pl.col("v").sum().over("s", "t"))')
@@ -9358,11 +9369,11 @@ class TestOverKeyValidation:
 
     def test_list_keys_each_checked(self):
         results = self._analyze('df.select(pl.col("v").sum().over(["s", "ghost"]))')
-        assert any("PLY042" in e and "ghost" in e for e in results[0].errors)
+        assert any("pple-undeclared-column" in e and "ghost" in e for e in results[0].errors)
 
     def test_expr_key_missing_flags_ply001(self):
         results = self._analyze('df.select(pl.col("v").sum().over(pl.col("ghost")))')
-        assert any("PLY042" in e and "ghost" in e for e in results[0].errors)
+        assert any("pple-undeclared-column" in e and "ghost" in e for e in results[0].errors)
 
     def test_expr_key_existing_passes(self):
         results = self._analyze('df.select(pl.col("v").sum().over(pl.col("s")))')
@@ -9370,7 +9381,7 @@ class TestOverKeyValidation:
 
     def test_order_by_kwarg_missing_flags_ply001(self):
         results = self._analyze('df.select(pl.col("v").first().over("s", order_by="ghost"))')
-        assert any("PLY042" in e and "ghost" in e for e in results[0].errors)
+        assert any("pple-undeclared-column" in e and "ghost" in e for e in results[0].errors)
 
     def test_order_by_kwarg_existing_passes(self):
         results = self._analyze('df.select(pl.col("v").first().over("s", order_by="t"))')
@@ -9378,11 +9389,11 @@ class TestOverKeyValidation:
 
     def test_order_by_list_each_checked(self):
         results = self._analyze('df.select(pl.col("v").first().over("s", order_by=["t", "ghost"]))')
-        assert any("PLY042" in e and "ghost" in e for e in results[0].errors)
+        assert any("pple-undeclared-column" in e and "ghost" in e for e in results[0].errors)
 
     def test_partition_by_kwarg_missing_flags_ply001(self):
         results = self._analyze('df.select(pl.col("v").sum().over(partition_by="ghost"))')
-        assert any("PLY042" in e and "ghost" in e for e in results[0].errors)
+        assert any("pple-undeclared-column" in e and "ghost" in e for e in results[0].errors)
 
     def test_mapping_strategy_kwarg_is_not_a_column(self):
         results = self._analyze('df.select(pl.col("v").sum().over("s", mapping_strategy="join"))')
@@ -9418,7 +9429,7 @@ class TestOverKeyValidation:
     def test_with_columns_over_missing_flags_ply001(self):
         """Issue #32 repro shape: with_columns(g=...over("ghost"))."""
         results = self._analyze('df.with_columns(g=pl.col("v").sum().over("ghost"))')
-        assert any("PLY042" in e and "ghost" in e for e in results[0].errors)
+        assert any("pple-undeclared-column" in e and "ghost" in e for e in results[0].errors)
 
 
 class TestOverMappingStrategy:
@@ -9566,11 +9577,11 @@ class TestOverMappingStrategy:
             """
         )
         results = analyze_source(source)
-        assert any("PLY042" in e and "ghost" in e for e in results[0].errors)
+        assert any("pple-undeclared-column" in e and "ghost" in e for e in results[0].errors)
 
 
 class TestComparisonIncompatibleDtypes:
-    """Issue #33: comparisons between incompatible dtypes flag PLY009.
+    """Issue #33: comparisons between incompatible dtypes flag pple-incompatible-operands.
 
     Ground truth verified against polars 1.41.2 by driving the full
     10-dtype x {==, !=, <, <=, >, >=} product through ``df.select``
@@ -9706,7 +9717,7 @@ class TestComparisonIncompatibleDtypes:
     def test_invalid_combination_flags_ply009(self, expr: str) -> None:
         analyzer = _run_body(self._frame(), f"out = df.select(m={expr})")
         assert len(analyzer.errors) == 1, analyzer.errors
-        assert "PLY009" in analyzer.errors[0]
+        assert "pple-incompatible-operands" in analyzer.errors[0]
         # Comparisons stay Boolean-typed — the error is the signal.
         assert analyzer.var_types["out"].columns["m"].dtype == Boolean()
 
@@ -9720,7 +9731,7 @@ class TestComparisonIncompatibleDtypes:
             self._frame(), "out = df.select(m=pl.col('cat') < pl.col('i') < pl.col('s'))"
         )
         assert len(analyzer.errors) == 2, analyzer.errors
-        assert all("PLY009" in e for e in analyzer.errors)
+        assert all("pple-incompatible-operands" in e for e in analyzer.errors)
 
     def test_parenthesized_comparison_result_is_boolean_operand(self):
         # (i < f) < s is NOT a chained compare: the left operand is the
@@ -9734,7 +9745,7 @@ class TestComparisonIncompatibleDtypes:
         analyzer = _run_body(self._frame(), "out = df.select(m=pl.col('s') < pl.col('i') < 3)")
         # s < i is invalid; i < 3 is fine.
         assert len(analyzer.errors) == 1, analyzer.errors
-        assert "PLY009" in analyzer.errors[0]
+        assert "pple-incompatible-operands" in analyzer.errors[0]
         assert analyzer.var_types["out"].columns["m"].dtype == Boolean()
 
     # -- Nullable unwrap / nullability propagation -----------------------------
@@ -9742,7 +9753,7 @@ class TestComparisonIncompatibleDtypes:
     def test_invalid_pair_detected_under_nullable_wrappers(self):
         analyzer = _run_body(self._frame(), "out = df.select(m=pl.col('ns') == pl.col('ni'))")
         assert len(analyzer.errors) == 1, analyzer.errors
-        assert "PLY009" in analyzer.errors[0]
+        assert "pple-incompatible-operands" in analyzer.errors[0]
         assert "Utf8 == Int64" in analyzer.errors[0]
 
     def test_nullable_operand_keeps_nullable_boolean_result(self):
@@ -9770,7 +9781,7 @@ class TestComparisonIncompatibleDtypes:
 
 
 class TestIsInIncompatibleDtypes:
-    """Issue #33: ``is_in`` element dtype incompatible with receiver flags PLY009.
+    """Issue #33: ``is_in`` element dtype incompatible with receiver flags pple-incompatible-operands.
 
     Ground truth verified against polars 1.41.2 (probe output in the
     implementing commit message). ``is_in`` is stricter than comparison:
@@ -9867,7 +9878,7 @@ class TestIsInIncompatibleDtypes:
     def test_invalid_combination_flags_ply009(self, expr: str) -> None:
         analyzer = _run_body(self._frame(), f"out = df.select(m={expr})")
         assert len(analyzer.errors) == 1, analyzer.errors
-        assert "PLY009" in analyzer.errors[0]
+        assert "pple-incompatible-operands" in analyzer.errors[0]
         # Result stays Boolean — the error is the signal.
         assert analyzer.var_types["out"].columns["m"].dtype == Boolean()
 
@@ -9900,7 +9911,7 @@ class TestIsInIncompatibleDtypes:
 
 
 class TestCastImpossibleDtypes:
-    """Issue #34: ``cast()`` to a structurally impossible target flags PLY013.
+    """Issue #34: ``cast()`` to a structurally impossible target flags pple-invalid-cast.
 
     Ground truth verified against polars 1.41.2 with BOTH ``strict=True``
     and ``strict=False`` (probe output in the implementing commit
@@ -9989,7 +10000,7 @@ class TestCastImpossibleDtypes:
     def test_impossible_cast_flags_ply013_and_degrades_to_unknown(self, expr: str) -> None:
         analyzer = _run_body(self._frame(), f"out = df.select(r={expr})")
         assert len(analyzer.errors) == 1, analyzer.errors
-        assert "PLY013" in analyzer.errors[0]
+        assert "pple-invalid-cast" in analyzer.errors[0]
         # The error is the signal — don't fabricate the target dtype, or a
         # declared-type mismatch downstream would be hidden (issue #34).
         assert analyzer.var_types["out"].columns["r"].dtype == Unknown()
@@ -10077,13 +10088,13 @@ class TestCastImpossibleFrameLevel:
     def test_frame_cast_list_to_int_flags_ply013(self):
         analyzer = _run_body(self._frame(), "out = df.cast({'v': pl.Int64})")
         assert len(analyzer.errors) == 1, analyzer.errors
-        assert "PLY013" in analyzer.errors[0]
+        assert "pple-invalid-cast" in analyzer.errors[0]
         assert "'v'" in analyzer.errors[0]
 
     def test_frame_cast_keeps_source_spec_for_flagged_column(self):
         analyzer = _run_body(self._frame(), "out = df.cast({'v': pl.Int64, 'w': pl.Int32})")
         assert len(analyzer.errors) == 1, analyzer.errors
-        assert "PLY013" in analyzer.errors[0]
+        assert "pple-invalid-cast" in analyzer.errors[0]
         # The flagged column keeps its source dtype; the valid one is cast.
         assert analyzer.var_types["out"].columns["v"].dtype == ListT(Int64())
         assert analyzer.var_types["out"].columns["w"].dtype == Int32()
@@ -10091,7 +10102,7 @@ class TestCastImpossibleFrameLevel:
     def test_frame_cast_strict_false_still_flags(self):
         analyzer = _run_body(self._frame(), "out = df.cast({'v': pl.Int64}, strict=False)")
         assert len(analyzer.errors) == 1, analyzer.errors
-        assert "PLY013" in analyzer.errors[0]
+        assert "pple-invalid-cast" in analyzer.errors[0]
 
     def test_frame_cast_valid_column_no_error(self):
         analyzer = _run_body(self._frame(), "out = df.cast({'w': pl.Utf8})")
@@ -10107,7 +10118,7 @@ class TestCastImpossibleFrameLevel:
 
 
 class TestArrayCastDtypes:
-    """Issue #53: Array cells in the PLY013 cast layer.
+    """Issue #53: Array cells in the pple-invalid-cast cast layer.
 
     Probed (polars 1.41.2, both strict modes):
 
@@ -10162,7 +10173,7 @@ class TestArrayCastDtypes:
     def test_impossible_array_cast_flags_ply013(self, expr: str) -> None:
         analyzer = _run_body(self._frame(), f"out = df.select(r={expr})")
         assert len(analyzer.errors) == 1, (expr, analyzer.errors)
-        assert "PLY013" in analyzer.errors[0]
+        assert "pple-invalid-cast" in analyzer.errors[0]
 
     @pytest.mark.parametrize(
         ("expr", "expected"),
@@ -10215,7 +10226,7 @@ class TestArrayOperationLayers:
     def test_explode_scalar_column_message_mentions_both_containers(self):
         analyzer = _run_body(self._frame(), 'out = df.explode("i")')
         assert len(analyzer.errors) == 1
-        assert "PLY021" in analyzer.errors[0]
+        assert "pple-explode" in analyzer.errors[0]
         assert "List/Array" in analyzer.errors[0]
 
     # -- is_in (probed: an Array(T) expression argument contributes T) ----------
@@ -10228,7 +10239,7 @@ class TestArrayOperationLayers:
     def test_is_in_array_expr_arg_mismatched_element_flags_ply009(self):
         # Probed: Utf8.is_in(Array(Int64)) raises InvalidOperationError.
         analyzer = _run_body(self._frame(), 'out = df.select(r=pl.col("s").is_in(pl.col("q")))')
-        assert any("PLY009" in e for e in analyzer.errors), analyzer.errors
+        assert any("pple-incompatible-operands" in e for e in analyzer.errors), analyzer.errors
 
     def test_is_in_array_receiver_stays_silent(self):
         # An Array receiver is outside the probed is_in category set.
@@ -10240,7 +10251,10 @@ class TestArrayOperationLayers:
     @pytest.mark.parametrize("method", ["cum_sum", "cum_prod", "cum_min", "cum_max"])
     def test_cum_methods_on_array_flag_ply016(self, method: str):
         analyzer = _run_body(self._frame(), f'out = df.select(r=pl.col("q").{method}())')
-        assert any("PLY016" in e for e in analyzer.errors), (method, analyzer.errors)
+        assert any("pple-non-numeric-operand" in e for e in analyzer.errors), (
+            method,
+            analyzer.errors,
+        )
 
     def test_cum_count_on_array_is_fine(self):
         # Probed: cum_count returns UInt32 for every receiver, Array included.
@@ -10269,7 +10283,7 @@ class TestArrayOperationLayers:
 
 
 class TestWhenConditionDtype:
-    """Issue #37: ``pl.when(<cond>)`` with a non-Boolean condition is PLY008.
+    """Issue #37: ``pl.when(<cond>)`` with a non-Boolean condition is pple-non-boolean-predicate.
 
     Probed (polars 1.41.2): ``pl.when(pl.col("a"))`` with ``a: Int64`` raises
     ``SchemaError: invalid series dtype: expected `Boolean`, got `i64```;
@@ -10298,25 +10312,26 @@ class TestWhenConditionDtype:
 
     def test_nonbool_column_condition_flags_ply008(self):
         results = self._analyze('df.select(x=pl.when(pl.col("a")).then(1).otherwise(0))')
-        assert any("PLY008" in e and "when" in e and "Int64" in e for e in results[0].errors), (
-            results[0].errors
-        )
+        assert any(
+            "pple-non-boolean-predicate" in e and "when" in e and "Int64" in e
+            for e in results[0].errors
+        ), results[0].errors
 
     def test_chained_when_nonbool_condition_flags_ply008(self):
         results = self._analyze(
             'df.select(x=pl.when(pl.col("flag")).then(1).when(pl.col("a")).then(2).otherwise(0))'
         )
-        assert any("PLY008" in e and "when" in e for e in results[0].errors)
+        assert any("pple-non-boolean-predicate" in e and "when" in e for e in results[0].errors)
 
     def test_nonbool_constant_condition_flags_ply008(self):
         # Probed: ``pl.when(1)`` raises SchemaError (expected Boolean, got i32).
         results = self._analyze("df.select(x=pl.when(1).then(1).otherwise(0))")
-        assert any("PLY008" in e for e in results[0].errors)
+        assert any("pple-non-boolean-predicate" in e for e in results[0].errors)
 
     def test_bare_string_condition_is_column_reference(self):
         # Probed: ``pl.when("flag")`` resolves the string as a column name.
         results = self._analyze('df.select(x=pl.when("a").then(1).otherwise(0))')
-        assert any("PLY008" in e for e in results[0].errors)
+        assert any("pple-non-boolean-predicate" in e for e in results[0].errors)
 
     def test_boolean_bare_string_condition_passes(self):
         results = self._analyze('df.select(x=pl.when("flag").then(1).otherwise(0))')
@@ -10324,8 +10339,8 @@ class TestWhenConditionDtype:
 
     def test_missing_column_condition_is_ply001_not_ply008(self):
         results = self._analyze('df.select(x=pl.when("ghost").then(1).otherwise(0))')
-        assert any("PLY042" in e and "ghost" in e for e in results[0].errors)
-        assert not any("PLY008" in e for e in results[0].errors)
+        assert any("pple-undeclared-column" in e and "ghost" in e for e in results[0].errors)
+        assert not any("pple-non-boolean-predicate" in e for e in results[0].errors)
 
     def test_boolean_condition_passes(self):
         results = self._analyze('df.select(x=pl.when(pl.col("flag")).then(1).otherwise(0))')
@@ -10346,13 +10361,13 @@ class TestWhenConditionDtype:
         results = self._analyze(
             'df.select(x=pl.when(pl.col("flag"), pl.col("a")).then(1).otherwise(0))'
         )
-        ply008 = [e for e in results[0].errors if "PLY008" in e]
+        ply008 = [e for e in results[0].errors if "pple-non-boolean-predicate" in e]
         assert len(ply008) == 1
 
     def test_kwarg_equality_constraint_not_flagged(self):
         # ``when(a=1)`` is an equality constraint — boolean by construction.
         results = self._analyze("df.select(x=pl.when(a=1).then(1).otherwise(0))")
-        assert not any("PLY008" in e for e in results[0].errors)
+        assert not any("pple-non-boolean-predicate" in e for e in results[0].errors)
 
     def test_unknown_dtype_condition_not_flagged(self):
         source = self.HEADER + textwrap.dedent(
@@ -10594,7 +10609,7 @@ class TestShiftFillValue:
 
 
 class TestUniqueSubsetValidation:
-    """Issue #35: ``unique`` validates subset columns like drop_nulls does (PLY014)."""
+    """Issue #35: ``unique`` validates subset columns like drop_nulls does (pple-column-not-found)."""
 
     HEADER = textwrap.dedent(
         PANDERA_HEADER
@@ -10620,19 +10635,19 @@ class TestUniqueSubsetValidation:
 
     def test_missing_subset_list_kwarg_flags_ply014(self):
         results = self._analyze('df.unique(subset=["ghost"])')
-        assert any("PLY014" in e and "ghost" in e for e in results[0].errors)
+        assert any("pple-column-not-found" in e and "ghost" in e for e in results[0].errors)
 
     def test_missing_subset_string_kwarg_flags_ply014(self):
         results = self._analyze('df.unique(subset="ghost")')
-        assert any("PLY014" in e and "ghost" in e for e in results[0].errors)
+        assert any("pple-column-not-found" in e and "ghost" in e for e in results[0].errors)
 
     def test_missing_subset_positional_list_flags_ply014(self):
         results = self._analyze('df.unique(["a", "ghost"])')
-        assert any("PLY014" in e and "ghost" in e for e in results[0].errors)
+        assert any("pple-column-not-found" in e and "ghost" in e for e in results[0].errors)
 
     def test_missing_subset_positional_string_flags_ply014(self):
         results = self._analyze('df.unique("ghost")')
-        assert any("PLY014" in e and "ghost" in e for e in results[0].errors)
+        assert any("pple-column-not-found" in e and "ghost" in e for e in results[0].errors)
 
     def test_existing_subset_passes(self):
         results = self._analyze('df.unique(subset=["a"])')
@@ -10651,7 +10666,7 @@ class TestUniqueSubsetValidation:
             """
         )
         results = analyze_source(source)
-        assert any("PLY014" in e and "ghost" in e for e in results[0].errors)
+        assert any("pple-column-not-found" in e and "ghost" in e for e in results[0].errors)
 
     def test_module_const_name_subset_resolves(self):
         source = (
@@ -10665,7 +10680,7 @@ class TestUniqueSubsetValidation:
             )
         )
         results = analyze_source(source)
-        assert any("PLY014" in e and "ghost" in e for e in results[0].errors)
+        assert any("pple-column-not-found" in e and "ghost" in e for e in results[0].errors)
 
     def test_local_const_shadows_module_const(self):
         source = (
@@ -10680,7 +10695,7 @@ class TestUniqueSubsetValidation:
             )
         )
         results = analyze_source(source)
-        assert any("PLY014" in e and "ghost" in e for e in results[0].errors)
+        assert any("pple-column-not-found" in e and "ghost" in e for e in results[0].errors)
 
     def test_keep_and_maintain_order_kwargs_are_ignored(self):
         results = self._analyze('df.unique(subset=["a"], keep="first", maintain_order=True)')
@@ -10877,7 +10892,7 @@ class TestDuplicateOutputColumns:
     def test_select_alias_collides_with_plain_col(self):
         analyzer = _run_body(self._frame(), 'out = df.select(pl.col("a"), pl.col("b").alias("a"))')
         assert len(analyzer.errors) == 1, analyzer.errors
-        assert "PLY015" in analyzer.errors[0]
+        assert "pple-duplicate-column" in analyzer.errors[0]
         assert "'a'" in analyzer.errors[0]
         assert "select" in analyzer.errors[0]
 
@@ -10889,27 +10904,27 @@ class TestDuplicateOutputColumns:
     def test_select_duplicate_bare_strings(self):
         analyzer = _run_body(self._frame(), 'out = df.select("a", "a")')
         assert len(analyzer.errors) == 1, analyzer.errors
-        assert "PLY015" in analyzer.errors[0]
+        assert "pple-duplicate-column" in analyzer.errors[0]
 
     def test_select_selector_collides_with_string(self):
         analyzer = _run_body(self._frame(), 'out = df.select(cs.all(), "a")')
         assert len(analyzer.errors) == 1, analyzer.errors
-        assert "PLY015" in analyzer.errors[0]
+        assert "pple-duplicate-column" in analyzer.errors[0]
 
     def test_select_kwarg_collides_with_positional(self):
         analyzer = _run_body(self._frame(), "out = df.select(pl.col('a'), a=pl.lit(1))")
         assert len(analyzer.errors) == 1, analyzer.errors
-        assert "PLY015" in analyzer.errors[0]
+        assert "pple-duplicate-column" in analyzer.errors[0]
 
     def test_select_kwarg_string_rename_collides(self):
         analyzer = _run_body(self._frame(), "out = df.select('a', a='b')")
         assert len(analyzer.errors) == 1, analyzer.errors
-        assert "PLY015" in analyzer.errors[0]
+        assert "pple-duplicate-column" in analyzer.errors[0]
 
     def test_select_plural_col_overlaps_single(self):
         analyzer = _run_body(self._frame(), 'out = df.select(pl.col("a", "b"), pl.col("a"))')
         assert len(analyzer.errors) == 1, analyzer.errors
-        assert "PLY015" in analyzer.errors[0]
+        assert "pple-duplicate-column" in analyzer.errors[0]
 
     def test_select_distinct_outputs_no_error(self):
         analyzer = _run_body(self._frame(), 'out = df.select(pl.col("a"), pl.col("b").alias("c"))')
@@ -10920,7 +10935,7 @@ class TestDuplicateOutputColumns:
             self._frame(), 'out = df.with_columns(pl.col("a"), pl.col("b").alias("a"))'
         )
         assert len(analyzer.errors) == 1, analyzer.errors
-        assert "PLY015" in analyzer.errors[0]
+        assert "pple-duplicate-column" in analyzer.errors[0]
         assert "with_columns" in analyzer.errors[0]
 
     def test_with_columns_overwrite_existing_is_legal(self):
@@ -10934,12 +10949,12 @@ class TestDuplicateOutputColumns:
     def test_with_columns_selector_collides_with_expr(self):
         analyzer = _run_body(self._frame(), 'out = df.with_columns(cs.all(), pl.col("a"))')
         assert len(analyzer.errors) == 1, analyzer.errors
-        assert "PLY015" in analyzer.errors[0]
+        assert "pple-duplicate-column" in analyzer.errors[0]
 
     def test_with_columns_string_collides_with_kwarg(self):
         analyzer = _run_body(self._frame(), "out = df.with_columns('a', a=pl.lit(1))")
         assert len(analyzer.errors) == 1, analyzer.errors
-        assert "PLY015" in analyzer.errors[0]
+        assert "pple-duplicate-column" in analyzer.errors[0]
 
 
 class TestRenameDuplicateOutput:
@@ -10954,7 +10969,7 @@ class TestRenameDuplicateOutput:
 
     A simultaneous swap (``rename({"a": "b", "b": "a"})``) is legal — ``b``
     is renamed away as ``a`` is renamed in, so there is no collision.
-    Reuses PLY015 (the duplicate-output-column family).
+    Reuses pple-duplicate-column (the duplicate-output-column family).
     """
 
     def _frame(self) -> FrameType:
@@ -10963,14 +10978,14 @@ class TestRenameDuplicateOutput:
     def test_rename_to_existing_column(self):
         analyzer = _run_body(self._frame(), "out = df.rename({'a': 'b'})")
         assert len(analyzer.errors) == 1, analyzer.errors
-        assert "PLY015" in analyzer.errors[0]
+        assert "pple-duplicate-column" in analyzer.errors[0]
         assert "'b'" in analyzer.errors[0]
         assert "rename" in analyzer.errors[0]
 
     def test_rename_two_sources_one_target(self):
         analyzer = _run_body(self._frame(), "out = df.rename({'a': 'x', 'b': 'x'})")
         assert len(analyzer.errors) == 1, analyzer.errors
-        assert "PLY015" in analyzer.errors[0]
+        assert "pple-duplicate-column" in analyzer.errors[0]
         assert "'x'" in analyzer.errors[0]
         assert "rename" in analyzer.errors[0]
 
@@ -10997,7 +11012,7 @@ class TestRenameDuplicateOutput:
         frame = FrameType({"a": Int64(), "b": Float64()}, rest=RowVar("r"))
         analyzer = _run_body(frame, "out = df.rename({'a': 'b'})")
         assert len(analyzer.errors) == 1, analyzer.errors
-        assert "PLY015" in analyzer.errors[0]
+        assert "pple-duplicate-column" in analyzer.errors[0]
 
     def test_rename_dup_target_unknown_source_on_open_frame_still_flags(self):
         # Two sources -> one target is provable from the args alone, even
@@ -11005,7 +11020,7 @@ class TestRenameDuplicateOutput:
         frame = FrameType({"k": Int64()}, rest=RowVar("r"))
         analyzer = _run_body(frame, "out = df.rename({'a': 'x', 'b': 'x'})")
         assert len(analyzer.errors) == 1, analyzer.errors
-        assert "PLY015" in analyzer.errors[0]
+        assert "pple-duplicate-column" in analyzer.errors[0]
 
     def test_rename_target_among_open_extras_not_flagged(self):
         # The target 'extra' is not a KNOWN column — it might only be among
@@ -11017,7 +11032,7 @@ class TestRenameDuplicateOutput:
     def test_rename_non_literal_target_not_flagged(self):
         # A dynamic mapping value is unresolvable -> stay lenient.
         analyzer = _run_body(self._frame(), "out = df.rename({'a': some_name})")
-        assert all("PLY015" not in e for e in analyzer.errors), analyzer.errors
+        assert all("pple-duplicate-column" not in e for e in analyzer.errors), analyzer.errors
 
 
 class TestPluralColExpansion:
@@ -11078,15 +11093,15 @@ class TestPluralColExpansion:
 
     def test_aliased_plural_flags_duplicate_output(self):
         # Probed: select(pl.col("a","b").alias("x")) raises DuplicateError —
-        # the expansion produces "x" twice and PLY015 catches it (issue #36).
+        # the expansion produces "x" twice and pple-duplicate-column catches it (issue #36).
         analyzer = _run_body(self._frame(), 'out = df.select(pl.col("a", "b").alias("x"))')
         assert len(analyzer.errors) == 1, analyzer.errors
-        assert "PLY015" in analyzer.errors[0]
+        assert "pple-duplicate-column" in analyzer.errors[0]
 
     def test_missing_column_in_plural_expression_errors(self):
         analyzer = _run_body(self._frame(), 'out = df.select(pl.col("a", "missing") * 10)')
         assert len(analyzer.errors) == 1, analyzer.errors
-        assert "PLY001" in analyzer.errors[0]
+        assert "pple-column-not-found" in analyzer.errors[0]
         assert "missing" in analyzer.errors[0]
 
     def test_two_plural_nodes_stay_silent(self):
@@ -11124,7 +11139,7 @@ class TestListEvalBody:
             'out = df.select(pl.col("v").list.eval(pl.element() + pl.lit("x")))',
         )
         assert len(analyzer.errors) == 1, analyzer.errors
-        assert "PLY009" in analyzer.errors[0]
+        assert "pple-incompatible-operands" in analyzer.errors[0]
 
     def test_invalid_eval_body_degrades_to_list_unknown(self):
         analyzer = _run_body(
@@ -11319,7 +11334,7 @@ class TestTzMismatchedDatetimeOps:
             }
         )
 
-    # -- arithmetic (PLY009) ---------------------------------------------------
+    # -- arithmetic (pple-incompatible-operands) ---------------------------------------------------
 
     @pytest.mark.parametrize(
         "expr",
@@ -11332,7 +11347,7 @@ class TestTzMismatchedDatetimeOps:
     def test_tz_mismatched_subtraction_flags_ply009(self, expr: str) -> None:
         analyzer = _run_body(self._frame(), f"out = df.select(r={expr})")
         assert len(analyzer.errors) == 1, analyzer.errors
-        assert "PLY009" in analyzer.errors[0]
+        assert "pple-incompatible-operands" in analyzer.errors[0]
         assert analyzer.var_types["out"].columns["r"].dtype == Unknown()
 
     @pytest.mark.parametrize(
@@ -11355,7 +11370,7 @@ class TestTzMismatchedDatetimeOps:
         assert analyzer.errors == [], analyzer.errors
         assert analyzer.var_types["out"].columns["r"].dtype == expected
 
-    # -- comparisons (PLY009) ---------------------------------------------------
+    # -- comparisons (pple-incompatible-operands) ---------------------------------------------------
 
     @pytest.mark.parametrize(
         "expr",
@@ -11369,7 +11384,7 @@ class TestTzMismatchedDatetimeOps:
     def test_tz_mismatched_comparison_flags_ply009(self, expr: str) -> None:
         analyzer = _run_body(self._frame(), f"out = df.select(r={expr})")
         assert len(analyzer.errors) == 1, analyzer.errors
-        assert "PLY009" in analyzer.errors[0]
+        assert "pple-incompatible-operands" in analyzer.errors[0]
 
     @pytest.mark.parametrize(
         "expr",
@@ -11402,7 +11417,7 @@ class TestTzMismatchedDatetimeOps:
         assert analyzer.errors == [], analyzer.errors
         assert analyzer.var_types["out"].columns["r"].dtype == Boolean()
 
-    # -- join keys (PLY010 via JoinError) ---------------------------------------
+    # -- join keys (pple-join-key via JoinError) ---------------------------------------
 
     def _run_two(self, left: FrameType, right: FrameType, body: str):
         import ast as _ast
@@ -11419,7 +11434,7 @@ class TestTzMismatchedDatetimeOps:
         right = FrameType({"t": Datetime(tz="UTC"), "y": Int64()})
         analyzer = self._run_two(left, right, "out = a.join(b, on='t', how='inner')")
         assert len(analyzer.errors) == 1, analyzer.errors
-        assert "PLY010" in analyzer.errors[0]
+        assert "pple-join-key" in analyzer.errors[0]
 
     def test_join_on_same_tz_keys_passes(self) -> None:
         left = FrameType({"t": Datetime(tz="UTC"), "x": Int64()})
@@ -11428,14 +11443,14 @@ class TestTzMismatchedDatetimeOps:
         assert analyzer.errors == [], analyzer.errors
         assert analyzer.var_types["out"].columns["t"].dtype == Datetime(tz="UTC")
 
-    # -- concat (PLY020 via unify_types) ----------------------------------------
+    # -- concat (pple-concat-mismatch via unify_types) ----------------------------------------
 
     def test_concat_vertical_tz_mismatch_flags_ply020(self) -> None:
         naive = FrameType({"t": Datetime()})
         utc = FrameType({"t": Datetime(tz="UTC")})
         analyzer = self._run_two(naive, utc, "out = pl.concat([a, b], how='vertical')")
         assert len(analyzer.errors) == 1, analyzer.errors
-        assert "PLY020" in analyzer.errors[0]
+        assert "pple-concat-mismatch" in analyzer.errors[0]
 
     def test_concat_vertical_same_tz_passes(self) -> None:
         utc = FrameType({"t": Datetime(tz="UTC")})
@@ -11605,7 +11620,7 @@ class TestBinNamespace:
 
     Probed (polars 1.41.2):
     - ``.bin`` on a non-Binary receiver raises SchemaError ("expected
-      `Binary`") for Int64 AND String alike -> PLY012; only Binary passes.
+      `Binary`") for Int64 AND String alike -> pple-wrong-namespace-dtype; only Binary passes.
     - Return dtypes: ``encode("hex"/"base64")`` -> String, ``decode`` ->
       Binary, ``size()`` -> UInt32, ``contains`` / ``starts_with`` /
       ``ends_with`` -> Boolean.
@@ -11628,7 +11643,7 @@ class TestBinNamespace:
     def test_bin_on_non_binary_flags_ply012(self, col: str) -> None:
         analyzer = _run_body(self._frame(), f"out = df.select(r=pl.col('{col}').bin.size())")
         assert len(analyzer.errors) == 1, analyzer.errors
-        assert "PLY012" in analyzer.errors[0]
+        assert "pple-wrong-namespace-dtype" in analyzer.errors[0]
         assert "Binary" in analyzer.errors[0]
         assert analyzer.var_types["out"].columns["r"].dtype == Unknown()
 
@@ -11671,7 +11686,7 @@ class TestBinNamespace:
         assert analyzer.errors == [], analyzer.errors
         assert analyzer.var_types["out"].columns["r"].dtype == Unknown()
 
-    # -- PLY013 cast layer: Binary is outside the understood set — silent ------
+    # -- pple-invalid-cast cast layer: Binary is outside the understood set — silent ------
 
     @pytest.mark.parametrize(
         ("expr", "expected"),
@@ -11681,7 +11696,7 @@ class TestBinNamespace:
             ("pl.col('i').cast(pl.Binary)", None),
             ("pl.col('b').cast(pl.String)", Utf8()),
             # Binary -> Int64 is a probed runtime error in both strict
-            # modes, but Binary is outside the PLY013 category set — it
+            # modes, but Binary is outside the pple-invalid-cast category set — it
             # must stay SILENT (false positives are worse), and the cast
             # pins the target dtype as usual.
             ("pl.col('b').cast(pl.Int64)", Int64()),
@@ -11841,7 +11856,7 @@ class TestNameNamespace:
 
     def test_name_map_warns_plw004_and_opens_the_frame(self):
         result = self._frame('df.select(pl.col("a").name.map(lambda c: c.upper()))')
-        assert any("PLW004" in w for w in result.warnings), result.warnings
+        assert any("pplw-untyped-callable" in w for w in result.warnings), result.warnings
         ft = result.inferred_return_type
         assert ft is not None
         assert ft.columns == {}
@@ -11849,7 +11864,7 @@ class TestNameNamespace:
 
     def test_map_fields_warns_plw004_dtype_unknown_name_kept(self):
         result = self._frame('df.select(pl.col("a").name.map_fields(lambda c: c.upper()))')
-        assert any("PLW004" in w for w in result.warnings), result.warnings
+        assert any("pplw-untyped-callable" in w for w in result.warnings), result.warnings
         ft = result.inferred_return_type
         assert ft is not None
         assert {name: spec.dtype for name, spec in ft.columns.items()} == {"a": Unknown()}
@@ -11969,7 +11984,7 @@ class TestNameNamespace:
 
 class TestUnmodeledMethodWarning:
     """Backlog B-4: an unmodeled method on a precisely-resolved receiver
-    silently degrades the dtype to Unknown — PLW007 makes the degradation
+    silently degrades the dtype to Unknown — pplw-unmodeled-method makes the degradation
     visible so drift against new polars releases stops being silent.
 
     Probed (polars 1.41.2): ``peak_max`` returns Boolean — a real polars
@@ -11999,21 +12014,21 @@ class TestUnmodeledMethodWarning:
 
     def test_unmodeled_chain_method_warns_plw007(self):
         result = self._frame('df.select(pl.col("a").peak_max())')
-        assert any("PLW007" in w for w in result.warnings), result.warnings
+        assert any("pplw-unmodeled-method" in w for w in result.warnings), result.warnings
 
     def test_unmodeled_namespace_method_warns_plw007(self):
         result = self._frame('df.select(pl.col("b").str.not_a_real_method(), pl.col("a"))')
-        assert any("PLW007" in w for w in result.warnings), result.warnings
+        assert any("pplw-unmodeled-method" in w for w in result.warnings), result.warnings
 
     def test_modeled_methods_do_not_warn(self):
         result = self._frame('df.select(pl.col("a").sum(), pl.col("b").str.to_uppercase())')
-        assert not any("PLW007" in w for w in result.warnings), result.warnings
+        assert not any("pplw-unmodeled-method" in w for w in result.warnings), result.warnings
 
     def test_degraded_receiver_does_not_cascade(self):
         # Only the FIRST unmodeled call warns; the second sees an
         # already-degraded receiver and stays silent (no warning pile-up).
         result = self._frame('df.select(pl.col("a").peak_max().also_not_real())')
-        plw007 = [w for w in result.warnings if "PLW007" in w]
+        plw007 = [w for w in result.warnings if "pplw-unmodeled-method" in w]
         assert len(plw007) == 1, result.warnings
 
     def test_unknown_receiver_does_not_warn(self):
@@ -12031,20 +12046,22 @@ class TestUnmodeledMethodWarning:
         )
         results = analyze_source(source)
         assert results[0].errors == [], results[0].errors
-        assert not any("PLW007" in w for w in results[0].warnings), results[0].warnings
+        assert not any("pplw-unmodeled-method" in w for w in results[0].warnings), results[
+            0
+        ].warnings
 
     def test_cast_right_after_unmodeled_call_retracts_the_warning(self):
-        # The explicit cast is exactly the repair PLW007 recommends, so the
+        # The explicit cast is exactly the repair pplw-unmodeled-method recommends, so the
         # warning emitted for the receiver chain is retracted.
         result = self._frame('df.select(pl.col("a").peak_max().cast(pl.Int64))')
-        assert not any("PLW007" in w for w in result.warnings), result.warnings
+        assert not any("pplw-unmodeled-method" in w for w in result.warnings), result.warnings
 
 
 class TestAnnotatedAssignmentChecking:
     """ADR-0005 two-direction rule: ``x: DataFrame[A] = expr`` is checked
     against the inferred RHS. Pure narrowing assertions (declared <:
-    inferred) warn PLW008 with a ``Schema.validate`` remedy; contradictions
-    where neither subtype direction holds are PLY033 errors. The annotation
+    inferred) warn pplw-unbacked-narrowing with a ``Schema.validate`` remedy; contradictions
+    where neither subtype direction holds are pple-annotation-conflict errors. The annotation
     still wins for the variable's downstream type in both cases."""
 
     HEADER = textwrap.dedent(
@@ -12085,27 +12102,27 @@ class TestAnnotatedAssignmentChecking:
             return df
             """
         )
-        assert not any("PLW008" in w for w in result.warnings), result.warnings
+        assert not any("pplw-unbacked-narrowing" in w for w in result.warnings), result.warnings
         assert result.errors == [], result.errors
 
     def test_unrelated_dtype_contradiction_is_error(self):
         # half infers Float64; WrongDtype declares str — neither subtype
-        # direction holds, so the re-interpretation is a PLY033 error.
+        # direction holds, so the re-interpretation is a pple-annotation-conflict error.
         result = self._result(
             """
             x: DataFrame[WrongDtype] = df.select("v", half=pl.col("v") / 2)
             return df
             """
         )
-        ply = [e for e in result.errors if "PLY033" in e]
+        ply = [e for e in result.errors if "pple-annotation-conflict" in e]
         assert ply, result.errors
         assert "half" in ply[0]
-        assert not any("PLW008" in w for w in result.warnings), result.warnings
+        assert not any("pplw-unbacked-narrowing" in w for w in result.warnings), result.warnings
 
     def test_narrowing_assertion_warns(self):
         # Left-join shape: m infers Int64? (nullable); the annotation
         # asserts non-null Int64 — declared <: inferred, a pure narrowing
-        # assertion: PLW008, never an error.
+        # assertion: pplw-unbacked-narrowing, never an error.
         source = self.HEADER + textwrap.dedent(
             """
             class Other(pa.DataFrameModel):
@@ -12118,23 +12135,23 @@ class TestAnnotatedAssignmentChecking:
             """
         )
         results = analyze_source(source)
-        assert any("PLW008" in w for w in results[0].warnings), results[0].warnings
+        assert any("pplw-unbacked-narrowing" in w for w in results[0].warnings), results[0].warnings
         assert results[0].errors == [], results[0].errors
 
     def test_unknown_inference_stays_silent(self):
         # peak_max degrades to Unknown — Unknown-leniency must keep the
-        # annotation non-contradictory (the PLW005 pivot workflow shape).
+        # annotation non-contradictory (the pplw-data-dependent-schema pivot workflow shape).
         result = self._result(
             """
             x: DataFrame[NarrowNonNull] = df.select("v", m=pl.col("v").peak_max())
             return df
             """
         )
-        assert not any("PLW008" in w for w in result.warnings), result.warnings
-        assert not any("PLY033" in e for e in result.errors), result.errors
+        assert not any("pplw-unbacked-narrowing" in w for w in result.warnings), result.warnings
+        assert not any("pple-annotation-conflict" in e for e in result.errors), result.errors
 
     def test_annotation_still_wins_downstream(self):
-        # After the PLY033, downstream typing follows the annotation:
+        # After the pple-annotation-conflict, downstream typing follows the annotation:
         # selecting 'half' off x must not raise a column error on top.
         result = self._result(
             """
@@ -12143,7 +12160,7 @@ class TestAnnotatedAssignmentChecking:
             return df
             """
         )
-        non_ply033 = [e for e in result.errors if "PLY033" not in e]
+        non_ply033 = [e for e in result.errors if "pple-annotation-conflict" not in e]
         assert non_ply033 == [], result.errors
 
     def test_missing_column_over_nonstrict_select_is_narrowing(self):
@@ -12157,8 +12174,8 @@ class TestAnnotatedAssignmentChecking:
             return df
             """
         )
-        assert not any("PLY033" in e for e in result.errors), result.errors
-        assert any("PLW008" in w for w in result.warnings), result.warnings
+        assert not any("pple-annotation-conflict" in e for e in result.errors), result.errors
+        assert any("pplw-unbacked-narrowing" in w for w in result.warnings), result.warnings
 
     def test_laziness_mismatch_is_error(self):
         result = self._result(
@@ -12167,7 +12184,7 @@ class TestAnnotatedAssignmentChecking:
             return df
             """
         )
-        ply = [e for e in result.errors if "PLY033" in e]
+        ply = [e for e in result.errors if "pple-annotation-conflict" in e]
         assert ply, result.errors
         assert "Lazy" in ply[0]
 
@@ -12188,11 +12205,11 @@ class TestAnnotatedAssignmentChecking:
             """
         )
         results = analyze_source(source)
-        assert any("PLY033" in e for e in results[0].errors), results[0].errors
+        assert any("pple-annotation-conflict" in e for e in results[0].errors), results[0].errors
 
     def test_mixed_narrowing_and_contradiction_reports_both(self):
-        # 'extra_typed' is an unrelated re-interpretation (PLY033) while
-        # 'm' is a pure narrowing (PLW008) — both surface, separately.
+        # 'extra_typed' is an unrelated re-interpretation (pple-annotation-conflict) while
+        # 'm' is a pure narrowing (pplw-unbacked-narrowing) — both surface, separately.
         source = self.HEADER + textwrap.dedent(
             """
             class Other(pa.DataFrameModel):
@@ -12212,10 +12229,12 @@ class TestAnnotatedAssignmentChecking:
             """
         )
         results = analyze_source(source)
-        assert any("PLY033" in e and "extra_typed" in e for e in results[0].errors), results[
-            0
-        ].errors
-        assert any("PLW008" in w and "'m'" in w for w in results[0].warnings), results[0].warnings
+        assert any(
+            "pple-annotation-conflict" in e and "extra_typed" in e for e in results[0].errors
+        ), results[0].errors
+        assert any("pplw-unbacked-narrowing" in w and "'m'" in w for w in results[0].warnings), (
+            results[0].warnings
+        )
 
 
 class TestFloat32ReductionWidth:
@@ -12393,7 +12412,7 @@ class TestRollingFloat32Width:
 
 
 class TestArrayWidthCast:
-    """Casting an Array to a different width is PLY013 (backlog C-7).
+    """Casting an Array to a different width is pple-invalid-cast (backlog C-7).
 
     Probed (polars 1.41.2): "cannot cast Array to a different width" raises
     in both strict modes; the element-only cast at the SAME width works.
@@ -12406,7 +12425,7 @@ class TestArrayWidthCast:
         analyzer = _run_body(
             self._frame(), 'out = df.select(r=pl.col("q").cast(pl.Array(pl.Int64, 5)))'
         )
-        assert any("PLY013" in e for e in analyzer.errors), analyzer.errors
+        assert any("pple-invalid-cast" in e for e in analyzer.errors), analyzer.errors
 
     def test_same_width_element_cast_passes(self):
         analyzer = _run_body(
@@ -12427,7 +12446,7 @@ class TestArrayWidthCast:
 class TestUnmodeledFrameMethodWarning:
     """Backlog N-3: an unmodeled FRAME method on a tracked receiver
     silently untracks the variable — every downstream check dies quietly.
-    PLW007 fires only for methods probed (polars 1.41.2) to return a
+    pplw-unmodeled-method fires only for methods probed (polars 1.41.2) to return a
     DataFrame/LazyFrame, because only then does schema tracking silently
     die; terminal methods (``to_dicts``, ``write_*``, ``height``, ...)
     legitimately return non-frames and stay silent, as do unknown names
@@ -12457,7 +12476,7 @@ class TestUnmodeledFrameMethodWarning:
         return analyze_source(source)[0]
 
     def _plw007(self, result):
-        return [w for w in result.warnings if "PLW007" in w]
+        return [w for w in result.warnings if "pplw-unmodeled-method" in w]
 
     def test_unmodeled_frame_returning_method_warns_plw007(self):
         result = self._returning("df.interpolate()")
@@ -12503,10 +12522,10 @@ class TestUnmodeledFrameMethodWarning:
 
     def test_wrong_side_method_gets_the_eager_lazy_error_only(self):
         # ``transpose`` is eager-only: the lazy receiver already gets a
-        # precise PLY030 — piling a "not modeled" warning on top of the
+        # precise pple-eager-only-method — piling a "not modeled" warning on top of the
         # error would be noise (the lazy probe set does not contain it).
         result = self._returning("df.lazy().transpose()")
-        assert any("PLY030" in e for e in result.errors), result.errors
+        assert any("pple-eager-only-method" in e for e in result.errors), result.errors
         assert self._plw007(result) == [], result.warnings
 
     def test_one_warning_per_chain(self):
@@ -12524,7 +12543,7 @@ class TestUnmodeledFrameMethodWarning:
 
     def test_validate_wrapping_the_call_retracts_the_warning(self):
         # ``Schema.validate(...)`` immediately retypes the result — exactly
-        # the repair PLW007 recommends — so wrapping the unmodeled call
+        # the repair pplw-unmodeled-method recommends — so wrapping the unmodeled call
         # retracts the warning (frame-level analog of the expression-level
         # cast retraction).
         result = self._returning("In.validate(df.interpolate())")
@@ -12551,13 +12570,13 @@ class TestAnnotationCheckIssues63And64:
 
     #63 — a column missing from a NON-STRICT inferred frame is not
     provably absent (the runtime frame may carry extras the schema
-    tolerates): narrowing class, PLW008, never PLY033. Provable absence
+    tolerates): narrowing class, pplw-unbacked-narrowing, never pple-annotation-conflict. Provable absence
     requires a strict inferred frame.
 
     #64 — coerce leniency is sound at return positions (check_types
     really coerces) but annotations are runtime-inert: a coercible
     declared/inferred difference at an annotation site is an unbacked
-    re-type — PLW008 naming coerce, not silence.
+    re-type — pplw-unbacked-narrowing naming coerce, not silence.
     """
 
     HEADER = textwrap.dedent(
@@ -12612,8 +12631,8 @@ class TestAnnotationCheckIssues63And64:
             return df
             """
         )
-        assert not any("PLY033" in e for e in result.errors), result.errors
-        plw = [w for w in result.warnings if "PLW008" in w]
+        assert not any("pple-annotation-conflict" in e for e in result.errors), result.errors
+        plw = [w for w in result.warnings if "pplw-unbacked-narrowing" in w]
         assert plw, result.warnings
         assert "'b'" in plw[0]
 
@@ -12625,7 +12644,7 @@ class TestAnnotationCheckIssues63And64:
             """,
             param="SrcStrict",
         )
-        assert any("PLY033" in e for e in result.errors), result.errors
+        assert any("pple-annotation-conflict" in e for e in result.errors), result.errors
 
     # -- issue #64 --------------------------------------------------------
 
@@ -12636,8 +12655,8 @@ class TestAnnotationCheckIssues63And64:
             return df
             """
         )
-        assert not any("PLY033" in e for e in result.errors), result.errors
-        plw = [w for w in result.warnings if "PLW008" in w]
+        assert not any("pple-annotation-conflict" in e for e in result.errors), result.errors
+        plw = [w for w in result.warnings if "pplw-unbacked-narrowing" in w]
         assert plw, result.warnings
         assert "coerce" in plw[0]
 
@@ -12649,7 +12668,7 @@ class TestAnnotationCheckIssues63And64:
             return df
             """
         )
-        assert not any("PLW008" in w for w in result.warnings), result.warnings
+        assert not any("pplw-unbacked-narrowing" in w for w in result.warnings), result.warnings
 
 
 class TestSmallIntLandmarkReductionContexts:
@@ -12718,7 +12737,7 @@ class TestSmallIntLandmarkReductionContexts:
         )
         assert len(analyzer.errors) == 1, analyzer.errors
         err = analyzer.errors[0]
-        assert "PLY011" in err and "Float16" in err, err
+        assert "pple-groupby" in err and "Float16" in err, err
         assert "panic" in err.lower(), err
 
     def test_agg_product_uint128_errors(self):
@@ -12727,7 +12746,7 @@ class TestSmallIntLandmarkReductionContexts:
             'out = df.group_by("g").agg(pl.col("v").product().alias("p"))',
         )
         assert len(analyzer.errors) == 1, analyzer.errors
-        assert "PLY011" in analyzer.errors[0], analyzer.errors
+        assert "pple-groupby" in analyzer.errors[0], analyzer.errors
 
     def test_agg_chain_fallback_mean_float16_errors(self):
         # ``mean().cast(...)`` routes through the chain fallback (the
@@ -12745,14 +12764,18 @@ class TestSmallIntLandmarkReductionContexts:
             self._frame(Float16()),
             'out = df.select(a=pl.col("v").mean().over("g"))',
         )
-        assert any("PLY011" in e and "panic" in e.lower() for e in analyzer.errors), analyzer.errors
+        assert any("pple-groupby" in e and "panic" in e.lower() for e in analyzer.errors), (
+            analyzer.errors
+        )
 
     def test_over_product_uint128_errors(self):
         analyzer = _run_body(
             self._frame(UInt128()),
             'out = df.select(a=pl.col("v").product().over("g"))',
         )
-        assert any("PLY011" in e and "panic" in e.lower() for e in analyzer.errors), analyzer.errors
+        assert any("pple-groupby" in e and "panic" in e.lower() for e in analyzer.errors), (
+            analyzer.errors
+        )
 
     def test_over_mean_float64_stays_clean(self):
         analyzer = _run_body(
@@ -12820,7 +12843,7 @@ class TestOpenFrameSources:
         )
         results = analyze_source(source)
         assert len(results) == 1
-        assert any("PLY030" in str(e) for e in results[0].errors), results[0].errors
+        assert any("pple-eager-only-method" in str(e) for e in results[0].errors), results[0].errors
 
     def test_non_polars_prefix_is_not_claimed(self):
         # ``pd.DataFrame`` may be pandas — the function stays unanalyzed.
@@ -12879,9 +12902,9 @@ class TestOpenFrameSources:
         )
         results = analyze_source(source)
         assert len(results) == 1
-        assert any("PLY001" in str(e) and "'c'" in str(e) for e in results[0].errors), results[
-            0
-        ].errors
+        assert any(
+            "pple-column-not-found" in str(e) and "'c'" in str(e) for e in results[0].errors
+        ), results[0].errors
 
     def test_pinned_dtype_contradiction_is_provable(self):
         source = textwrap.dedent(
@@ -12895,7 +12918,9 @@ class TestOpenFrameSources:
         )
         results = analyze_source(source)
         assert len(results) == 1
-        assert any("PLY009" in str(e) for e in results[0].errors), results[0].errors
+        assert any("pple-incompatible-operands" in str(e) for e in results[0].errors), results[
+            0
+        ].errors
 
 
 class TestOpenFrameOperations:
@@ -12998,7 +13023,7 @@ class TestPctChangeDtype:
     - Utf8 is accepted (non-strict cast; all-null Float64)
     - Binary / Categorical / Enum / List / Array raise at runtime
       (InvalidOperationError or ComputeError); Struct ABORTS the process
-      (rust crash) — all flagged PLY016
+      (rust crash) — all flagged pple-non-numeric-operand
     - the head slot is always null -> the result is always Nullable
     """
 
@@ -13079,7 +13104,7 @@ class TestPctChangeDtype:
     def test_invalid_receiver_flags_ply016(self, receiver):
         analyzer = self._run(receiver)
         assert len(analyzer.errors) == 1, analyzer.errors
-        assert "PLY016" in analyzer.errors[0]
+        assert "pple-non-numeric-operand" in analyzer.errors[0]
         assert "pct_change" in analyzer.errors[0]
         assert analyzer.var_types["out"].columns["d"].dtype == Unknown()
 
@@ -13198,13 +13223,13 @@ class TestNotBitwiseDtype:
     def test_invalid_receiver_flags_ply016(self, receiver, expr):
         analyzer = self._run(receiver, expr)
         assert len(analyzer.errors) == 1, analyzer.errors
-        assert "PLY016" in analyzer.errors[0]
+        assert "pple-non-numeric-operand" in analyzer.errors[0]
         assert analyzer.var_types["out"].columns["r"].dtype == Unknown()
 
     def test_nullable_invalid_receiver_still_flags(self):
         analyzer = self._run(Nullable(Float64()), 'pl.col("v").not_()')
         assert len(analyzer.errors) == 1, analyzer.errors
-        assert "PLY016" in analyzer.errors[0]
+        assert "pple-non-numeric-operand" in analyzer.errors[0]
 
     @pytest.mark.parametrize("expr", ['pl.col("v").not_()', '~pl.col("v")'], ids=["not_", "~"])
     def test_unknown_receiver_stays_silent(self, expr):
@@ -13293,7 +13318,7 @@ class TestDtEpochTimeUnit:
 
 
 class TestSchemaDefinitionErrors:
-    """Issue #69 (PLY041): a function referencing a schema whose ``Annotated``
+    """Issue #69 (pple-broken-schema-annotation): a function referencing a schema whose ``Annotated``
     field arity provably crashes pandera is dead on arrival — the deferred
     TypeError fires the first time the schema is used (to_schema / validate /
     @pa.check_types), so the static verdict must be FAIL."""
@@ -13326,7 +13351,7 @@ class TestSchemaDefinitionErrors:
                 return df.select(v=pl.concat_list(pl.col("a")).cast(pl.Array(pl.Int64, 2)))
             """
         )
-        ply = [e for e in result.errors if "PLY041" in e]
+        ply = [e for e in result.errors if "pple-broken-schema-annotation" in e]
         assert ply, result.errors
         assert "Broken" in ply[0]
         assert "v" in ply[0]
@@ -13338,7 +13363,7 @@ class TestSchemaDefinitionErrors:
                 return df.select(a=pl.lit(1))
             """
         )
-        assert any("PLY041" in e for e in result.errors), result.errors
+        assert any("pple-broken-schema-annotation" in e for e in result.errors), result.errors
 
     def test_same_broken_schema_reported_once_per_function(self):
         result = self._analyze(
@@ -13348,7 +13373,7 @@ class TestSchemaDefinitionErrors:
                 return x
             """
         )
-        ply = [e for e in result.errors if "PLY041" in e]
+        ply = [e for e in result.errors if "pple-broken-schema-annotation" in e]
         assert len(ply) == 1, result.errors
 
     def test_body_annotation_only_is_flagged(self):
@@ -13359,7 +13384,7 @@ class TestSchemaDefinitionErrors:
                 return df
             """
         )
-        assert any("PLY041" in e for e in result.errors), result.errors
+        assert any("pple-broken-schema-annotation" in e for e in result.errors), result.errors
 
     def test_body_validate_call_is_flagged(self):
         result = self._analyze(
@@ -13369,7 +13394,7 @@ class TestSchemaDefinitionErrors:
                 return df
             """
         )
-        assert any("PLY041" in e for e in result.errors), result.errors
+        assert any("pple-broken-schema-annotation" in e for e in result.errors), result.errors
 
     def test_legal_schema_is_silent(self):
         source = textwrap.dedent(
@@ -13391,7 +13416,9 @@ class TestSchemaDefinitionErrors:
         )
         results = analyze_source(source)
         assert len(results) == 1
-        assert not any("PLY041" in e for e in results[0].errors), results[0].errors
+        assert not any("pple-broken-schema-annotation" in e for e in results[0].errors), results[
+            0
+        ].errors
 
 
 class TestOpenFrameNegativeKnowledge:
@@ -13477,7 +13504,7 @@ class TestOpenFrameNegativeKnowledge:
             """
         )
         results = analyze_source(source)
-        assert any("PLY002" in str(e) for e in results[0].errors), results[0].errors
+        assert any("pple-column-not-found" in str(e) for e in results[0].errors), results[0].errors
 
     def test_cast_of_absent_column_flags(self):
         source = textwrap.dedent(
@@ -13489,7 +13516,7 @@ class TestOpenFrameNegativeKnowledge:
             """
         )
         results = analyze_source(source)
-        assert any("PLY004" in str(e) for e in results[0].errors), results[0].errors
+        assert any("pple-column-not-found" in str(e) for e in results[0].errors), results[0].errors
 
     def test_declared_return_missing_absent_column_fails(self):
         # Checker side: a declared column that is provably absent from the
@@ -13596,7 +13623,9 @@ class TestOpenLeftJoinCollision:
             """
         )
         results = analyze_source(source)
-        assert any("PLY012" in str(e) for e in results[0].errors), results[0].errors
+        assert any("pple-wrong-namespace-dtype" in str(e) for e in results[0].errors), results[
+            0
+        ].errors
 
     def test_pinned_left_collision_stays_deterministic(self):
         # The left frame PINS z (via with_columns), so the right z is
@@ -13705,9 +13734,9 @@ class TestOpenReturnSchemaCallSites:
         results = analyze_source(source)
         target = [r for r in results if r.name == "caller"]
         # strict=True return is genuinely closed — 'sku' is a provable miss.
-        assert any("PLY001" in str(e) and "'sku'" in str(e) for e in target[0].errors), target[
-            0
-        ].errors
+        assert any(
+            "pple-column-not-found" in str(e) and "'sku'" in str(e) for e in target[0].errors
+        ), target[0].errors
 
 
 class TestStrictParamExtraColumns:
@@ -13811,9 +13840,9 @@ class TestStrictParamExtraColumns:
 class TestCheckedIslandNonStrictSchemas:
     """Issue #83 (checked-island design): a strict=False declared schema
     is the function's interface — referencing an undeclared column flags
-    PLY042 with honest wording (the schema admits caller extras at
+    pple-undeclared-column with honest wording (the schema admits caller extras at
     runtime, so it is an undeclared dependency, NOT a provable runtime
-    failure like PLY001 on exact frames)."""
+    failure like pple-column-not-found on exact frames)."""
 
     _SCHEMA = """
         import polars as pl
@@ -13838,8 +13867,10 @@ class TestCheckedIslandNonStrictSchemas:
         )
         results = analyze_source(source)
         errors = [str(e) for e in results[0].errors]
-        assert any("PLY042" in e and "region" in e and "HasPrice" in e for e in errors), errors
-        assert not any("PLY001" in e for e in errors), errors
+        assert any(
+            "pple-undeclared-column" in e and "region" in e and "HasPrice" in e for e in errors
+        ), errors
+        assert not any("pple-column-not-found" in e for e in errors), errors
 
     def test_string_select_flags_ply042(self):
         source = textwrap.dedent(
@@ -13851,7 +13882,7 @@ class TestCheckedIslandNonStrictSchemas:
         )
         results = analyze_source(source)
         errors = [str(e) for e in results[0].errors]
-        assert any("PLY042" in e and "region" in e for e in errors), errors
+        assert any("pple-undeclared-column" in e and "region" in e for e in errors), errors
 
     def test_strict_schema_keeps_ply001_proof(self):
         source = textwrap.dedent(
@@ -13872,11 +13903,11 @@ class TestCheckedIslandNonStrictSchemas:
         )
         results = analyze_source(source)
         errors = [str(e) for e in results[0].errors]
-        assert any("PLY001" in e for e in errors), errors
+        assert any("pple-column-not-found" in e for e in errors), errors
 
     def test_select_output_is_exact_again(self):
         # Shape-determining calls re-anchor the island: the select output
-        # is exact, so a later miss is a genuine PLY001 proof.
+        # is exact, so a later miss is a genuine pple-column-not-found proof.
         source = textwrap.dedent(
             self._SCHEMA
             + """
@@ -13887,7 +13918,7 @@ class TestCheckedIslandNonStrictSchemas:
         )
         results = analyze_source(source)
         errors = [str(e) for e in results[0].errors]
-        assert any("PLY001" in e and "region" in e for e in errors), errors
+        assert any("pple-column-not-found" in e and "region" in e for e in errors), errors
 
     def test_provenance_survives_with_columns(self):
         source = textwrap.dedent(
@@ -13900,7 +13931,7 @@ class TestCheckedIslandNonStrictSchemas:
         )
         results = analyze_source(source)
         errors = [str(e) for e in results[0].errors]
-        assert any("PLY042" in e and "region" in e for e in errors), errors
+        assert any("pple-undeclared-column" in e and "region" in e for e in errors), errors
 
     def test_validate_narrowing_carries_provenance(self):
         source = textwrap.dedent(
@@ -13913,7 +13944,7 @@ class TestCheckedIslandNonStrictSchemas:
         )
         results = analyze_source(source)
         errors = [str(e) for e in results[0].errors]
-        assert any("PLY042" in e and "region" in e for e in errors), errors
+        assert any("pple-undeclared-column" in e and "region" in e for e in errors), errors
 
 
 class TestOptionalColumnsAtStrictBoundaries:
@@ -14001,7 +14032,7 @@ class TestOptionalColumnsAtStrictBoundaries:
 class TestObjectApiSchemaNarrowing:
     """Backlog C-11: object-API schemas participate in the full pipeline —
     ``schema.validate(df)`` narrowing, checked-island provenance, and
-    PLW011 surfacing — exactly like class schemas."""
+    pplw-unrecognized-annotation surfacing — exactly like class schemas."""
 
     def test_validate_narrowing_with_object_schema(self):
         source = textwrap.dedent(
@@ -14036,7 +14067,7 @@ class TestObjectApiSchemaNarrowing:
             """
         )
         results = analyze_source(source)
-        assert any("PLY001" in str(e) for e in results[0].errors), results[0].errors
+        assert any("pple-column-not-found" in str(e) for e in results[0].errors), results[0].errors
 
     def test_nonstrict_object_schema_is_checked_island(self):
         source = textwrap.dedent(
@@ -14053,7 +14084,7 @@ class TestObjectApiSchemaNarrowing:
         )
         results = analyze_source(source)
         errors = [str(e) for e in results[0].errors]
-        assert any("PLY042" in e and "order_schema" in e for e in errors), errors
+        assert any("pple-undeclared-column" in e and "order_schema" in e for e in errors), errors
 
     def test_pipe_validate_with_object_schema(self):
         source = textwrap.dedent(
@@ -14084,7 +14115,9 @@ class TestObjectApiSchemaNarrowing:
             """
         )
         results = analyze_source(source)
-        assert any("PLY012" in str(e) for e in results[0].errors), results[0].errors
+        assert any("pple-wrong-namespace-dtype" in str(e) for e in results[0].errors), results[
+            0
+        ].errors
 
 
 class TestOpenStruct:
@@ -14117,7 +14150,9 @@ class TestOpenStruct:
         """
         )
         results = analyze_source(source)
-        assert any("PLY012" in str(e) for e in results[0].errors), results[0].errors
+        assert any("pple-wrong-namespace-dtype" in str(e) for e in results[0].errors), results[
+            0
+        ].errors
 
     def test_struct_field_on_open_struct_is_assumed(self):
         source = textwrap.dedent(
@@ -14148,9 +14183,9 @@ class TestOpenStruct:
             """
         )
         results = analyze_source(source)
-        assert any("PLY001" in str(e) and "ctiy" in str(e) for e in results[0].errors), results[
-            0
-        ].errors
+        assert any(
+            "pple-column-not-found" in str(e) and "ctiy" in str(e) for e in results[0].errors
+        ), results[0].errors
 
     def test_unnest_of_open_struct_opens_the_frame(self):
         source = textwrap.dedent(
@@ -14220,8 +14255,8 @@ class TestOpenStructVerdict:
 class TestValidateResultBinding:
     """Issue #88: validate RESULTS follow pandera's three strict modes —
     strict=False binds as an open island (extras provably flow through;
-    undeclared lookups keep the PLY042 lint), strict='filter' and
-    strict=True bind closed (filter's removed-column lookups are PLY001
+    undeclared lookups keep the pple-undeclared-column lint), strict='filter' and
+    strict=True bind closed (filter's removed-column lookups are pple-column-not-found
     proofs)."""
 
     def test_nonstrict_validate_result_extras_survive(self):
@@ -14273,7 +14308,7 @@ class TestValidateResultBinding:
         )
         results = analyze_source(source)
         errors = [str(e) for e in results[0].errors]
-        assert any("PLY042" in e and "open_schema" in e for e in errors), errors
+        assert any("pple-undeclared-column" in e and "open_schema" in e for e in errors), errors
 
     def test_filter_removed_column_lookup_is_ply001_proof(self):
         source = textwrap.dedent(
@@ -14290,8 +14325,8 @@ class TestValidateResultBinding:
         )
         results = analyze_source(source)
         errors = [str(e) for e in results[0].errors]
-        assert any("PLY001" in e and "'b'" in e for e in errors), errors
-        assert not any("PLY042" in e for e in errors), errors
+        assert any("pple-column-not-found" in e and "'b'" in e for e in errors), errors
+        assert not any("pple-undeclared-column" in e for e in errors), errors
 
     def test_filter_class_config_supported_too(self):
         source = textwrap.dedent(
@@ -14313,7 +14348,7 @@ class TestValidateResultBinding:
         )
         results = analyze_source(source)
         errors = [str(e) for e in results[0].errors]
-        assert any("PLY001" in e and "'b'" in e for e in errors), errors
+        assert any("pple-column-not-found" in e and "'b'" in e for e in errors), errors
 
 
 class TestValidateInputChecking:
@@ -14453,8 +14488,8 @@ class TestGroupedAllNullTemporalAggs:
     SUCCEED in grouped contexts (all-null, receiver dtype — probed on
     1.37.0 through 1.41.2) while raising as whole-frame reductions. The
     grouped flag was a false positive; it is now an accepted
-    Nullable(receiver) with a PLW012 "provably all-null" advisory.
-    Select-context keeps the PLY011 proof."""
+    Nullable(receiver) with a pplw-all-null-aggregation "provably all-null" advisory.
+    Select-context keeps the pple-groupby proof."""
 
     _SCHEMA = """
         import typing
@@ -14480,7 +14515,9 @@ class TestGroupedAllNullTemporalAggs:
         )
         results = analyze_source(source)
         assert results[0].errors == [], results[0].errors
-        assert any("PLW012" in w for w in results[0].warnings), results[0].warnings
+        assert any("pplw-all-null-aggregation" in w for w in results[0].warnings), results[
+            0
+        ].warnings
         inferred = results[0].inferred_return_type
         assert inferred is not None
         assert inferred.columns["x"].dtype == Nullable(Datetime())
@@ -14494,7 +14531,7 @@ class TestGroupedAllNullTemporalAggs:
         """
         )
         results = analyze_source(source)
-        assert any("PLY011" in str(e) for e in results[0].errors), results[0].errors
+        assert any("pple-groupby" in str(e) for e in results[0].errors), results[0].errors
 
     def test_grouped_sum_datetime_direct_form_warns(self):
         source = textwrap.dedent(
@@ -14506,7 +14543,9 @@ class TestGroupedAllNullTemporalAggs:
         )
         results = analyze_source(source)
         assert results[0].errors == [], results[0].errors
-        assert any("PLW012" in w for w in results[0].warnings), results[0].warnings
+        assert any("pplw-all-null-aggregation" in w for w in results[0].warnings), results[
+            0
+        ].warnings
 
     def test_var_on_duration_still_rejected_both_contexts(self):
         source = textwrap.dedent(
@@ -14528,14 +14567,14 @@ class TestGroupedAllNullTemporalAggs:
             """
         )
         results = analyze_source(source)
-        assert any("PLY011" in str(e) for e in results[0].errors), results[0].errors
+        assert any("pple-groupby" in str(e) for e in results[0].errors), results[0].errors
 
 
 class TestValidateNullabilityNotProof:  # issue #92
     """Issue #92: pandera's nullable check is VALUE-based — a
     Nullable-typed column with no actual nulls passes a non-nullable
     schema. Validating a post-join nullable into a non-null schema is
-    exactly the PLW008-prescribed narrowing assertion, so the #89 input
+    exactly the pplw-unbacked-narrowing-prescribed narrowing assertion, so the #89 input
     proof must not claim 'SchemaError on every call' for it. Base-dtype
     conflicts stay proofs."""
 
@@ -14665,7 +14704,7 @@ class TestBackwardNarrowing:
         assert target[0].errors == [], target[0].errors
 
     def test_no_pinning_on_island_frames(self):
-        # Island lookups error (PLY042) — nothing is assumed, so nothing
+        # Island lookups error (pple-undeclared-column) — nothing is assumed, so nothing
         # pins; the frame's declared shape stays authoritative.
         source = textwrap.dedent(
             """
@@ -14681,7 +14720,7 @@ class TestBackwardNarrowing:
             """
         )
         results = analyze_source(source)
-        assert any("PLY042" in str(e) for e in results[0].errors), results[0].errors
+        assert any("pple-undeclared-column" in str(e) for e in results[0].errors), results[0].errors
 
 
 class TestFrameConstructorOpenFallback:
@@ -14730,13 +14769,13 @@ class TestFrameConstructorOpenFallback:
             """
         )
         results = analyze_source(source)
-        assert any("PLY001" in str(e) for e in results[0].errors), results[0].errors
+        assert any("pple-column-not-found" in str(e) for e in results[0].errors), results[0].errors
 
 
 class TestBareReturnLaziness:
     """ADR-0006 future-work: a bare ``-> pl.DataFrame`` / ``pl.LazyFrame``
     return annotation makes no schema claim, but the eager/lazy bit is a
-    real contract — returning the wrong side is PLY032."""
+    real contract — returning the wrong side is pple-eager-lazy-mismatch."""
 
     def test_returning_lazy_against_bare_dataframe_flags(self):
         source = textwrap.dedent(
@@ -14748,7 +14787,9 @@ class TestBareReturnLaziness:
             """
         )
         results = analyze_source(source)
-        assert any("PLY032" in str(e) for e in results[0].errors), results[0].errors
+        assert any("pple-eager-lazy-mismatch" in str(e) for e in results[0].errors), results[
+            0
+        ].errors
 
     def test_returning_eager_against_bare_lazyframe_flags(self):
         source = textwrap.dedent(
@@ -14760,7 +14801,9 @@ class TestBareReturnLaziness:
             """
         )
         results = analyze_source(source)
-        assert any("PLY032" in str(e) for e in results[0].errors), results[0].errors
+        assert any("pple-eager-lazy-mismatch" in str(e) for e in results[0].errors), results[
+            0
+        ].errors
 
     def test_matching_sides_pass(self):
         source = textwrap.dedent(
@@ -14871,9 +14914,9 @@ class TestSchemaContextInMessages:
             """
         )
         (a,) = analyses
-        assert any("PLY001" in e and "in frame from schema 'Sales'" in e for e in a.errors), (
-            a.errors
-        )
+        assert any(
+            "pple-column-not-found" in e and "in frame from schema 'Sales'" in e for e in a.errors
+        ), a.errors
 
     def test_context_survives_column_ops(self):
         analyses = self._analyze(

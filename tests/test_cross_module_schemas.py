@@ -78,7 +78,7 @@ class TestSiblingFileImport:
         )
         results = check_source(src)
         assert len(results) == 1
-        assert any("PLW006" in w for w in results[0].warnings)
+        assert any("pplw-unknown-schema" in w for w in results[0].warnings)
         assert any("Users" in w for w in results[0].warnings)
 
 
@@ -159,7 +159,7 @@ class TestTransitiveImport:
     def test_resolves_transitively(self, tmp_path: Path):
         # Issue #76: this test used to pass VACUOUSLY — ``Users(WithId)``
         # was not recognized as a schema (its base is imported), so the
-        # function carried no declared type and "passed" with a PLW006
+        # function carried no declared type and "passed" with a pplw-unknown-schema
         # the assertions never inspected. It now checks the inherited
         # column is genuinely resolved.
         _project_marker(tmp_path)
@@ -198,8 +198,10 @@ class TestTransitiveImport:
         results = check_file(tmp_path / "app.py")
         assert len(results) == 1
         assert results[0].passed, results[0].errors
-        # The resolution must be real, not a PLW006-mediated skip.
-        assert not any("PLW006" in str(w) for w in results[0].warnings), results[0].warnings
+        # The resolution must be real, not a pplw-unknown-schema-mediated skip.
+        assert not any("pplw-unknown-schema" in str(w) for w in results[0].warnings), results[
+            0
+        ].warnings
 
     def test_inherited_column_violation_fails(self, tmp_path: Path):
         # The other half of the vacuity (issue #76): dropping an
@@ -402,7 +404,7 @@ class TestCrossFileInheritance:
 
 
 class TestUnresolvedSchemaWarning:
-    """When the schema name can't be resolved, surface a PLW006 warning
+    """When the schema name can't be resolved, surface a pplw-unknown-schema warning
     so the user knows the file isn't being silently treated as empty."""
 
     def test_unresolved_schema_warns(self, tmp_path: Path):
@@ -421,7 +423,7 @@ class TestUnresolvedSchemaWarning:
         results = check_file(tmp_path / "app.py")
         # Function shows up rather than being silently skipped.
         assert len(results) == 1
-        assert any("PLW006" in w for w in results[0].warnings)
+        assert any("pplw-unknown-schema" in w for w in results[0].warnings)
         assert any("NonExistent" in w for w in results[0].warnings)
 
 
@@ -583,7 +585,7 @@ class TestModuleQualifiedImport:
 
 
 class TestQualifiedUnresolvedWarning:
-    """Qualified names that don't resolve must warn PLW006, never stay silent."""
+    """Qualified names that don't resolve must warn pplw-unknown-schema, never stay silent."""
 
     def test_unresolved_qualified_module_warns(self, tmp_path: Path):
         _project_marker(tmp_path)
@@ -600,7 +602,7 @@ class TestQualifiedUnresolvedWarning:
         )
         results = check_file(tmp_path / "app.py")
         assert len(results) == 1
-        assert any("PLW006" in w for w in results[0].warnings)
+        assert any("pplw-unknown-schema" in w for w in results[0].warnings)
         # The warning names the full dotted reference.
         assert any("third_party_module.Remote" in w for w in results[0].warnings)
 
@@ -626,7 +628,7 @@ class TestQualifiedUnresolvedWarning:
         )
         results = check_file(tmp_path / "app.py")
         assert len(results) == 1
-        assert any("PLW006" in w for w in results[0].warnings)
+        assert any("pplw-unknown-schema" in w for w in results[0].warnings)
         assert any("Schemas.Inner" in w for w in results[0].warnings)
 
 
@@ -755,7 +757,9 @@ class TestAliasedBaseRepeatImport:
         assert len(target) == 1
         assert not target[0].passed
         assert any("id" in str(e) for e in target[0].errors), target[0].errors
-        assert not any("PLW006" in str(w) for w in target[0].warnings), target[0].warnings
+        assert not any("pplw-unknown-schema" in str(w) for w in target[0].warnings), target[
+            0
+        ].warnings
 
 
 class TestObjectApiCrossModule:
@@ -855,12 +859,12 @@ class TestProjectRootDiscovery:
         monkeypatch.chdir(tmp_path / "elsewhere")
         results = check_file(outside / "app.py")
         assert len(results) == 1
-        assert any("PLW006" in str(w) for w in results[0].warnings)
+        assert any("pplw-unknown-schema" in str(w) for w in results[0].warnings)
 
 
 class TestUnresolvedImportDiagnostic:
     """When the schema name WAS imported but the module didn't resolve,
-    PLW006 must say that instead of suggesting an import the user
+    pplw-unknown-schema must say that instead of suggesting an import the user
     already wrote (user report 2026-06-12)."""
 
     def test_plw006_names_the_unresolved_import(self, tmp_path: Path):
@@ -882,7 +886,7 @@ class TestUnresolvedImportDiagnostic:
         results = check_file(tmp_path / "app.py")
         assert len(results) == 1
         joined = "\n".join(str(w) for w in results[0].warnings)
-        assert "PLW006" in joined
+        assert "pplw-unknown-schema" in joined
         assert "`from module1.module2 import InputSchema`" in joined
         assert "did not resolve" in joined
         # The generic "import it" suggestion would be confusing here.
@@ -908,7 +912,7 @@ class TestUnresolvedImportDiagnostic:
 class TestTypeCheckingImport:
     """C-13 gap 1: a schema imported under ``if TYPE_CHECKING:`` is the
     canonical annotation-only import — static analysis treats TYPE_CHECKING
-    as True, so it must resolve like a real top-level import (no PLW006)."""
+    as True, so it must resolve like a real top-level import (no pplw-unknown-schema)."""
 
     def _write_schemas(self, tmp_path: Path) -> None:
         _project_marker(tmp_path)
@@ -943,9 +947,9 @@ class TestTypeCheckingImport:
         )
         results = check_file(tmp_path / "app.py")
         assert len(results) == 1, [r.errors for r in results]
-        # Schema resolved: no "not found" PLW006.
+        # Schema resolved: no "not found" pplw-unknown-schema.
         joined = "\n".join(str(w) for w in results[0].warnings)
-        assert "PLW006" not in joined, joined
+        assert "pplw-unknown-schema" not in joined, joined
         assert results[0].passed, results[0].errors
 
     def test_type_checking_import_catches_body_error(self, tmp_path: Path):
@@ -992,12 +996,12 @@ class TestTypeCheckingImport:
         results = check_file(tmp_path / "app.py")
         assert len(results) == 1, [r.errors for r in results]
         joined = "\n".join(str(w) for w in results[0].warnings)
-        assert "PLW006" not in joined, joined
+        assert "pplw-unknown-schema" not in joined, joined
         assert results[0].passed, results[0].errors
 
     def test_else_branch_import_not_followed(self, tmp_path: Path):
         """The ``else:`` of a TYPE_CHECKING block is the runtime branch —
-        out of scope. The import there must NOT resolve (PLW006)."""
+        out of scope. The import there must NOT resolve (pplw-unknown-schema)."""
         self._write_schemas(tmp_path)
         _write(
             tmp_path / "app.py",
@@ -1019,11 +1023,11 @@ class TestTypeCheckingImport:
         results = check_file(tmp_path / "app.py")
         assert len(results) == 1
         joined = "\n".join(str(w) for w in results[0].warnings)
-        assert "PLW006" in joined, joined
+        assert "pplw-unknown-schema" in joined, joined
 
     def test_non_type_checking_condition_not_followed(self, tmp_path: Path):
         """An arbitrary ``if`` condition is never evaluated — its imports
-        are not followed (PLW006), so we don't guess condition truth."""
+        are not followed (pplw-unknown-schema), so we don't guess condition truth."""
         self._write_schemas(tmp_path)
         _write(
             tmp_path / "app.py",
@@ -1043,11 +1047,11 @@ class TestTypeCheckingImport:
         results = check_file(tmp_path / "app.py")
         assert len(results) == 1
         joined = "\n".join(str(w) for w in results[0].warnings)
-        assert "PLW006" in joined, joined
+        assert "pplw-unknown-schema" in joined, joined
 
     def test_unresolvable_type_checking_import_warns(self, tmp_path: Path):
         """A TYPE_CHECKING import of a non-project module degrades gracefully
-        (PLW006), never crashes and never invents a resolution."""
+        (pplw-unknown-schema), never crashes and never invents a resolution."""
         _project_marker(tmp_path)
         _write(
             tmp_path / "app.py",
@@ -1066,7 +1070,7 @@ class TestTypeCheckingImport:
         results = check_file(tmp_path / "app.py")
         assert len(results) == 1
         joined = "\n".join(str(w) for w in results[0].warnings)
-        assert "PLW006" in joined, joined
+        assert "pplw-unknown-schema" in joined, joined
 
 
 class TestCombinedTypeCheckingAndQuotedAnnotation:
@@ -1107,7 +1111,7 @@ class TestCombinedTypeCheckingAndQuotedAnnotation:
         results = check_file(tmp_path / "app.py")
         assert len(results) == 1, [r.errors for r in results]
         joined_w = "\n".join(str(w) for w in results[0].warnings)
-        assert "PLW006" not in joined_w, joined_w
+        assert "pplw-unknown-schema" not in joined_w, joined_w
         assert not results[0].passed
         joined_e = "\n".join(str(e) for e in results[0].errors)
         assert "missing_col" in joined_e

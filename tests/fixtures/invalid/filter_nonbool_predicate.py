@@ -1,4 +1,4 @@
-"""filter predicate has a non-boolean dtype (issue #28, PLY008)."""
+"""filter predicate has a non-boolean dtype (issue #28, pple-non-boolean-predicate)."""
 
 import pandera.polars as pa
 import polars as pl

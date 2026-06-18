@@ -35,17 +35,17 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures"
 CATEGORIES = ("valid", "invalid", "warning")
 UPDATE = os.environ.get("POLYPOLARISM_UPDATE_EXPECTED") == "1"
 
-DIAGNOSTIC_CODE = re.compile(r"PL[YW]\d{3}")
+DIAGNOSTIC_CODE = re.compile(r"ppl[ew]-[a-z-]+")
 
 # Diagnostic codes that cannot be triggered from a self-contained fixture
 # file. Each entry must name the unit test that covers it instead.
 FIXTURE_EXEMPT_CODES = {
-    "PLW010",  # environment version floor — covered by test_version_check.py
+    "pplw-unsupported-version",  # environment version floor — covered by test_version_check.py
     # imported @rowpoly helper that doesn't provably preserve its row variable
     # (#112): can only fire from a CROSS-MODULE import resolved on disk, not a
     # self-contained single-file fixture. Covered by
     # tests/test_cross_module_helpers.py::TestImportedRowpolyHelperPreservation.
-    "PLW014",
+    "pplw-rowpoly-not-threaded",
 }
 
 
@@ -146,14 +146,11 @@ def test_no_orphaned_golden_files() -> None:
 
 
 def test_every_diagnostic_code_is_exercised_by_a_fixture() -> None:
-    """Each PLY/PLW code defined in diagnostics.py must appear in at least
-    one golden file, so no diagnostic can silently lose its end-to-end test.
+    """Each diagnostic code in ``diagnostics.ALL_CODES`` must appear in at
+    least one golden file, so no diagnostic can silently lose its end-to-end
+    test.
     """
-    defined = {
-        value
-        for name, value in vars(diagnostics).items()
-        if isinstance(value, str) and DIAGNOSTIC_CODE.fullmatch(name)
-    }
+    defined = set(diagnostics.ALL_CODES)
     covered: set[str] = set()
     for category in CATEGORIES:
         for expected in (FIXTURES_DIR / category).glob("*.expected"):

@@ -19,6 +19,6 @@ class WideOut(pa.DataFrameModel):
 
 def widen(df: DataFrame[In]) -> DataFrame[WideOut]:
     # The pivot result is data-dependent so polypolarism falls back to the
-    # variable annotation. PLW005 is emitted as a guidance warning.
+    # variable annotation. pplw-data-dependent-schema is emitted as a guidance warning.
     result: DataFrame[WideOut] = df.pivot(on="metric", index=["region"], values="value")
     return result

@@ -97,7 +97,7 @@ class TestCheckMissingColumn:
 
         message = str(error)
 
-        assert message.startswith("[PLY040] ")
+        assert message.startswith("[pple-return-type] ")
         assert "name" in message
         assert "Utf8" in message
 
@@ -146,7 +146,7 @@ class TestCheckExtraColumn:
 
         message = str(error)
 
-        assert message.startswith("[PLY040] ")
+        assert message.startswith("[pple-return-type] ")
         assert "extra" in message
 
 
@@ -181,7 +181,7 @@ class TestCheckTypeDifference:
 
         message = str(error)
 
-        assert message.startswith("[PLY040] ")
+        assert message.startswith("[pple-return-type] ")
         assert "value" in message
         assert "Float64" in message
         assert "Int64" in message
@@ -913,12 +913,12 @@ class TestArrayCatEndToEnd:
     def test_arr_on_list_fails_ply012(self):
         result = self._check('pl.col("xs").arr.sum()')
         assert result.passed is False
-        assert any("PLY012" in str(e) for e in result.errors)
+        assert any("pple-wrong-namespace-dtype" in str(e) for e in result.errors)
 
     def test_list_on_array_fails_ply012(self):
         result = self._check('pl.col("q").list.sum()')
         assert result.passed is False
-        assert any("PLY012" in str(e) for e in result.errors)
+        assert any("pple-wrong-namespace-dtype" in str(e) for e in result.errors)
 
     def test_arr_sum_on_array_passes(self):
         # ``.arr.sum()`` on Array(Int64) -> Int64 satisfies the declared
@@ -932,7 +932,10 @@ class TestArrayCatEndToEnd:
     def test_cat_on_int_fails_ply012(self):
         result = self._check('pl.col("a").cat.get_categories()')
         assert result.passed is False
-        assert any("PLY012" in str(e) and "SchemaError" in str(e) for e in result.errors)
+        assert any(
+            "pple-wrong-namespace-dtype" in str(e) and "SchemaError" in str(e)
+            for e in result.errors
+        )
 
     def test_cat_on_categorical_passes(self):
         source = self.HEADER + textwrap.dedent("""
@@ -1162,12 +1165,12 @@ class TestNoReturnTypeInferred:
         assert any("infer" in str(e).lower() for e in result.errors)
 
     def test_inference_failure_message_carries_family_code(self):
-        """InferenceFailure renders with the [PLY040] family code (issue #70)."""
+        """InferenceFailure renders with the [pple-return-type] family code (issue #70)."""
         from polypolarism.checker import InferenceFailure
 
         message = str(InferenceFailure("Could not infer return type"))
 
-        assert message == "[PLY040] Could not infer return type"
+        assert message == "[pple-return-type] Could not infer return type"
 
 
 class TestIssue14TrueDivisionEndToEnd:
@@ -1265,10 +1268,10 @@ class TestIssue18NullabilityEndToEnd:
 
 
 class TestIssue30IncompatibleArithmeticEndToEnd:
-    """Issue #30 repro: ``String + Int64`` arithmetic is flagged with PLY009.
+    """Issue #30 repro: ``String + Int64`` arithmetic is flagged with pple-incompatible-operands.
 
     polars raises InvalidOperationError at runtime for such pairs; the
-    output column registers as Unknown so the PLY009 is the only error.
+    output column registers as Unknown so the pple-incompatible-operands is the only error.
     Combinations polars permits (concat, temporal arithmetic, numeric
     promotion) must keep passing.
     """
@@ -1299,7 +1302,7 @@ class TestIssue30IncompatibleArithmeticEndToEnd:
         result = check_source(source)[0]
         assert result.passed is False
         assert len(result.errors) == 1, result.errors
-        assert "PLY009" in str(result.errors[0])
+        assert "pple-incompatible-operands" in str(result.errors[0])
 
     def test_string_concat_declared_str_passes(self):
         source = self.HEADER + textwrap.dedent(
@@ -1550,7 +1553,7 @@ class TestSemiAntiGatherEndToEnd:
 
         assert len(results) == 1
         assert results[0].passed is False
-        assert any("PLY010" in str(e) for e in results[0].errors)
+        assert any("pple-join-key" in str(e) for e in results[0].errors)
 
 
 class TestJoinCoalesceCrossEndToEnd:
@@ -1975,7 +1978,7 @@ class TestFrameLiteralEndToEnd:
 
         assert len(results) == 1
         assert results[0].passed is False
-        assert any("PLY032" in str(e) for e in results[0].errors)
+        assert any("pple-eager-lazy-mismatch" in str(e) for e in results[0].errors)
 
     def test_lazy_literal_collected_passes(self):
         source = self.HEADER + textwrap.dedent(
@@ -2022,7 +2025,7 @@ class TestFilterPredicateEndToEnd:
 
         assert len(results) == 1
         assert results[0].passed is False
-        assert any("PLY008" in str(e) for e in results[0].errors)
+        assert any("pple-non-boolean-predicate" in str(e) for e in results[0].errors)
 
     def test_boolean_predicate_passes(self):
         source = self.HEADER + textwrap.dedent(
@@ -2069,7 +2072,7 @@ class TestSortKeyEndToEnd:
 
         assert len(results) == 1
         assert results[0].passed is False
-        assert any("PLY007" in str(e) for e in results[0].errors)
+        assert any("pple-column-not-found" in str(e) for e in results[0].errors)
 
     def test_existing_sort_key_passes(self):
         source = self.HEADER + textwrap.dedent(
@@ -2119,7 +2122,9 @@ class TestWhenConditionEndToEnd:
 
         assert len(results) == 1
         assert results[0].passed is False
-        assert any("PLY008" in str(e) and "when" in str(e) for e in results[0].errors)
+        assert any(
+            "pple-non-boolean-predicate" in str(e) and "when" in str(e) for e in results[0].errors
+        )
 
     def test_boolean_when_condition_passes(self):
         source = self.HEADER + textwrap.dedent(
@@ -2198,7 +2203,7 @@ class TestWhenSupertypeEndToEnd:
 
 class TestUnpivotSupertypeEndToEnd:
     """Issue #41 repro: mixed-dtype unpivot value columns supertype instead
-    of raising PLY022.
+    of raising pple-unpivot.
 
     Probed (polars 1.41.2): ``df.unpivot(index="id", on=["a", "s"])`` with
     ``a: Int64``, ``s: String`` produces
@@ -2500,7 +2505,7 @@ class TestUniqueSubsetEndToEnd:
 
         assert len(results) == 1
         assert results[0].passed is False
-        assert any("PLY014" in str(e) for e in results[0].errors)
+        assert any("pple-column-not-found" in str(e) for e in results[0].errors)
 
     def test_existing_subset_column_passes(self):
         source = self.HEADER + textwrap.dedent(
@@ -2684,7 +2689,7 @@ class TestUnknownJoinKeyEndToEnd:
 
         assert len(results) == 1
         assert results[0].passed is True, results[0].errors
-        assert not any("PLY010" in str(e) for e in results[0].errors)
+        assert not any("pple-join-key" in str(e) for e in results[0].errors)
 
     def test_genuine_key_dtype_mismatch_still_fails(self):
         source = self.HEADER + textwrap.dedent(
@@ -2699,7 +2704,7 @@ class TestUnknownJoinKeyEndToEnd:
 
         assert len(results) == 1
         assert results[0].passed is False
-        assert any("PLY010" in str(e) for e in results[0].errors)
+        assert any("pple-join-key" in str(e) for e in results[0].errors)
 
 
 class TestIssue48StructRenameFieldsEndToEnd:
@@ -2740,7 +2745,7 @@ class TestIssue48StructRenameFieldsEndToEnd:
 
 class TestIssue49CumSumOnStringEndToEnd:
     """Issue #49 repro: ``cum_sum`` on a String column raises
-    InvalidOperationError at runtime — must be flagged (PLY016)."""
+    InvalidOperationError at runtime — must be flagged (pple-non-numeric-operand)."""
 
     SOURCE = textwrap.dedent(
         """
@@ -2770,7 +2775,9 @@ class TestIssue49CumSumOnStringEndToEnd:
         results = check_source(self.SOURCE)
         assert len(results) == 1
         assert results[0].passed is False
-        assert any("PLY016" in str(e) for e in results[0].errors), results[0].errors
+        assert any("pple-non-numeric-operand" in str(e) for e in results[0].errors), results[
+            0
+        ].errors
 
 
 class TestIssue50TzMixingEndToEnd:
@@ -2804,7 +2811,7 @@ class TestIssue50TzMixingEndToEnd:
         )
         result = check_source(source)[0]
         assert result.passed is False
-        assert any("PLY020" in str(e) for e in result.errors), result.errors
+        assert any("pple-concat-mismatch" in str(e) for e in result.errors), result.errors
 
     def test_concat_same_tz_passes(self):
         source = self.HEADER + textwrap.dedent(
@@ -2836,7 +2843,7 @@ class TestIssue50TzMixingEndToEnd:
         result = check_source(source)[0]
         assert result.passed is False
         assert len(result.errors) == 1, result.errors
-        assert "PLY009" in str(result.errors[0])
+        assert "pple-incompatible-operands" in str(result.errors[0])
 
     def test_same_tz_difference_declared_duration_passes(self):
         source = self.HEADER + textwrap.dedent(
@@ -2891,7 +2898,7 @@ class TestIssue50TzMixingEndToEnd:
 
 
 class TestIssue51BinNamespaceEndToEnd:
-    """Issue #51 repro: ``.bin`` on a non-Binary column flags PLY012;
+    """Issue #51 repro: ``.bin`` on a non-Binary column flags pple-wrong-namespace-dtype;
     ``.bin.encode("hex")`` on a declared ``pl.Binary`` column passes with
     the result declared ``str`` (probed: encode -> String)."""
 
@@ -2918,7 +2925,7 @@ class TestIssue51BinNamespaceEndToEnd:
         )
         result = check_source(source)[0]
         assert result.passed is False
-        assert any("PLY012" in str(e) for e in result.errors), result.errors
+        assert any("pple-wrong-namespace-dtype" in str(e) for e in result.errors), result.errors
 
     def test_bin_encode_on_binary_declared_str_passes(self):
         source = self.HEADER + textwrap.dedent(
@@ -3087,12 +3094,14 @@ class TestIssue52DecimalArithmeticEndToEnd:
 
         assert len(results) == 1
         assert results[0].passed is False
-        assert any("PLY009" in str(e) for e in results[0].errors), results[0].errors
+        assert any("pple-incompatible-operands" in str(e) for e in results[0].errors), results[
+            0
+        ].errors
 
 
 class TestIssue55ListSumOnStringsEndToEnd:
     """Issue #55 regression (30fc482): ``list.sum()`` on List(String) must
-    fail again — probed-invalid container reductions flag PLY016, so BOTH
+    fail again — probed-invalid container reductions flag pple-non-numeric-operand, so BOTH
     of the repro's wrong declarations (int and str, coerce=False) fail.
     """
 
@@ -3122,7 +3131,9 @@ class TestIssue55ListSumOnStringsEndToEnd:
 
         assert len(results) == 1
         assert results[0].passed is False
-        assert any("PLY016" in str(e) for e in results[0].errors), results[0].errors
+        assert any("pple-non-numeric-operand" in str(e) for e in results[0].errors), results[
+            0
+        ].errors
 
     def test_declared_str_fails_with_ply016(self):
         source = self.HEADER + textwrap.dedent(
@@ -3140,10 +3151,12 @@ class TestIssue55ListSumOnStringsEndToEnd:
 
         assert len(results) == 1
         assert results[0].passed is False
-        assert any("PLY016" in str(e) for e in results[0].errors), results[0].errors
+        assert any("pple-non-numeric-operand" in str(e) for e in results[0].errors), results[
+            0
+        ].errors
 
     def test_list_sum_on_ints_still_int64(self):
-        # Regression guard: the numeric core is untouched by the PLY016 path.
+        # Regression guard: the numeric core is untouched by the pple-non-numeric-operand path.
         source = self.HEADER + textwrap.dedent(
             """
             class Nums(pa.DataFrameModel):
@@ -3223,7 +3236,7 @@ class TestIssue56NameNamespaceEndToEnd:
 
     def test_name_map_degrades_gracefully(self):
         # Unknowable output names: the frame opens instead of failing with
-        # 'Could not infer return type'; PLW004 points at the callable.
+        # 'Could not infer return type'; pplw-untyped-callable points at the callable.
         source = self.HEADER + textwrap.dedent(
             """
             class Mapped(pa.DataFrameModel):
@@ -3239,7 +3252,9 @@ class TestIssue56NameNamespaceEndToEnd:
 
         assert len(results) == 1
         assert results[0].passed is True, results[0].errors
-        assert any("PLW004" in str(w) for w in results[0].warnings), results[0].warnings
+        assert any("pplw-untyped-callable" in str(w) for w in results[0].warnings), results[
+            0
+        ].warnings
 
 
 class TestArrayWidthVerdict:

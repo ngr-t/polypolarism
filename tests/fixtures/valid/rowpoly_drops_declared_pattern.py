@@ -2,7 +2,7 @@
 
 Sometimes a row-polymorphic helper INTENTIONALLY removes a pattern-class of the
 caller's extras while preserving everything else — a sanitizer that strips every
-``_internal_*`` column. Without a declaration that is a PLY043 pattern-drop
+``_internal_*`` column. Without a declaration that is a pple-rowpoly-not-preserved pattern-drop
 (``valid``/``invalid`` contrast below): ``select(~cs.starts_with("_internal_"))``
 could drop a caller extra matching the regex, so preservation is not provable.
 
@@ -11,7 +11,7 @@ check verifies it precisely instead of rejecting it: the body's reduction
 provably removes ONLY columns the declared selector matches (and keeps every
 other caller extra), so the helper is ACCEPTED. The declaration is the escape
 hatch — a body that dropped MORE than declared (a broader pattern, a fixed-name
-select) would still be PLY043.
+select) would still be pple-rowpoly-not-preserved.
 
 Static-only: like the other @rowpoly fixtures the preservation property is
 caller-relative (it constrains which of the *caller's* columns survive), so

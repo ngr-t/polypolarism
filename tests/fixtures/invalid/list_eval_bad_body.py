@@ -3,7 +3,7 @@
 ``pl.col("v").list.eval(pl.element() + pl.lit("x"))`` on a List(Int64)
 column adds a String to each Int64 element — polars raises
 ``InvalidOperationError`` at runtime. polypolarism binds ``pl.element()``
-to the list's inner dtype and flags the body statically as PLY009.
+to the list's inner dtype and flags the body statically as pple-incompatible-operands.
 """
 
 import pandera.polars as pa

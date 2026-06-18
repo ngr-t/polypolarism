@@ -1,4 +1,4 @@
-"""map_elements without return_dtype= emits PLW001."""
+"""map_elements without return_dtype= emits pplw-missing-return-dtype."""
 
 import pandera.polars as pa
 import polars as pl

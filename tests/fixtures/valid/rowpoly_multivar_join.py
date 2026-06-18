@@ -13,7 +13,7 @@ the threading of *caller* extras only matters at call sites, which the unit
 tests cover.
 
 Invalid direction: ``invalid/rowpoly_drops_row_variable.py`` (a helper that
-provably drops its row variable -> PLY043).
+provably drops its row variable -> pple-rowpoly-not-preserved).
 """
 
 import pandera.polars as pa

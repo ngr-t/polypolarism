@@ -2,7 +2,7 @@
 
 ``df.select(pl.col("a"), pl.col("b").alias("a"))`` produces two outputs
 named ``a`` — polars raises ``DuplicateError`` at runtime. polypolarism
-flags it statically as PLY015.
+flags it statically as pple-duplicate-column.
 """
 
 import pandera.polars as pa

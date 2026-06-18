@@ -1,4 +1,4 @@
-"""DataFrame[X] annotation referencing an unresolvable schema emits PLW006."""
+"""DataFrame[X] annotation referencing an unresolvable schema emits pplw-unknown-schema."""
 
 import pandera.polars as pa
 from pandera.typing.polars import DataFrame

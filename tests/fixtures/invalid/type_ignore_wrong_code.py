@@ -24,5 +24,5 @@ class KVa(pa.DataFrameModel):
         strict = True
 
 
-def wrong_code(df: DataFrame[KV]) -> DataFrame[KVa]:  # type: ignore[PLW006]
+def wrong_code(df: DataFrame[KV]) -> DataFrame[KVa]:  # type: ignore[pplw-unknown-schema]
     return df.select(pl.col("k"))

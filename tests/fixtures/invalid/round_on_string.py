@@ -1,4 +1,4 @@
-"""round on a non-numeric column raises at runtime (issue #62, PLY016).
+"""round on a non-numeric column raises at runtime (issue #62, pple-non-numeric-operand).
 
 Probed (polars 1.41.2): ``pl.col(str).round(1)`` raises
 ``InvalidOperationError: rounding ('half_to_even') can only be used on
@@ -26,4 +26,6 @@ class Out(pa.DataFrameModel):
 
 @pa.check_types
 def bug_round_on_string(df: DataFrame[S]) -> DataFrame[Out]:
-    return df.select(pl.col("s").round(1))  # WRONG: round is numeric-only (PLY016)
+    return df.select(
+        pl.col("s").round(1)
+    )  # WRONG: round is numeric-only (pple-non-numeric-operand)

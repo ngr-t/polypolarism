@@ -3,7 +3,7 @@
 ``select(pl.all())`` (and the ``cs.all()`` spelling) selects every column,
 including the caller's arbitrary extras, so the row variable survives. This is
 the contrast to ``invalid/rowpoly_drops_row_variable.py``, where an explicit
-``select("id")`` of a fixed column set drops them and fires PLY043.
+``select("id")`` of a fixed column set drops them and fires pple-rowpoly-not-preserved.
 
 The preservation check skolemizes the row variable by injecting a sentinel
 column; an all-columns selector resolves to the full column set (sentinel

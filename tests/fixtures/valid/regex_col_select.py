@@ -4,7 +4,7 @@ polars treats a single ``pl.col`` string that starts with ``^`` AND ends with
 ``$`` as a regex over the input column names, and ``cs.matches(pat)`` likewise
 selects columns whose name matches the pattern (issue #111). polypolarism must
 expand these to the matching set rather than treating the pattern as a literal
-column name (which produced a false PLY042 / PLY040). On the (open) frame here
+column name (which produced a false pple-undeclared-column / pple-return-type). On the (open) frame here
 the regex may also match unknown extras, so the result degrades to an open
 frame — never a hard error on valid runtime code. The ``r_literal`` control
 keeps the explicit-name path behaving as before.

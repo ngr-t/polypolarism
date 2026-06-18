@@ -1,4 +1,4 @@
-"""`PLY033`: a variable annotation that re-interprets an inferable RHS as
+"""`pple-annotation-conflict`: a variable annotation that re-interprets an inferable RHS as
 an unrelated type is an error (ADR-0005 two-direction rule).
 
 False-negative twin of ``valid/variable_annotation_basic``: there the RHS

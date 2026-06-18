@@ -1,4 +1,4 @@
-"""``list.sum()`` over string elements raises at runtime (issue #55, PLY016).
+"""``list.sum()`` over string elements raises at runtime (issue #55, pple-non-numeric-operand).
 
 Probed (polars 1.41.2): ``pl.col(List(str)).list.sum()`` raises
 ``InvalidOperationError: `sum` operation not supported for dtype `str```.

@@ -450,7 +450,7 @@ class TestCheckVersions:
         warnings = check_versions(info)
         assert len(warnings) == 1
         assert warnings[0].package == "polars"
-        assert "PLW010" in warnings[0].message
+        assert "pplw-unsupported-version" in warnings[0].message
         assert "0.20.0" in warnings[0].message
 
     def test_at_polars_floor_silent(self):
@@ -490,7 +490,7 @@ class TestCheckVersions:
 
 class TestNoWarningFromInexactDetection:
     """A ``>=``-floor extracted from dependency specs is not evidence the
-    project actually runs that version, so it must never trigger PLW010.
+    project actually runs that version, so it must never trigger pplw-unsupported-version.
     Exact sources (lockfiles, installed environment, CLI, config) still do."""
 
     def test_polars_floor_below_floor_is_silent(self):
@@ -550,12 +550,12 @@ dependencies = ["polars>=0.19.0"]
         )
         rc = main([str(py), "--no-version-check"])
         captured = capsys.readouterr()
-        assert "PLW010" not in captured.err
+        assert "pplw-unsupported-version" not in captured.err
         assert rc == 0
 
     def test_dependency_floor_alone_does_not_warn(self, tmp_path: Path, capsys):
         """A ">=" floor in pyproject dependencies is the only source — even
-        though it is below the supported window, no PLW010 fires: the floor
+        though it is below the supported window, no pplw-unsupported-version fires: the floor
         of a range is not the version in use (issue #13)."""
         from polypolarism.cli import main
 
@@ -569,7 +569,7 @@ dependencies = ["polars>=0.19.0"]
         )
         main([str(py), "--no-color"])
         captured = capsys.readouterr()
-        assert "PLW010" not in captured.err
+        assert "pplw-unsupported-version" not in captured.err
 
     def test_old_poetry_lock_emits_warning(self, tmp_path: Path, capsys):
         from polypolarism.cli import main
@@ -586,7 +586,7 @@ version = "1.10.0"
         )
         main([str(py), "--no-color"])
         captured = capsys.readouterr()
-        assert "PLW010" in captured.err
+        assert "pplw-unsupported-version" in captured.err
         assert "poetry.lock" in captured.err
 
     def test_old_installed_env_emits_warning(
@@ -600,7 +600,7 @@ version = "1.10.0"
         _patch_installed(monkeypatch, {"polars": "1.10.0"})
         main([str(py), "--no-color"])
         captured = capsys.readouterr()
-        assert "PLW010" in captured.err
+        assert "pplw-unsupported-version" in captured.err
         assert "installed environment" in captured.err
 
     def test_cli_override_silences_warning(self, tmp_path: Path, capsys):
@@ -616,11 +616,11 @@ dependencies = ["polars>=0.19.0"]
         )
         main([str(py), "--no-color", "--polars-version", str(POLARS_FLOOR)])
         captured = capsys.readouterr()
-        assert "PLW010" not in captured.err
+        assert "pplw-unsupported-version" not in captured.err
 
     def test_polars_1_0_now_warns(self, tmp_path: Path, capsys):
         """Polars 1.0 is below the supported floor (1.37, ADR-0004) and
-        should emit PLW010, even though it's a 1.x release."""
+        should emit pplw-unsupported-version, even though it's a 1.x release."""
         from polypolarism.cli import main
 
         py = tmp_path / "x.py"
@@ -628,7 +628,7 @@ dependencies = ["polars>=0.19.0"]
         (tmp_path / "pyproject.toml").write_text("")
         main([str(py), "--no-color", "--polars-version", "1.0.0"])
         captured = capsys.readouterr()
-        assert "PLW010" in captured.err
+        assert "pplw-unsupported-version" in captured.err
 
 
 # Specific Polars 1.x minors that mark known landmarks in the churn doc.
@@ -675,10 +675,14 @@ class TestPolarsVersionLandmarks:
         main([str(py), "--no-color", "--polars-version", version_str])
         captured = capsys.readouterr()
         if should_warn:
-            assert "PLW010" in captured.err, f"polars {version_str} should warn but didn't"
+            assert "pplw-unsupported-version" in captured.err, (
+                f"polars {version_str} should warn but didn't"
+            )
             assert "polars" in captured.err.lower()
         else:
-            assert "PLW010" not in captured.err, f"polars {version_str} should be silent but warned"
+            assert "pplw-unsupported-version" not in captured.err, (
+                f"polars {version_str} should be silent but warned"
+            )
 
     def test_via_check_versions_directly(self, version_str: str, should_warn: bool):
         v = Version.parse(version_str)
@@ -730,10 +734,10 @@ class TestPanderaVersionLandmarks:
         )
         captured = capsys.readouterr()
         if should_warn:
-            assert "PLW010" in captured.err
+            assert "pplw-unsupported-version" in captured.err
             assert "pandera" in captured.err.lower()
         else:
-            assert "PLW010" not in captured.err
+            assert "pplw-unsupported-version" not in captured.err
 
     def test_via_check_versions_directly(self, version_str: str, should_warn: bool):
         v = Version.parse(version_str)
@@ -757,7 +761,7 @@ class TestWarningMessageContent:
 
     def test_includes_diagnostic_code(self):
         warnings = check_versions(self._info_polars(Version(1, 0, 0), "uv.lock"))
-        assert "[PLW010]" in warnings[0].message
+        assert "[pplw-unsupported-version]" in warnings[0].message
 
     def test_includes_detected_version(self):
         warnings = check_versions(self._info_polars(Version(1, 18, 0), "uv.lock"))
@@ -817,7 +821,7 @@ version = "1.40.0"
         main([str(py), "--no-color"])
         captured = capsys.readouterr()
         # uv.lock at 1.40 should win — no warning even though pyproject says >=1.0.
-        assert "PLW010" not in captured.err
+        assert "pplw-unsupported-version" not in captured.err
 
     def test_uv_lock_old_warns_even_if_pyproject_floor_modern(self, tmp_path: Path, capsys):
         from polypolarism.cli import main
@@ -840,5 +844,5 @@ version = "1.10.0"
         main([str(py), "--no-color"])
         captured = capsys.readouterr()
         # uv.lock at 1.10 wins — should warn despite "modern" pyproject floor.
-        assert "PLW010" in captured.err
+        assert "pplw-unsupported-version" in captured.err
         assert "1.10.0" in captured.err

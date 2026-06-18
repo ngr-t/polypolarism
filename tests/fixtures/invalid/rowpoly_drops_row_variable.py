@@ -1,11 +1,11 @@
-"""A @rowpoly helper whose body drops the row variable (issue C-14 Tier 4, PLY043).
+"""A @rowpoly helper whose body drops the row variable (issue C-14 Tier 4, pple-rowpoly-not-preserved).
 
 ``@rowpoly("R")`` promises the helper preserves the caller's extra columns,
 so a call site threads them into the result (Tier 3). This body breaks that
 promise: the explicit ``select("id")`` produces a closed frame that keeps
 only ``id``, dropping any caller extras before ``score`` is added. The
 preservation check skolemizes the row variable and catches the provable drop
-as PLY043.
+as pple-rowpoly-not-preserved.
 
 Static-only: the property is relative to the caller (whether the helper kept
 columns the *caller* supplied), so Pandera cannot check it at runtime — an

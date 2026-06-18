@@ -1,4 +1,4 @@
-"""to_dummies without an annotated assignment emits PLW005 (issue #74).
+"""to_dummies without an annotated assignment emits pplw-data-dependent-schema (issue #74).
 
 Like pivot, the output columns are value-dependent (``color`` ->
 ``color_red``, ``color_blue``, ... UInt8; probed on polars 1.41.2,

@@ -2,7 +2,7 @@
 
 Backward narrowing: an assumed lookup pins the column into the open
 frame, so a later strict-parameter call provably carries the extra.
-Bare return annotations check the eager/lazy bit (PLY032). The no-args
+Bare return annotations check the eager/lazy bit (pple-eager-lazy-mismatch). The no-args
 ``pl.DataFrame()`` constructor is the provably empty frame.
 """
 

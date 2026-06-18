@@ -3,7 +3,7 @@
 std/var/sum on Date/Datetime/Time SUCCEED in grouped contexts — all-null
 with the receiver dtype (probed identical on polars 1.37.0 through
 1.41.2) — while raising as whole-frame reductions. The grouped form is
-accepted (Nullable receiver dtype) with a PLW012 "provably all-null"
+accepted (Nullable receiver dtype) with a pplw-all-null-aggregation "provably all-null"
 advisory: it runs, but it is almost certainly not what the author meant.
 """
 

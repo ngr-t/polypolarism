@@ -443,7 +443,7 @@ class TestTemporalReceivers:
         result = infer_agg_result_type(AggFunction.STD, Nullable(Duration(unit="ms")))
         assert result == Nullable(Duration(unit="ms"))
 
-    # -- genuinely-invalid cells keep raising (PLY011) ----------------------
+    # -- genuinely-invalid cells keep raising (pple-groupby) ----------------------
     @pytest.mark.parametrize("context", ["select", "agg"])
     def test_var_duration_raises(self, context):
         with pytest.raises(GroupByTypeError) as exc_info:
@@ -454,7 +454,7 @@ class TestTemporalReceivers:
     @pytest.mark.parametrize("dtype", [Date(), Datetime(), Datetime(tz="UTC"), Time()], ids=str)
     def test_sum_std_var_on_non_duration_temporals_select_raises(self, func, dtype):
         # Issue #91: the contexts DIVERGE for these cells — the whole-frame
-        # reduction raises InvalidOperationError (a PLY011 proof) ...
+        # reduction raises InvalidOperationError (a pple-groupby proof) ...
         with pytest.raises(GroupByTypeError) as exc_info:
             infer_agg_result_type(func, dtype, context="select")
         assert str(dtype) in str(exc_info.value)
@@ -465,7 +465,7 @@ class TestTemporalReceivers:
         # ... while the GROUPED context silently succeeds with an
         # unconditionally all-null column of the receiver dtype (probed
         # identical on polars 1.37.0 through 1.41.2). The analyzer layers
-        # a PLW012 advisory on top.
+        # a pplw-all-null-aggregation advisory on top.
         result = infer_agg_result_type(func, dtype, context="agg")
         assert result == Nullable(dtype)
 

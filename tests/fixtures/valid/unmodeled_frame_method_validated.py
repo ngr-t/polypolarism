@@ -1,4 +1,4 @@
-"""Valid: the two silent paths around the frame-level PLW007 (backlog N-3).
+"""Valid: the two silent paths around the frame-level pplw-unmodeled-method (backlog N-3).
 
 Remedy twin of ``warning/unmodeled_frame_method``:
 

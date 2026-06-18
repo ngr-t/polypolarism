@@ -1,4 +1,4 @@
-"""over() partition column doesn't exist (issue #32, PLY001)."""
+"""over() partition column doesn't exist (issue #32, pple-column-not-found)."""
 
 import pandera.polars as pa
 import polars as pl

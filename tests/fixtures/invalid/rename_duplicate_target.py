@@ -1,4 +1,4 @@
-"""Invalid: rename mapping two sources onto one target (PLY015).
+"""Invalid: rename mapping two sources onto one target (pple-duplicate-column).
 
 ``df.rename({"a": "x", "b": "x"})`` maps both ``a`` and ``b`` to ``x`` —
 producing two ``x`` columns. polars raises ``DuplicateError`` at runtime

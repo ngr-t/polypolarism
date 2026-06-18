@@ -1,7 +1,7 @@
 """Statements outside a frame-typed function signature are analyzed when the
 receiver schema is statically known (issue #110).
 
-The same provable missing-column reference that fires PLY001 inside a typed
+The same provable missing-column reference that fires pple-column-not-found inside a typed
 function must also fire at module top level, inside a frame-untyped
 ``def main() -> None:`` body, and inside an ``if __name__`` guard — wherever
 the receiver frame's schema is statically known (here, the closed return of

@@ -1,4 +1,4 @@
-"""Invalid fixture for issue #69 (PLY040), import-time variant.
+"""Invalid fixture for issue #69 (pple-return-type), import-time variant.
 
 Single-argument ``Annotated[pl.Datetime]`` is rejected by Python's typing
 module itself ("Annotated[...] should be used with at least two arguments"),

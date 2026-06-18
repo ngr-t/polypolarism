@@ -1,4 +1,4 @@
-"""Invalid: rename whose target already exists in the frame (PLY015).
+"""Invalid: rename whose target already exists in the frame (pple-duplicate-column).
 
 ``df.rename({"a": "b"})`` where ``b`` is already a column — and ``b`` is not
 itself renamed away — produces two ``b`` columns. polars raises

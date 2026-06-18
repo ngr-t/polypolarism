@@ -1,4 +1,4 @@
-"""Invalid test case: with_row_index name collides with an existing column (PLY006)."""
+"""Invalid test case: with_row_index name collides with an existing column (pple-column-name-collision)."""
 
 import pandera.polars as pa
 import polars as pl

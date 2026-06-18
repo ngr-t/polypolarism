@@ -1,8 +1,8 @@
 """Invalid fixture: violations against object-API schemas (backlog C-11).
 
 A strict ``pa.DataFrameSchema`` binds closed after ``validate`` — a
-missing column is a provable PLY001 — and declared dtypes drive the
-expression rules (``.str`` on an int column is PLY012).
+missing column is a provable pple-column-not-found — and declared dtypes drive the
+expression rules (``.str`` on an int column is pple-wrong-namespace-dtype).
 """
 
 from __future__ import annotations

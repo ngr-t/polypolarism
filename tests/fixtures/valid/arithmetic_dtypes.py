@@ -6,7 +6,7 @@ promotes to Float64. Elementwise ops with a Nullable operand produce a
 Nullable result, satisfied by ``pa.Field(nullable=True)`` declarations.
 String concat (``Utf8 + Utf8``) and temporal arithmetic (date - date,
 date + duration, duration * int, duration / int) are allowed binary
-operations and must not trip the PLY009 incompatible-dtype check.
+operations and must not trip the pple-incompatible-operands incompatible-dtype check.
 """
 
 from datetime import date, timedelta

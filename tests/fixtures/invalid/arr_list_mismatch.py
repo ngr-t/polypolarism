@@ -4,7 +4,7 @@ Probed on polars 1.41.2: every ``.arr.*`` method on a List column raises
 ``InvalidOperationError: expected Array datatype for array operation,
 got: List(Int64)`` and every ``.list.*`` method on an Array column raises
 ``expected List data type`` — the containers are not interchangeable.
-Both directions -> PLY012.
+Both directions -> pple-wrong-namespace-dtype.
 """
 
 import pandera.polars as pa

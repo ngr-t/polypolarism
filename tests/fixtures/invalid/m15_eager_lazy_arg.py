@@ -1,4 +1,4 @@
-"""passing LazyFrame[S] where DataFrame[S] is expected — PLY032."""
+"""passing LazyFrame[S] where DataFrame[S] is expected — pple-eager-lazy-mismatch."""
 
 import pandera.polars as pa
 from pandera.typing.polars import DataFrame, LazyFrame

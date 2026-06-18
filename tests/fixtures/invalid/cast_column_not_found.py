@@ -1,4 +1,4 @@
-"""Invalid test case: cast targets a column that does not exist (PLY004)."""
+"""Invalid test case: cast targets a column that does not exist (pple-column-not-found)."""
 
 import pandera.polars as pa
 import polars as pl

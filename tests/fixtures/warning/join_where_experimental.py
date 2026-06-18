@@ -1,10 +1,10 @@
-"""join_where degrades to an open frame with PLW007 (issue #74).
+"""join_where degrades to an open frame with pplw-unmodeled-method (issue #74).
 
 polars marks ``join_where`` experimental ("It may be changed at any point
 without it being considered a breaking change"), so polypolarism
 deliberately does NOT encode its schema: the result is an open frame, the
 declared return passes via the open-frame leniency (the ``via:`` notes in
-the golden), and PLW007 keeps the degradation visible. The declared
+the golden), and pplw-unmodeled-method keeps the degradation visible. The declared
 schema below matches the observed polars output (left + right columns,
 ``_right`` suffix on collisions; probed identical on 1.37.0-1.41.2) — a
 candidate for precise inference if/when polars stabilizes the API.

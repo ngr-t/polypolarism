@@ -78,7 +78,7 @@ class TestCheckDirectory:
 
         assert len(results) == 1
         assert results[0].passed is False
-        assert any("PLY008" in str(e) for e in results[0].errors)
+        assert any("pple-non-boolean-predicate" in str(e) for e in results[0].errors)
 
     def test_sort_missing_column_fixture_fails_with_ply007(self):
         """Issue #29 fixture: sort key column doesn't exist."""
@@ -86,7 +86,7 @@ class TestCheckDirectory:
 
         assert len(results) == 1
         assert results[0].passed is False
-        assert any("PLY007" in str(e) for e in results[0].errors)
+        assert any("pple-column-not-found" in str(e) for e in results[0].errors)
 
     def test_when_nonbool_fixture_fails_with_ply008(self):
         """Issue #37 fixture: non-boolean pl.when condition."""
@@ -94,7 +94,9 @@ class TestCheckDirectory:
 
         assert len(results) == 1
         assert results[0].passed is False
-        assert any("PLY008" in str(e) and "when" in str(e) for e in results[0].errors)
+        assert any(
+            "pple-non-boolean-predicate" in str(e) and "when" in str(e) for e in results[0].errors
+        )
 
     def test_when_mixed_branches_fixture_fails(self):
         """Issue #40 fixture: mixed when/then/otherwise branches infer String,
@@ -110,7 +112,7 @@ class TestCheckDirectory:
 
         assert len(results) == 3
         assert all(r.passed is False for r in results)
-        assert all(any("PLY012" in str(e) for e in r.errors) for r in results)
+        assert all(any("pple-wrong-namespace-dtype" in str(e) for e in r.errors) for r in results)
 
     def test_over_missing_column_fixture_fails_with_ply001(self):
         """Issue #32 fixture: over() partition column doesn't exist."""
@@ -118,7 +120,9 @@ class TestCheckDirectory:
 
         assert len(results) == 1
         assert results[0].passed is False
-        assert any("PLY042" in str(e) and "ghost" in str(e) for e in results[0].errors)
+        assert any(
+            "pple-undeclared-column" in str(e) and "ghost" in str(e) for e in results[0].errors
+        )
 
     def test_compare_incompatible_fixture_fails_with_ply009(self):
         """Issue #33 fixture: String == Int64 comparison and Int64.is_in(list-of-str)."""
@@ -127,7 +131,7 @@ class TestCheckDirectory:
         assert len(results) == 2
         for result in results:
             assert result.passed is False
-            assert any("PLY009" in str(e) for e in result.errors)
+            assert any("pple-incompatible-operands" in str(e) for e in result.errors)
 
     def test_cast_impossible_fixture_fails_with_ply013(self):
         """Issue #34 fixture: List(Int64) -> Int64 cast is structurally impossible."""
@@ -135,7 +139,7 @@ class TestCheckDirectory:
 
         assert len(results) == 1
         assert results[0].passed is False
-        assert any("PLY013" in str(e) for e in results[0].errors)
+        assert any("pple-invalid-cast" in str(e) for e in results[0].errors)
 
     def test_duplicate_output_fixture_fails_with_ply015(self):
         """Issue #36 fixture: two select outputs share the name 'a'."""
@@ -143,7 +147,7 @@ class TestCheckDirectory:
 
         assert len(results) == 1
         assert results[0].passed is False
-        assert any("PLY015" in str(e) for e in results[0].errors)
+        assert any("pple-duplicate-column" in str(e) for e in results[0].errors)
 
     def test_plural_col_exprs_fixture_passes(self):
         """Issue #42 fixture: plural pl.col inside expressions expands per column."""
@@ -158,7 +162,7 @@ class TestCheckDirectory:
 
         assert len(results) == 1
         assert results[0].passed is False
-        assert any("PLY009" in str(e) for e in results[0].errors)
+        assert any("pple-incompatible-operands" in str(e) for e in results[0].errors)
 
     def test_list_eval_body_fixture_passes(self):
         """Issue #44 fixture: a valid eval body keeps List(Int64) (strict schema)."""
@@ -188,9 +192,9 @@ class TestCheckWarningFixtures:
         assert all(r.warnings for r in results)
         # PLW codes show up
         all_warnings = [w for r in results for w in r.warnings]
-        assert any("PLW001" in w for w in all_warnings)
-        assert any("PLW003" in w for w in all_warnings)
-        assert any("PLW004" in w for w in all_warnings)
+        assert any("pplw-missing-return-dtype" in w for w in all_warnings)
+        assert any("pplw-unknown-function" in w for w in all_warnings)
+        assert any("pplw-untyped-callable" in w for w in all_warnings)
 
     def test_cli_exits_zero_with_only_warnings(self, tmp_path):
         warning_dir = FIXTURES_DIR / "warning"
@@ -529,7 +533,7 @@ def bad(data: DataFrame[InSchema]) -> DataFrame[OutSchema]:
         assert len(data["diagnostics"]) >= 1
         assert any("missing" in d["message"].lower() for d in data["diagnostics"])
         # Return-type mismatches carry the structured family code (issue #70).
-        assert any(d.get("code") == "PLY040" for d in data["diagnostics"])
+        assert any(d.get("code") == "pple-return-type" for d in data["diagnostics"])
 
     def test_format_text_is_default(self, tmp_path):
         """--format text is the default format."""

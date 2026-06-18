@@ -5,7 +5,7 @@ Pins both failure families probed on polars 1.41.2:
 - mean preserves the receiver INSTANCE, so declaring the wrong time unit
   for a grouped Datetime mean must fail statically (pandera's runtime
   validation rejects the unit mismatch too).
-- The genuinely-invalid temporal cells stay PLY011: ``var`` on Duration
+- The genuinely-invalid temporal cells stay pple-groupby: ``var`` on Duration
   raises InvalidOperationError in both contexts; ``sum``/``std`` on
   Datetime raise as whole-frame reductions, while their grouped forms
   silently yield an unconditionally all-null column — the non-nullable

@@ -1,4 +1,4 @@
-"""Invalid test case: lazy-only method called on an eager DataFrame (PLY031)."""
+"""Invalid test case: lazy-only method called on an eager DataFrame (pple-lazy-only-method)."""
 
 import pandera.polars as pa
 from pandera.typing.polars import DataFrame

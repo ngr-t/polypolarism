@@ -2,7 +2,7 @@
 
 ``pl.col("s") + pl.col("n")`` adds a String to an Int64 — polars raises
 ``InvalidOperationError`` at runtime ("arithmetic on string and numeric
-not allowed"). polypolarism flags it statically as PLY009.
+not allowed"). polypolarism flags it statically as pple-incompatible-operands.
 """
 
 import pandera.polars as pa

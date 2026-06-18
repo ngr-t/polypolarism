@@ -1,4 +1,4 @@
-"""Invalid fixture for issue #69 (PLY040): ``Annotated`` dtype forms with the
+"""Invalid fixture for issue #69 (pple-return-type): ``Annotated`` dtype forms with the
 wrong metadata arity crash pandera at runtime, so every function referencing
 such a schema is dead on arrival.
 

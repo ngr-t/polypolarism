@@ -1,6 +1,6 @@
 """Valid: comparisons, is_in and casts that polars accepts (issues #33/#34).
 
-Contrasts for the PLY009/PLY013 false-negative fixes: int == int,
+Contrasts for the pple-incompatible-operands/pple-invalid-cast false-negative fixes: int == int,
 int < float (and an int literal against a Float64 column), str.is_in
 on a list of strings, List(Int64) -> List(Float64) cast, the
 value-dependent Utf8 -> Int64 cast, and an Int64 -> Date cast (numeric

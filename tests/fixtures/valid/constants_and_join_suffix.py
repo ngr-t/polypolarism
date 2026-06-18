@@ -49,5 +49,5 @@ class Long(pa.DataFrameModel):
 
 
 def unpivot_via_constant(wide: DataFrame[Wide]) -> DataFrame[Long]:
-    """#12: on=ON_COLS resolves instead of a false PLY022."""
+    """#12: on=ON_COLS resolves instead of a false pple-unpivot."""
     return wide.unpivot(index=["id"], on=ON_COLS)

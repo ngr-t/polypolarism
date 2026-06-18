@@ -2,7 +2,7 @@
 
 The validate output of a filter-mode schema is closed: a column the
 schema does not declare is gone on every execution, so referencing it
-is a provable missing-column error (PLY001-class, not the PLY042 lint —
+is a provable missing-column error (pple-column-not-found-class, not the pple-undeclared-column lint —
 the output never "admits extras at runtime").
 
 False-positive twin: ``valid/object_api_strict_filter``.

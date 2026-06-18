@@ -1,4 +1,4 @@
-"""`PLW007` at FRAME level: a frame-returning method polypolarism does
+"""`pplw-unmodeled-method` at FRAME level: a frame-returning method polypolarism does
 not model silently untracks the variable — downstream checks die quietly
 (backlog N-3).
 

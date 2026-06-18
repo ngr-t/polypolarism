@@ -2,7 +2,7 @@
 
 False-negative twin of ``valid/m12_pivot_annotated.py``. The pivot output
 is data-dependent, so the ``DataFrame[WidePivoted]`` variable annotation
-itself is *trusted* (PLW005 documents why) and cannot contradict the pivot
+itself is *trusted* (pplw-data-dependent-schema documents why) and cannot contradict the pivot
 statically. What IS checkable is that the annotated type flows downstream:
 here the declared return schema contradicts the annotation.
 """

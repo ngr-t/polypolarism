@@ -146,7 +146,7 @@ class TestFormatJson:
             passed=False,
             errors=[
                 MissingColumn("name", Utf8()),
-                "[PLY032] Return type expected DataFrame[...] but inferred LazyFrame[...]",
+                "[pple-eager-lazy-mismatch] Return type expected DataFrame[...] but inferred LazyFrame[...]",
             ],
         )
 
@@ -154,23 +154,23 @@ class TestFormatJson:
         data = json.loads(output)
 
         codes = [d["code"] for d in data["diagnostics"]]
-        assert codes == ["PLY040", "PLY032"]
+        assert codes == ["pple-return-type", "pple-eager-lazy-mismatch"]
         # The message prefix stays for backward compatibility.
-        assert data["diagnostics"][0]["message"].startswith("[PLY040] ")
+        assert data["diagnostics"][0]["message"].startswith("[pple-return-type] ")
 
     def test_warning_diagnostic_carries_structured_code(self):
         """Tagged warnings expose their PLW code structurally too."""
         result = CheckResult(
             function_name="process",
             passed=True,
-            warnings=["[PLW001] map_elements without return_dtype="],
+            warnings=["[pplw-missing-return-dtype] map_elements without return_dtype="],
         )
 
         output = format_json([result], "test.py", function_lines={"process": 3})
         data = json.loads(output)
 
         assert len(data["diagnostics"]) == 1
-        assert data["diagnostics"][0]["code"] == "PLW001"
+        assert data["diagnostics"][0]["code"] == "pplw-missing-return-dtype"
         assert data["diagnostics"][0]["severity"] == "warning"
 
     def test_untagged_diagnostic_has_no_code_field(self):
@@ -226,7 +226,7 @@ class TestStructuredDiagnosticFields:
         assert diag["column_name"] == "total_revenue"
         assert diag["declared_type"] == "Int64"
         assert diag["inferred_type"] == "Float64"
-        # No schema operand for a PLY040 dtype difference.
+        # No schema operand for a pple-return-type dtype difference.
         assert "schema" not in diag
         # Message text is byte-identical to the rendered error.
         assert diag["message"] == str(error)
@@ -269,26 +269,28 @@ class TestStructuredDiagnosticFields:
             "on the schema, or take a bare pl.DataFrame parameter for "
             "row-polymorphic helpers"
         )
-        error = tagged_error("PLY042", message, column="amount", schema="InputSchema")
+        error = tagged_error(
+            "pple-undeclared-column", message, column="amount", schema="InputSchema"
+        )
         diag = self._diag(error)
-        assert diag["code"] == "PLY042"
+        assert diag["code"] == "pple-undeclared-column"
         assert diag["column_name"] == "amount"
         assert diag["schema"] == "InputSchema"
-        # PLY042 has no dtype operands.
+        # pple-undeclared-column has no dtype operands.
         assert "declared_type" not in diag
         assert "inferred_type" not in diag
         # The message is the tagged text, unchanged.
         assert diag["message"] == str(error)
-        assert diag["message"] == f"[PLY042] {message}"
+        assert diag["message"] == f"[pple-undeclared-column] {message}"
 
     def test_ply001_exposes_column_without_schema(self):
         error = tagged_error(
-            "PLY001",
+            "pple-column-not-found",
             "Column 'missing' not found. Available columns: ['a', 'b']",
             column="missing",
         )
         diag = self._diag(error)
-        assert diag["code"] == "PLY001"
+        assert diag["code"] == "pple-column-not-found"
         assert diag["column_name"] == "missing"
         # No schema operand for a plain runtime miss.
         assert "schema" not in diag
@@ -306,15 +308,15 @@ class TestStructuredDiagnosticFields:
         # A tagged-but-plain ``str`` error (no structured carrier) still omits
         # the new fields — they aren't regexed out of the message.
         diag = self._diag(
-            "[PLY032] Return type expected DataFrame[...] but inferred LazyFrame[...]"
+            "[pple-eager-lazy-mismatch] Return type expected DataFrame[...] but inferred LazyFrame[...]"
         )
-        assert diag["code"] == "PLY032"
+        assert diag["code"] == "pple-eager-lazy-mismatch"
         for key in ("column_name", "schema", "declared_type", "inferred_type"):
             assert key not in diag
 
 
 class TestPly040RetypeFix:
-    """Batch B, Request 3: a PLY040 ``TypeDifference`` carries fix metadata so
+    """Batch B, Request 3: a pple-return-type ``TypeDifference`` carries fix metadata so
     the editor can offer a "retype the schema field" quick fix without
     AST-parsing or string-building.
 
@@ -436,7 +438,7 @@ class TestPly040RetypeFixEndToEnd:
         diff = [d for d in diagnostics if d.get("column_name") == "total_revenue"]
         assert diff, diagnostics
         d = diff[0]
-        assert d["code"] == "PLY040"
+        assert d["code"] == "pple-return-type"
         # The inferred dtype is Float64 (mean/sum of float revenue).
         assert d["suggested_annotation"] == "pl.Float64"
         # ``total_revenue: int`` is on line 12 (1-indexed in the dedented src).
@@ -497,7 +499,7 @@ class TestPly040RetypeFixEndToEnd:
 
 
 class TestPly042FixObject:
-    """Batch B, Request 2: a PLY042 diagnostic carries a structured ``fix``
+    """Batch B, Request 2: a pple-undeclared-column diagnostic carries a structured ``fix``
     object so the extension can offer a "declare the column on the schema"
     quick fix. Additive: ``message`` byte-identical, ``fix`` omitted when the
     schema file is unknown."""
@@ -518,22 +520,22 @@ class TestPly042FixObject:
             "suggested_dtype": "Float64",
         }
         error = tagged_error(
-            "PLY042",
+            "pple-undeclared-column",
             "column 'amount' is not declared in schema 'InputSchema' — ...",
             column="amount",
             schema="InputSchema",
             fix=fix,
         )
         diag = self._diag(error)
-        assert diag["code"] == "PLY042"
+        assert diag["code"] == "pple-undeclared-column"
         assert diag["fix"] == fix
         # The message is byte-identical to the tagged text.
         assert diag["message"] == str(error)
 
     def test_fix_omitted_when_not_carried(self):
-        # A PLY042 without a fix (unknown schema file) omits the key.
+        # A pple-undeclared-column without a fix (unknown schema file) omits the key.
         error = tagged_error(
-            "PLY042",
+            "pple-undeclared-column",
             "column 'amount' is not declared in schema 'InputSchema' — ...",
             column="amount",
             schema="InputSchema",
@@ -578,7 +580,7 @@ class TestPly042FixObjectEndToEnd:
         )
         results = check_file(app)
         diags = _diagnostics_from_results(results, app)
-        ply042 = [d for d in diags if d.get("code") == "PLY042"]
+        ply042 = [d for d in diags if d.get("code") == "pple-undeclared-column"]
         assert ply042, diags
         fix = ply042[0]["fix"]
         assert fix["schema"] == "InputSchema"
@@ -626,7 +628,7 @@ class TestPly042FixObjectEndToEnd:
         )
         results = check_file(app)
         diags = _diagnostics_from_results(results, app)
-        ply042 = [d for d in diags if d.get("code") == "PLY042"]
+        ply042 = [d for d in diags if d.get("code") == "pple-undeclared-column"]
         assert ply042, diags
         fix = ply042[0]["fix"]
         assert fix["schema"] == "InputSchema"
@@ -638,7 +640,7 @@ class TestPly042FixObjectEndToEnd:
 
 
 class TestPly042SuggestedDtype:
-    """Issue #114: the PLY042 ``fix`` carries ``suggested_dtype`` (a ready-to-
+    """Issue #114: the pple-undeclared-column ``fix`` carries ``suggested_dtype`` (a ready-to-
     insert pandera annotation string) WHEN the undeclared column's dtype is
     statically constrained by its use (e.g. ``.cast(pl.Float64)``), and OMITS
     it when the dtype is genuinely unconstrained (the today behavior — sound,
@@ -671,7 +673,7 @@ class TestPly042SuggestedDtype:
         )
         results = check_file(app)
         diags = _diagnostics_from_results(results, app)
-        ply042 = [d for d in diags if d.get("code") == "PLY042"]
+        ply042 = [d for d in diags if d.get("code") == "pple-undeclared-column"]
         assert ply042, diags
         return ply042[0]["fix"]
 
@@ -706,7 +708,7 @@ class TestPly042SuggestedDtype:
 
 
 class TestPly042RelaxParamHelper:
-    """Batch B, Request 4 (low priority): the PLY042 diagnostic whose fix is
+    """Batch B, Request 4 (low priority): the pple-undeclared-column diagnostic whose fix is
     "relax the param" carries ``param_name`` and ``param_annotation_range``
     ({line, column, end_line, end_column}) sourced from the resolved param
     annotation AST node, so the editor can offer a "make it a bare
@@ -739,7 +741,7 @@ class TestPly042RelaxParamHelper:
         )
         results = check_file(app)
         diags = _diagnostics_from_results(results, app)
-        ply042 = [d for d in diags if d.get("code") == "PLY042"]
+        ply042 = [d for d in diags if d.get("code") == "pple-undeclared-column"]
         assert ply042, diags
         d = ply042[0]
         assert d["param_name"] == "df"
@@ -753,7 +755,7 @@ class TestPly042RelaxParamHelper:
         assert "InputSchema" in d["message"]
 
     def test_param_fields_omitted_for_non_relax_diag(self):
-        # A PLY040 retype is not a "relax the param" fix — no param fields.
+        # A pple-return-type retype is not a "relax the param" fix — no param fields.
         result = CheckResult(
             function_name="process",
             passed=False,
@@ -820,7 +822,7 @@ class TestStructuredFieldsEndToEnd:
         diff = [d for d in diagnostics if d.get("column_name") == "total_revenue"]
         assert diff, diagnostics
         d = diff[0]
-        assert d["code"] == "PLY040"
+        assert d["code"] == "pple-return-type"
         assert d["declared_type"] == "Int64"
         assert d["inferred_type"] == "Float64"
 
@@ -841,7 +843,7 @@ class TestStructuredFieldsEndToEnd:
                 return df.with_columns(b=pl.col("amount") + 1)
             """
         )
-        ply042 = [d for d in diagnostics if d.get("code") == "PLY042"]
+        ply042 = [d for d in diagnostics if d.get("code") == "pple-undeclared-column"]
         assert ply042, diagnostics
         d = ply042[0]
         assert d["column_name"] == "amount"
@@ -870,7 +872,7 @@ class TestStructuredFieldsEndToEnd:
                 return df.select(pl.col("nope"))
             """
         )
-        ply001 = [d for d in diagnostics if d.get("code") == "PLY001"]
+        ply001 = [d for d in diagnostics if d.get("code") == "pple-column-not-found"]
         assert ply001, diagnostics
         d = ply001[0]
         assert d["column_name"] == "nope"

@@ -1,4 +1,4 @@
-"""pipe() with a callable from another package emits PLW002 (treated as identity)."""
+"""pipe() with a callable from another package emits pplw-unresolved-pipe (treated as identity)."""
 
 import pandera.polars as pa
 import polars as pl

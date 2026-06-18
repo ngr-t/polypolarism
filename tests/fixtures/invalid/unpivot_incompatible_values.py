@@ -1,4 +1,4 @@
-"""Invalid test case: unpivot value columns have no common supertype (PLY022).
+"""Invalid test case: unpivot value columns have no common supertype (pple-unpivot).
 
 List + scalar has no polars supertype — unpivot raises at runtime
 ("'unpivot' not supported for dtype: list[i64]").

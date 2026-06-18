@@ -4,12 +4,12 @@ A typed helper defined in a project-local module and imported into the
 caller's module should have its signature resolved at the call site:
 
 - a plain ``DataFrame[Schema]``-returning helper's return type is inferred
-  (no more PLW003 / "could not infer return type");
+  (no more pplw-unknown-function / "could not infer return type");
 - a ``@rowpoly`` helper threads the caller's extra columns into the result
   with their real dtypes, exactly like the same-module case.
 
 Genuinely external imports (stdlib / third-party / unresolvable) MUST stay
-on the old path (PLW003) — we never guess at code we can't read.
+on the old path (pplw-unknown-function) — we never guess at code we can't read.
 """
 
 from __future__ import annotations
@@ -101,12 +101,12 @@ class TestImportedRowpolyHelper:
         )
         results = check_file(tmp_path / "app.py")
         use = next(r for r in results if r.function_name == "use")
-        # No PLW003 — the imported helper resolved.
-        assert not any("PLW003" in str(w) for w in use.warnings), use.warnings
+        # No pplw-unknown-function — the imported helper resolved.
+        assert not any("pplw-unknown-function" in str(w) for w in use.warnings), use.warnings
         assert use.passed, [str(e) for e in use.errors]
 
     def test_imported_rowpoly_wrong_extra_dtype_fails_ply040(self, tmp_path: Path) -> None:
-        # `region` is really Utf8; declaring it int must FAIL with PLY040 —
+        # `region` is really Utf8; declaring it int must FAIL with pple-return-type —
         # proving the extra was threaded with its REAL dtype, not Unknown.
         _project_marker(tmp_path)
         _write(tmp_path / "helpers.py", _HELPERS)
@@ -138,7 +138,7 @@ class TestImportedRowpolyHelper:
         results = check_file(tmp_path / "app.py")
         use = next(r for r in results if r.function_name == "use_wrong")
         assert not use.passed
-        assert any("PLY040" in str(e) for e in use.errors), use.errors
+        assert any("pple-return-type" in str(e) for e in use.errors), use.errors
 
     def test_imported_rowpoly_via_alias_threads(self, tmp_path: Path) -> None:
         # ``from helpers import add_score as scorer`` binds `scorer`.
@@ -171,15 +171,15 @@ class TestImportedRowpolyHelper:
         )
         results = check_file(tmp_path / "app.py")
         use = next(r for r in results if r.function_name == "use_alias")
-        # Threaded under the alias binding -> wrong dtype is a precise PLY040.
+        # Threaded under the alias binding -> wrong dtype is a precise pple-return-type.
         assert not use.passed
-        assert any("PLY040" in str(e) for e in use.errors), use.errors
+        assert any("pple-return-type" in str(e) for e in use.errors), use.errors
 
 
 class TestImportedPlainHelper:
     def test_imported_plain_helper_return_is_inferred(self, tmp_path: Path) -> None:
         # The plain (non-rowpoly) typed helper's return type is inferred —
-        # no PLW003, and the declared OutScore columns are readable.
+        # no pplw-unknown-function, and the declared OutScore columns are readable.
         _project_marker(tmp_path)
         _write(tmp_path / "helpers.py", _HELPERS)
         _write(
@@ -210,14 +210,14 @@ class TestImportedPlainHelper:
         )
         results = check_file(tmp_path / "app.py")
         use = next(r for r in results if r.function_name == "use_plain")
-        assert not any("PLW003" in str(w) for w in use.warnings), use.warnings
+        assert not any("pplw-unknown-function" in str(w) for w in use.warnings), use.warnings
         assert use.passed, [str(e) for e in use.errors]
 
 
 class TestExternalImportStillUnresolved:
     def test_stdlib_import_still_warns_plw003(self, tmp_path: Path) -> None:
         # A genuinely external helper (here a stdlib name) must NOT resolve —
-        # the old PLW003 path is preserved (no false resolution).
+        # the old pplw-unknown-function path is preserved (no false resolution).
         _project_marker(tmp_path)
         _write(
             tmp_path / "app.py",
@@ -239,11 +239,11 @@ class TestExternalImportStillUnresolved:
         )
         results = check_file(tmp_path / "app.py")
         use = next(r for r in results if r.function_name == "use_external")
-        assert any("PLW003" in str(w) for w in use.warnings), use.warnings
+        assert any("pplw-unknown-function" in str(w) for w in use.warnings), use.warnings
 
 
 # A @rowpoly helper that does NOT preserve its row variable: select("id")
-# drops the caller's extra columns. Its OWN file flags PLY043; the caller
+# drops the caller's extra columns. Its OWN file flags pple-rowpoly-not-preserved; the caller
 # must NOT trust the marker and thread columns that are gone at runtime
 # (issue #112).
 _HELPERS_DROP = """
@@ -336,16 +336,16 @@ class TestImportedRowpolyHelperPreservation:
         )
         results = check_file(tmp_path / "app.py")
         use = next(r for r in results if r.function_name == "c_trusts_bad")
-        # Surfaced (not silent): a PLW014 warning that the imported helper's
+        # Surfaced (not silent): a pplw-rowpoly-not-threaded warning that the imported helper's
         # row variable is unverified / not threaded.
-        assert any("PLW014" in str(w) for w in use.warnings), use.warnings
+        assert any("pplw-rowpoly-not-threaded" in str(w) for w in use.warnings), use.warnings
         # `label` was NOT threaded, so it isn't trusted downstream. Whether
         # this lands as an error or merely degrades, the key invariant is:
         # the function must NOT be a clean silent OK with no diagnostic.
         assert not (use.passed and not use.warnings), "c_trusts_bad must not be a silent OK"
 
     def test_imported_pattern_dropping_helper_not_threaded(self, tmp_path: Path) -> None:
-        # select(pl.exclude(...)) pattern-drops — reuses the PLY043
+        # select(pl.exclude(...)) pattern-drops — reuses the pple-rowpoly-not-preserved
         # pattern-drop detection; must also not be trusted at the call site.
         _project_marker(tmp_path)
         _write(tmp_path / "helpers.py", _HELPERS_DROP)
@@ -381,13 +381,13 @@ class TestImportedRowpolyHelperPreservation:
         )
         results = check_file(tmp_path / "app.py")
         use = next(r for r in results if r.function_name == "c_trusts_pattern")
-        assert any("PLW014" in str(w) for w in use.warnings), use.warnings
+        assert any("pplw-rowpoly-not-threaded" in str(w) for w in use.warnings), use.warnings
         assert not (use.passed and not use.warnings), "c_trusts_pattern must not be a silent OK"
 
     def test_imported_preserving_helper_still_threads_precisely(self, tmp_path: Path) -> None:
         # NO REGRESSION: a genuinely-preserving imported helper (with_columns)
         # must STILL thread the caller's extra with its real dtype — a
-        # wrong-dtype declaration is still a precise PLY040, and no PLW014.
+        # wrong-dtype declaration is still a precise pple-return-type, and no pplw-rowpoly-not-threaded.
         _project_marker(tmp_path)
         _write(tmp_path / "helpers.py", _HELPERS)
         _write(
@@ -417,16 +417,16 @@ class TestImportedRowpolyHelperPreservation:
         )
         results = check_file(tmp_path / "app.py")
         use = next(r for r in results if r.function_name == "use_wrong")
-        # Still threaded precisely -> wrong dtype is PLY040, and no PLW014.
+        # Still threaded precisely -> wrong dtype is pple-return-type, and no pplw-rowpoly-not-threaded.
         assert not use.passed
-        assert any("PLY040" in str(e) for e in use.errors), use.errors
+        assert any("pple-return-type" in str(e) for e in use.errors), use.errors
 
     def test_imported_drops_helper_threads_excluding_declared_drop(self, tmp_path: Path) -> None:
         # An imported @rowpoly("R", drops=...) helper provably preserves the
         # row variable (modulo the declared pattern), so it is NOT gated by
-        # PLW014 and threads the SURVIVING extra precisely — but the declared-
+        # pplw-rowpoly-not-threaded and threads the SURVIVING extra precisely — but the declared-
         # dropped column is excluded. A wrong-dtype declaration of the surviving
-        # `region` is a precise PLY040; the dropped `_internal_secret` is not
+        # `region` is a precise pple-return-type; the dropped `_internal_secret` is not
         # precisely claimed (would degrade to leniency).
         _project_marker(tmp_path)
         _write(tmp_path / "helpers.py", _HELPERS_DROP)
@@ -463,9 +463,9 @@ class TestImportedRowpolyHelperPreservation:
         )
         results = check_file(tmp_path / "app.py")
         use = next(r for r in results if r.function_name == "use_region")
-        # Preserving (modulo the declared drop) -> no PLW014 gate.
-        assert not any("PLW014" in str(w) for w in use.warnings), use.warnings
-        # `region` threaded precisely -> wrong dtype is a precise PLY040.
+        # Preserving (modulo the declared drop) -> no pplw-rowpoly-not-threaded gate.
+        assert not any("pplw-rowpoly-not-threaded" in str(w) for w in use.warnings), use.warnings
+        # `region` threaded precisely -> wrong dtype is a precise pple-return-type.
         assert not use.passed
-        assert any("PLY040" in str(e) for e in use.errors), use.errors
-        assert not any("PLW014" in str(w) for w in use.warnings), use.warnings
+        assert any("pple-return-type" in str(e) for e in use.errors), use.errors
+        assert not any("pplw-rowpoly-not-threaded" in str(w) for w in use.warnings), use.warnings

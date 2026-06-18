@@ -80,11 +80,11 @@ PolarsDType = pl.DataType | DataTypeClass
 # one-line justification; stale keys fail test_skip_list_is_not_stale.
 # ---------------------------------------------------------------------------
 SKIP: dict[str, str] = {
-    # -- annotation contradiction (PLY033) is static-only by design
+    # -- annotation contradiction (pple-annotation-conflict) is static-only by design
     #    (ADR-0005): pandera annotations are inert at runtime (validation
     #    happens only via validate/check_types), so the function executes
     #    cleanly while the static verdict is FAIL — same family as the
-    #    PLY032 annotation-contract skip below.
+    #    pple-eager-lazy-mismatch annotation-contract skip below.
     "invalid/variable_annotation_contradiction.py": (
         "ADR-0005: annotations are inert at runtime; the contradiction is static-only"
     ),
@@ -118,7 +118,7 @@ SKIP: dict[str, str] = {
         "column-membership guard: guarded column is absent from the input schema, "
         "so synthesized inputs can't reach the guarded branch"
     ),
-    # -- @rowpoly preservation (C-14 Tier 4, PLY043): the helper provably drops
+    # -- @rowpoly preservation (C-14 Tier 4, pple-rowpoly-not-preserved): the helper provably drops
     #    the caller's extra columns, but that property is relative to the
     #    CALLER — an input synthesized from the parameter schema alone has no
     #    extras to drop, so the body runs and validates cleanly at runtime
@@ -126,9 +126,9 @@ SKIP: dict[str, str] = {
     #    cannot check a caller-relative preservation claim).
     "invalid/rowpoly_drops_row_variable.py": (
         "@rowpoly preservation is caller-relative; a schema-synthesized input has no "
-        "extras to drop, so there is no runtime counterpart to the static PLY043"
+        "extras to drop, so there is no runtime counterpart to the static pple-rowpoly-not-preserved"
     ),
-    # -- @rowpoly pattern-drop (C-14 follow-up #3, PLY043): same caller-relative
+    # -- @rowpoly pattern-drop (C-14 follow-up #3, pple-rowpoly-not-preserved): same caller-relative
     #    reason as rowpoly_drops_row_variable. The body's select(pl.exclude(
     #    "^tmp_.*$")) only drops a column when the CALLER supplied a tmp_*
     #    extra; an input synthesized from InId alone has none, so the body runs
@@ -137,7 +137,7 @@ SKIP: dict[str, str] = {
     "invalid/rowpoly_pattern_drop.py": (
         "@rowpoly preservation is caller-relative; a schema-synthesized input has no "
         "tmp_* extras for the regex exclude to drop, so there is no runtime counterpart "
-        "to the static PLY043"
+        "to the static pple-rowpoly-not-preserved"
     ),
     # -- known modeled divergence: sink_csv(lazy=True) terminates the plan at
     #    runtime (collect() writes the file and yields a 0-column frame);
@@ -146,10 +146,10 @@ SKIP: dict[str, str] = {
         "sink_csv terminates the plan at runtime; statically modeled as identity by design"
     ),
     # -- declaration-level static error with no runtime manifestation:
-    #    PLY032 flags passing LazyFrame[S] where DataFrame[S] is declared, but
+    #    pple-eager-lazy-mismatch flags passing LazyFrame[S] where DataFrame[S] is declared, but
     #    the helper body is an identity, so nothing raises at runtime.
     "invalid/m15_eager_lazy_arg.py::caller": (
-        "PLY032 annotation-contract violation; identity body never crashes at runtime"
+        "pple-eager-lazy-mismatch annotation-contract violation; identity body never crashes at runtime"
     ),
     # -- gradual-typing notion with no runtime counterpart: OrderIn declares
     #    ``items: pl.List(pl.Struct)``, which at runtime is List(Struct([]));
@@ -167,7 +167,7 @@ SKIP: dict[str, str] = {
     "valid/unknown_dtype_tracking.py::when_then_otherwise_column": (
         "int literals modeled as Int64 by design; runtime Int32 fails pandera validation"
     ),
-    # -- issue #69 (PLY041): the module crashes at IMPORT time — Python's
+    # -- issue #69 (pple-broken-schema-annotation): the module crashes at IMPORT time — Python's
     #    typing rejects single-argument Annotated — so the harness cannot
     #    load it at all; the import-time crash IS the diagnostic's subject.
     "invalid/dtype_annotated_no_metadata.py": (
@@ -179,18 +179,18 @@ SKIP: dict[str, str] = {
     #    functions — has no runnable counterpart to compare against. The
     #    module-level reproducer (`boom = src.select(pl.col("nope_module"))`)
     #    additionally raises ColumnNotFoundError at IMPORT time: that crash IS
-    #    the static PLY001's subject, so the module cannot be loaded at all.
+    #    the static pple-column-not-found's subject, so the module cannot be loaded at all.
     "invalid/module_level_scopes.py": (
         "module crashes at import: the module-level missing-column reference (the "
-        "PLY001 subject) raises ColumnNotFoundError; the flagged scopes have no "
+        "pple-column-not-found subject) raises ColumnNotFoundError; the flagged scopes have no "
         "frame parameter, so there is no harness-callable function"
     ),
-    # -- issue #69 (PLY041): the input schema is the broken one, so the
+    # -- issue #69 (pple-broken-schema-annotation): the input schema is the broken one, so the
     #    harness cannot synthesize an input frame (to_schema raises the very
     #    TypeError the fixture exists to flag). The return-side siblings in
     #    the same fixture self-verify via the return validation.
     "invalid/dtype_annotated_arity.py::broken_schema_as_input": (
-        "input schema is the PLY041 subject: to_schema raises TypeError during input synthesis"
+        "input schema is the pple-broken-schema-annotation subject: to_schema raises TypeError during input synthesis"
     ),
     # -- issues #94 / #95: the harness cannot synthesize a non-frame parameter
     #    (``flag: bool``); the error is branch-dependent and statically flagged.
@@ -219,10 +219,10 @@ SKIP: dict[str, str] = {
         "type: ignore blanket suppress: runtime would FAIL but static is suppressed by design"
     ),
     "valid/type_ignore_suppress.py::specific": (
-        "type: ignore[PLY040] suppress: runtime would FAIL but static is suppressed by design"
+        "type: ignore[pple-return-type] suppress: runtime would FAIL but static is suppressed by design"
     ),
     "valid/type_ignore_suppress.py::multi_code": (
-        "type: ignore[PLY040, PLY032] suppress: runtime would FAIL but static is suppressed by design"
+        "type: ignore[pple-return-type, pple-eager-lazy-mismatch] suppress: runtime would FAIL but static is suppressed by design"
     ),
 }
 
@@ -714,7 +714,7 @@ def test_runtime_agrees_with_static_verdict(
 #   - type:ignore suppress: static-OK but runtime-FAIL by design (~3 entries)
 #   - if-only no-else: static catches the no-else path; runtime with a default
 #     only exercises one branch (~1 entry)
-#   - @rowpoly preservation (caller-relative): PLY043 fires only when the CALLER
+#   - @rowpoly preservation (caller-relative): pple-rowpoly-not-preserved fires only when the CALLER
 #     supplies an extra column the body drops; a schema-synthesized input has no
 #     such extra, so there is no runtime counterpart (2 entries:
 #     rowpoly_drops_row_variable, rowpoly_pattern_drop)

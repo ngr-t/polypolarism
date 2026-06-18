@@ -3,7 +3,7 @@
 Probed on polars 1.41.2: ``pl.col("a").cat.get_categories()`` with
 ``a: Int64`` raises ``SchemaError: invalid dtype: expected an Enum or
 Categorical type, received 'Int64'`` — a plain String column is rejected
-the same way -> PLY012.
+the same way -> pple-wrong-namespace-dtype.
 """
 
 import pandera.polars as pa

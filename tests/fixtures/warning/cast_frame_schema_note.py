@@ -1,9 +1,9 @@
-"""typing.cast to a frame schema emits PLW013 (verdict unchanged) (issue #102).
+"""typing.cast to a frame schema emits pplw-ignored-cast (verdict unchanged) (issue #102).
 
 polypolarism does not honor ``typing.cast(DataFrame[Schema], x)`` as a schema
 assertion — it infers ``x``'s real schema and checks that. The cast is silent
 otherwise, which surprises users from mypy (where cast silences the checker),
-so PLW013 makes it visible. These functions all PASS; the note is advisory:
+so pplw-ignored-cast makes it visible. These functions all PASS; the note is advisory:
 
 - ``cast_match`` — the cast argument's real schema matches the declared
   return, so the function is OK; the note flags that the cast was inert.

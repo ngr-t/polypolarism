@@ -90,7 +90,7 @@ def test_preserved_extra_keeps_its_real_dtype_not_unknown() -> None:
             return out.select("id", "score", "region")
     """)
     assert not results["use_wrong"].passed
-    assert any("PLY040" in str(e) for e in results["use_wrong"].errors)
+    assert any("pple-return-type" in str(e) for e in results["use_wrong"].errors)
 
 
 def test_without_decorator_extra_degrades_to_unknown() -> None:
@@ -272,7 +272,7 @@ def test_drops_surviving_extra_is_still_precisely_threaded() -> None:
             return out.select("id", "region")
     """)
     assert not results["use_region"].passed
-    assert any("PLY040" in str(e) for e in results["use_region"].errors)
+    assert any("pple-return-type" in str(e) for e in results["use_region"].errors)
 
 
 def test_drops_surviving_extra_present_dropped_absent_in_inferred() -> None:

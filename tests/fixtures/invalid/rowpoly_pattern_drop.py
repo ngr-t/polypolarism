@@ -1,4 +1,4 @@
-"""A @rowpoly helper that pattern-drops the row variable (issue C-14 Tier 4, PLY043).
+"""A @rowpoly helper that pattern-drops the row variable (issue C-14 Tier 4, pple-rowpoly-not-preserved).
 
 ``@rowpoly("R")`` promises the helper preserves the caller's extra columns, so
 a call site threads them into the result (Tier 3). This body breaks that

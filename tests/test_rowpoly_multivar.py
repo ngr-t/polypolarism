@@ -65,7 +65,7 @@ def _check(body: str) -> dict:
 
 
 def _has_ply043(result) -> bool:
-    return any("PLY043" in str(e) for e in result.errors)
+    return any("pple-rowpoly-not-preserved" in str(e) for e in result.errors)
 
 
 def test_both_sides_extras_are_threaded() -> None:
@@ -97,7 +97,7 @@ def test_threaded_extra_keeps_real_dtype() -> None:
             return out.select("id", "tag", "left_extra")
     """)
     assert not results["use_wrong"].passed
-    assert any("PLY040" in str(e) for e in results["use_wrong"].errors)
+    assert any("pple-return-type" in str(e) for e in results["use_wrong"].errors)
 
 
 def test_merge_body_preserving_both_is_accepted() -> None:

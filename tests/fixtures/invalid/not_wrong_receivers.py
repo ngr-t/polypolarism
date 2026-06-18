@@ -6,7 +6,7 @@ False-negative twin of ``valid/not_bitwise_int.py``:
   Boolean declaration fails pandera validation at runtime — before #72
   the unconditional Boolean inference let it pass statically;
 - on a float column polars raises ``InvalidOperationError: dtype Float64
-  not supported in 'not' operation`` (probed, 1.41.2) -> PLY016.
+  not supported in 'not' operation`` (probed, 1.41.2) -> pple-non-numeric-operand.
 """
 
 import pandera.polars as pa

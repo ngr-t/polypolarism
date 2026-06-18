@@ -5,7 +5,7 @@ to ``pl.all()``): the regex matches every column, including the caller's
 arbitrary extras, so the row variable survives. The preservation check
 skolemizes the row variable by injecting a sentinel column; the ``^.*$`` regex
 resolves to the full column set (sentinel included), so no provable drop is
-found and the decorator is accepted — no false PLY043. Contrast the
+found and the decorator is accepted — no false pple-rowpoly-not-preserved. Contrast the
 ``^id$``-style fixed regex, which would drop the extras and IS rejected.
 """
 

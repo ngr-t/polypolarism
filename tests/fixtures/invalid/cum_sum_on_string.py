@@ -1,4 +1,4 @@
-"""cum_sum on a non-numeric column raises at runtime (issue #49, PLY016).
+"""cum_sum on a non-numeric column raises at runtime (issue #49, pple-non-numeric-operand).
 
 Probed (polars 1.41.2): ``pl.col(str).cum_sum()`` raises
 ``InvalidOperationError: `cum_sum` operation not supported for dtype `str```.

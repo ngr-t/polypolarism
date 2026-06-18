@@ -90,7 +90,7 @@ def test_coexists_with_other_decorators_first_match_wins() -> None:
 
 def test_recognition_does_not_change_the_verdict() -> None:
     # A return-type mismatch must still FAIL with the decorator present
-    # (recognition is metadata-only). The PLY040 verdict comes from the
+    # (recognition is metadata-only). The pple-return-type verdict comes from the
     # checker layer, so assert through check_source, not the raw analysis.
     body = """
         class T(pa.DataFrameModel):
@@ -106,4 +106,4 @@ def test_recognition_does_not_change_the_verdict() -> None:
     src = textwrap.dedent(_PRELUDE) + textwrap.dedent(body)
     result = next(r for r in check_source(src) if r.function_name == "f")
     assert not result.passed
-    assert any("PLY040" in str(e) for e in result.errors)
+    assert any("pple-return-type" in str(e) for e in result.errors)

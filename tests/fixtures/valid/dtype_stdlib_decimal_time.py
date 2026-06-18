@@ -53,7 +53,7 @@ class BareNames(pa.DataFrameModel):
 
 
 def qualified_decimal(df: DataFrame[Src]) -> DataFrame[DecStrict]:
-    # The issue #77 FP repro: this was "[PLY040] Extra column 'd'".
+    # The issue #77 FP repro: this was "[pple-return-type] Extra column 'd'".
     return df.select(d=pl.col("a").cast(pl.Decimal(28, 0)))
 
 

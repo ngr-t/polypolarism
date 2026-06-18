@@ -456,13 +456,13 @@ class TestUnrecognizedAnnotationDegrade:
     silently vanish from the schema (phantom "extra column" FPs on strict
     schemas, vanished-column FNs on open ones). The column registers with
     Unknown dtype and the schema records a per-field definition warning
-    that the analyzer surfaces as PLW011 on every referencing function.
+    that the analyzer surfaces as pplw-unrecognized-annotation on every referencing function.
 
     Probed (pandera 0.31.1): a genuinely-unresolvable annotation makes
     pandera raise TypeError at FIRST USE (to_schema/validate), not at the
     class statement — but a bare name may equally be a runtime alias of a
     real dtype (``MyAlias = pl.Int64`` resolves fine), so this is a
-    warning, not a provably-broken PLY041 error.
+    warning, not a provably-broken pple-broken-schema-annotation error.
     """
 
     def test_unrecognized_field_registers_unknown_column(self):
@@ -554,8 +554,8 @@ class TestUnrecognizedAnnotationDegrade:
         assert child.columns["mystery"] == ColumnSpec(Int64(), required=True)
 
     def test_arity_broken_field_is_not_double_reported(self):
-        # A wrong-arity ``Annotated`` form already carries the PLY041
-        # verdict (issue #69) — it must not ALSO get a PLW011 warning.
+        # A wrong-arity ``Annotated`` form already carries the pple-broken-schema-annotation
+        # verdict (issue #69) — it must not ALSO get a pplw-unrecognized-annotation warning.
         registry = _collect(
             """
             import typing
@@ -652,7 +652,7 @@ class TestObjectApiSchemas:
     def test_string_dtype_degrades_loudly(self):
         # Probed: pandera accepts "int64" string aliases; polypolarism
         # does not model them — the column registers as Unknown with a
-        # definition warning (PLW011 channel), not silently dropped.
+        # definition warning (pplw-unrecognized-annotation channel), not silently dropped.
         registry = _collect(
             """
             import pandera.polars as pa
@@ -808,7 +808,7 @@ class TestUnresolvedObjectSchemaDerivations:
     remove_columns, update_columns/rename_columns, unreadable
     DataFrameSchema columns) must not silently unregister the schema —
     it registers as UNRESOLVED: validate still narrows (to a fully open
-    assumption frame) and PLW011 surfaces the degrade."""
+    assumption frame) and pplw-unrecognized-annotation surfaces the degrade."""
 
     def test_nonliteral_remove_columns_registers_unresolved(self):
         registry = _collect(
@@ -854,7 +854,7 @@ class TestUnresolvedObjectSchemaDerivations:
 class TestSchemaSourceProvenance:
     """Batch B, Request 2: each Schema records the absolute path of the file
     that DEFINES its class (``source_file``) and the class-header line
-    (``header_line``), for the PLY042 "declare the column" quick fix.
+    (``header_line``), for the pple-undeclared-column "declare the column" quick fix.
 
     ``collect_schemas`` takes an optional ``source_file``; the cross-file
     import path (``collect_schemas_with_imports``) populates each schema with

@@ -3,10 +3,10 @@
 Probed on polars 1.41.2:
 - ``pl.concat([naive, utc], how="vertical")`` raises SchemaError
   ("type Datetime('μs', 'UTC') is incompatible with expected type
-  Datetime('μs')") -> PLY020.
+  Datetime('μs')") -> pple-concat-mismatch.
 - ``aware - naive`` raises SchemaError ("failed to determine supertype
-  of datetime[μs, UTC] and datetime[μs]") -> PLY009.
-- Comparing two different time zones raises SchemaError too -> PLY009.
+  of datetime[μs, UTC] and datetime[μs]") -> pple-incompatible-operands.
+- Comparing two different time zones raises SchemaError too -> pple-incompatible-operands.
 - ``str.to_datetime`` with an offset directive in the format (here the
   ``%:z`` variant) yields ``Datetime[UTC]``, never a naive Datetime —
   false-negative twin of ``valid/tz_same_ops`` (the ``parse`` function).

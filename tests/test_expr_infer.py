@@ -641,7 +641,7 @@ class TestInferShiftFill:
         assert infer_shift_fill(Date(), Int64(), fill_is_literal=False) == Int64()
         assert infer_shift_fill(Boolean(), Int64(), fill_is_literal=False) == Int64()
 
-    # upgrade trigger: no-supertype expression fills get probed (likely a PLY009 cell)
+    # upgrade trigger: no-supertype expression fills get probed (likely a pple-incompatible-operands cell)
     @pytest.mark.imprecision
     def test_expression_fill_without_supertype_keeps_receiver(self) -> None:
         assert infer_shift_fill(Int64(), List(Int64()), fill_is_literal=False) == Int64()

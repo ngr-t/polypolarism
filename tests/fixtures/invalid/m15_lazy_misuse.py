@@ -1,4 +1,4 @@
-"""write_csv on LazyFrame triggers PLY030."""
+"""write_csv on LazyFrame triggers pple-eager-only-method."""
 
 import pandera.polars as pa
 from pandera.typing.polars import LazyFrame

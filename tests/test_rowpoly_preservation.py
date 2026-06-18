@@ -3,7 +3,7 @@
 Tier 3 trusts the @rowpoly contract when threading caller extras. Tier 4
 verifies the body actually preserves arbitrary extra columns: it skolemizes
 the row variable (injects a sentinel extra column into the parameter frame),
-re-analyzes the body, and flags PLY043 when a return point provably drops it
+re-analyzes the body, and flags pple-rowpoly-not-preserved when a return point provably drops it
 (e.g. an explicit ``select`` of named columns, or a ``group_by().agg()`` that
 collapses the schema). This property is relative to the caller, so Pandera
 cannot check it at runtime — it is static-only.
@@ -43,7 +43,7 @@ def _check(body: str) -> dict:
 
 
 def _has_ply043(result) -> bool:
-    return any("PLY043" in str(e) for e in result.errors)
+    return any("pple-rowpoly-not-preserved" in str(e) for e in result.errors)
 
 
 def test_with_columns_preserves_row_variable() -> None:
@@ -125,7 +125,7 @@ def test_multi_frame_param_helper_is_not_preservation_checked() -> None:
 
 def test_select_all_pl_preserves_row_variable() -> None:
     # ``select(pl.all())`` selects every column including the skolem sentinel,
-    # so the all-columns selector preserves the row variable (no PLY043).
+    # so the all-columns selector preserves the row variable (no pple-rowpoly-not-preserved).
     results = _check("""
         @rowpoly("R")
         def add_score(df: DataFrame[InId]) -> DataFrame[OutScore]:
@@ -303,7 +303,7 @@ def test_drop_regex_drops_row_variable() -> None:
     assert _has_ply043(results["reshape"])
 
 
-# --- Boundary: PRESERVING forms below must stay silent (no false PLY043). ---
+# --- Boundary: PRESERVING forms below must stay silent (no false pple-rowpoly-not-preserved). ---
 
 
 def test_select_match_all_regex_preserves_row_variable() -> None:
@@ -407,7 +407,7 @@ def test_rename_still_preserves_row_variable() -> None:
 def test_drops_select_complement_of_declared_is_accepted() -> None:
     # The canonical sanitizer: declare drops=cs.starts_with("_internal_") and
     # the body select(~cs.starts_with("_internal_")) — drops EXACTLY the
-    # declared pattern, keeps everything else => accepted (no PLY043).
+    # declared pattern, keeps everything else => accepted (no pple-rowpoly-not-preserved).
     results = _check("""
         @rowpoly("R", drops=cs.starts_with("_internal_"))
         def sanitize(df: DataFrame[InId]) -> DataFrame[InId]:
@@ -470,7 +470,7 @@ def test_drops_broader_than_declared_still_ply043() -> None:
     # Declared drops=cs.starts_with("_internal_") but the body drops the BROADER
     # cs.starts_with("_") (every underscore-prefixed column). That removes
     # caller extras OUTSIDE the declared pattern (e.g. "_other") => still
-    # PLY043.
+    # pple-rowpoly-not-preserved.
     results = _check("""
         @rowpoly("R", drops=cs.starts_with("_internal_"))
         def sanitize(df: DataFrame[InId]) -> DataFrame[InId]:
@@ -482,7 +482,7 @@ def test_drops_broader_than_declared_still_ply043() -> None:
 def test_drops_different_pattern_still_ply043() -> None:
     # Declared drops a name pattern; the body drops by DTYPE (cs.numeric()).
     # A non-numeric caller extra outside the declared name pattern is dropped
-    # => still PLY043.
+    # => still pple-rowpoly-not-preserved.
     results = _check("""
         @rowpoly("R", drops=cs.starts_with("_internal_"))
         def sanitize(df: DataFrame[InId]) -> DataFrame[InId]:
@@ -494,7 +494,7 @@ def test_drops_different_pattern_still_ply043() -> None:
 def test_drops_does_not_relax_fixed_name_select() -> None:
     # ``drops=`` declares a PATTERN, not a licence to drop everything: a fixed
     # select("id") closes the frame and drops every caller extra by name =>
-    # still PLY043 (not a pattern drop the declaration covers).
+    # still pple-rowpoly-not-preserved (not a pattern drop the declaration covers).
     results = _check("""
         @rowpoly("R", drops=cs.starts_with("_internal_"))
         def sanitize(df: DataFrame[InId]) -> DataFrame[OutScore]:
@@ -528,7 +528,7 @@ def test_drops_non_selector_value_is_ignored() -> None:
 
 def test_drops_stacked_reductions_still_ply043() -> None:
     # Two stacked predicate reductions: the drop is no longer attributable to a
-    # single selector, so containment cannot be proven => still PLY043 even
+    # single selector, so containment cannot be proven => still pple-rowpoly-not-preserved even
     # though the first reduction alone is within the declaration.
     results = _check("""
         @rowpoly("R", drops=cs.starts_with("_internal_"))

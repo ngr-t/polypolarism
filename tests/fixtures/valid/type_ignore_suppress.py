@@ -28,9 +28,9 @@ def blanket(df: DataFrame[KV]) -> DataFrame[KVa]:  # type: ignore
     return df.select(pl.col("k"))
 
 
-def specific(df: DataFrame[KV]) -> DataFrame[KVa]:  # type: ignore[PLY040]
+def specific(df: DataFrame[KV]) -> DataFrame[KVa]:  # type: ignore[pple-return-type]
     return df.select(pl.col("k"))
 
 
-def multi_code(df: DataFrame[KV]) -> DataFrame[KVa]:  # type: ignore[PLY040, PLY032]
+def multi_code(df: DataFrame[KV]) -> DataFrame[KVa]:  # type: ignore[pple-return-type, pple-eager-lazy-mismatch]
     return df.select(pl.col("k"))

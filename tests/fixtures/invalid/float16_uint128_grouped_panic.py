@@ -7,7 +7,7 @@ evaluation: ``group_by().agg()`` and ``Expr.over`` windows alike. The SAME
 reductions are valid as whole-frame ``select`` reductions — that
 select-context acceptance lives in ``valid/small_int_float16_reductions``.
 A guaranteed crash must not type-check, so each grouped form below is a
-PLY011 error.
+pple-groupby error.
 """
 
 import pandera.polars as pa

@@ -1,4 +1,4 @@
-"""Invalid test case: drop_nulls subset references a missing column (PLY005)."""
+"""Invalid test case: drop_nulls subset references a missing column (pple-column-not-found)."""
 
 import pandera.polars as pa
 import polars as pl

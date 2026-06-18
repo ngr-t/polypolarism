@@ -1,4 +1,4 @@
-"""namespace accessor on a column of the wrong dtype (issue #31, PLY012)."""
+"""namespace accessor on a column of the wrong dtype (issue #31, pple-wrong-namespace-dtype)."""
 
 import pandera.polars as pa
 import polars as pl

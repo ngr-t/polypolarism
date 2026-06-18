@@ -1,4 +1,4 @@
-"""Invalid: list literal mixed with other positional args (PLY017, issue #59).
+"""Invalid: list literal mixed with other positional args (pple-list-literal-misuse, issue #59).
 
 False-negative twin of ``valid/expr_list_args.py``: the multi-expression
 helpers flatten EITHER varargs OR one single list — a mix is never

@@ -1,4 +1,4 @@
-"""pl.when condition has a non-boolean dtype (issue #37, PLY008).
+"""pl.when condition has a non-boolean dtype (issue #37, pple-non-boolean-predicate).
 
 Probed (polars 1.41.2): ``pl.when(pl.col("a"))`` with ``a: Int64`` raises
 ``SchemaError: invalid series dtype: expected `Boolean`, got `i64```.

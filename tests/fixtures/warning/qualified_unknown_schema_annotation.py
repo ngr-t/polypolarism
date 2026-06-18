@@ -1,4 +1,4 @@
-"""DataFrame[mod.X] qualified annotation that doesn't resolve emits PLW006."""
+"""DataFrame[mod.X] qualified annotation that doesn't resolve emits pplw-unknown-schema."""
 
 import pandera.polars as pa
 import some_external_package  # not followed

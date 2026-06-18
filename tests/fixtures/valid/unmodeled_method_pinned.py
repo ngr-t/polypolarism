@@ -1,4 +1,4 @@
-"""Valid: casting right after an unmodeled method retracts PLW007.
+"""Valid: casting right after an unmodeled method retracts pplw-unmodeled-method.
 
 Remedy twin of ``warning/unmodeled_method``: the explicit ``.cast(...)``
 is exactly the repair the warning recommends, so the chain checks
