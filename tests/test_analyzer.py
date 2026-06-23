@@ -5122,7 +5122,7 @@ class TestUpsampleInference:
         assert ft is not None
         assert ft.columns["v"].dtype == Nullable(Int64())
 
-    def test_upsample_on_lazyframe_is_ply030(self):
+    def test_upsample_on_lazyframe_is_eager_only_method(self):
         source = textwrap.dedent(
             """
             import polars as pl
@@ -5571,7 +5571,7 @@ class TestM15LazyEagerDistinction:
             from pandera.typing.polars import DataFrame, LazyFrame
 """
 
-    def test_writing_csv_on_lazy_emits_ply030(self):
+    def test_writing_csv_on_lazy_emits_eager_only_method(self):
         source = textwrap.dedent(
             self.LF_HEADER
             + """
