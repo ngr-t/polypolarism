@@ -13857,7 +13857,7 @@ class TestCheckedIslandNonStrictSchemas:
                 coerce = True
     """
 
-    def test_undeclared_reference_flags_ply042(self):
+    def test_undeclared_reference_flags_undeclared_column(self):
         source = textwrap.dedent(
             self._SCHEMA
             + """
@@ -13872,7 +13872,7 @@ class TestCheckedIslandNonStrictSchemas:
         ), errors
         assert not any("pple-column-not-found" in e for e in errors), errors
 
-    def test_string_select_flags_ply042(self):
+    def test_string_select_flags_undeclared_column(self):
         source = textwrap.dedent(
             self._SCHEMA
             + """

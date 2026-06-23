@@ -1184,7 +1184,7 @@ def _missing_column_diag(frame: FrameType, name: str) -> tuple[str, str]:
     )
 
 
-def _ply042_fix(
+def _undeclared_column_fix(
     schema_name: str,
     column: str,
     schema_registry: SchemaRegistry | None,
@@ -1283,7 +1283,7 @@ def _missing_column_tagged(
     param_name = None
     param_range = None
     if code == UNDECLARED_COLUMN and schema is not None:
-        fix = _ply042_fix(schema, name, schema_registry)
+        fix = _undeclared_column_fix(schema, name, schema_registry)
         param_name, param_range = _relax_param_fields(frame, param_relax_info)
     return tagged_error(
         code,
@@ -1316,7 +1316,7 @@ def _column_not_found_tagged(
     param_name = None
     param_range = None
     if code == UNDECLARED_COLUMN and schema is not None and column is not None:
-        fix = _ply042_fix(schema, column, schema_registry)
+        fix = _undeclared_column_fix(schema, column, schema_registry)
         if param_relax_info is not None:
             entry = param_relax_info.get(schema)
             if entry is not None:
@@ -4459,7 +4459,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         # name method preserves the dtype; the output name is unknowable.
         return None, inner_type
 
-    def _suggest_dtype_for_ply042(self, errors_before: int, target: DataType | None) -> None:
+    def _suggest_dtype_for_undeclared_column(self, errors_before: int, target: DataType | None) -> None:
         """Attach a ``suggested_dtype`` to a pple-undeclared-column fix raised since
         ``errors_before`` (issue #114).
 
@@ -4579,7 +4579,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             # suggested dtype to a pple-undeclared-column fix the receiver lookup raised
             # (issue #114).
             if method == "cast" and node.args:
-                self._suggest_dtype_for_ply042(
+                self._suggest_dtype_for_undeclared_column(
                     errors_before_receiver, _resolve_pl_dtype(node.args[0])
                 )
             # Receiver wasn't recognised — bail out.

@@ -261,7 +261,7 @@ class TestStructuredDiagnosticFields:
         assert "schema" not in diag
         assert diag["message"] == str(error)
 
-    def test_ply042_exposes_column_and_schema(self):
+    def test_undeclared_column_exposes_column_and_schema(self):
         message = (
             "column 'amount' is not declared in schema 'InputSchema' — the "
             "(non-strict) schema admits extra columns at runtime, but this "
@@ -498,7 +498,7 @@ class TestPly040RetypeFixEndToEnd:
         assert related["end_column"] > rng["end_column"]
 
 
-class TestPly042FixObject:
+class TestUndeclaredColumnFixObject:
     """Batch B, Request 2: a pple-undeclared-column diagnostic carries a structured ``fix``
     object so the extension can offer a "declare the column on the schema"
     quick fix. Additive: ``message`` byte-identical, ``fix`` omitted when the
@@ -543,13 +543,13 @@ class TestPly042FixObject:
         diag = self._diag(error)
         assert "fix" not in diag
 
-    def test_non_ply042_has_no_fix(self):
+    def test_non_undeclared_column_has_no_fix(self):
         error = TypeDifference("c", Int64(), Float64())
         diag = self._diag(error)
         assert "fix" not in diag
 
 
-class TestPly042FixObjectEndToEnd:
+class TestUndeclaredColumnFixObjectEndToEnd:
     """Request 2 from real analysis: the ``fix`` object is populated with line
     numbers matching the real schema source — same-file AND cross-file."""
 
@@ -580,9 +580,9 @@ class TestPly042FixObjectEndToEnd:
         )
         results = check_file(app)
         diags = _diagnostics_from_results(results, app)
-        ply042 = [d for d in diags if d.get("code") == "pple-undeclared-column"]
-        assert ply042, diags
-        fix = ply042[0]["fix"]
+        undeclared_column = [d for d in diags if d.get("code") == "pple-undeclared-column"]
+        assert undeclared_column, diags
+        fix = undeclared_column[0]["fix"]
         assert fix["schema"] == "InputSchema"
         assert fix["column"] == "amount"
         assert fix["schema_file"] == str(app.resolve())
@@ -591,7 +591,7 @@ class TestPly042FixObjectEndToEnd:
         # ``amount`` has no statically known dtype → suggested_dtype omitted.
         assert "suggested_dtype" not in fix
         # Message unchanged (still names the schema).
-        assert "InputSchema" in ply042[0]["message"]
+        assert "InputSchema" in undeclared_column[0]["message"]
 
     def test_cross_file_fix_points_at_other_module(self, tmp_path):
         from polypolarism.cli import check_file
@@ -628,9 +628,9 @@ class TestPly042FixObjectEndToEnd:
         )
         results = check_file(app)
         diags = _diagnostics_from_results(results, app)
-        ply042 = [d for d in diags if d.get("code") == "pple-undeclared-column"]
-        assert ply042, diags
-        fix = ply042[0]["fix"]
+        undeclared_column = [d for d in diags if d.get("code") == "pple-undeclared-column"]
+        assert undeclared_column, diags
+        fix = undeclared_column[0]["fix"]
         assert fix["schema"] == "InputSchema"
         assert fix["column"] == "amount"
         # The defining file is schemas.py, NOT app.py.
@@ -639,14 +639,14 @@ class TestPly042FixObjectEndToEnd:
         assert fix["schema_insert_line"] == 6
 
 
-class TestPly042SuggestedDtype:
+class TestUndeclaredColumnSuggestedDtype:
     """Issue #114: the pple-undeclared-column ``fix`` carries ``suggested_dtype`` (a ready-to-
     insert pandera annotation string) WHEN the undeclared column's dtype is
     statically constrained by its use (e.g. ``.cast(pl.Float64)``), and OMITS
     it when the dtype is genuinely unconstrained (the today behavior — sound,
     never a guess)."""
 
-    def _ply042_fix(self, tmp_path, body: str) -> dict:
+    def _undeclared_column_fix(self, tmp_path, body: str) -> dict:
         from polypolarism.cli import check_file
 
         (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\n")
@@ -673,41 +673,41 @@ class TestPly042SuggestedDtype:
         )
         results = check_file(app)
         diags = _diagnostics_from_results(results, app)
-        ply042 = [d for d in diags if d.get("code") == "pple-undeclared-column"]
-        assert ply042, diags
-        return ply042[0]["fix"]
+        undeclared_column = [d for d in diags if d.get("code") == "pple-undeclared-column"]
+        assert undeclared_column, diags
+        return undeclared_column[0]["fix"]
 
     def test_suggested_dtype_present_for_cast_constrained_column(self, tmp_path):
         # ``pl.col("amount").cast(pl.Float64)`` pins the column to Float64.
-        fix = self._ply042_fix(tmp_path, 'df.with_columns(b=pl.col("amount").cast(pl.Float64))')
+        fix = self._undeclared_column_fix(tmp_path, 'df.with_columns(b=pl.col("amount").cast(pl.Float64))')
         assert fix["column"] == "amount"
         assert fix["suggested_dtype"] == "pl.Float64"
 
     def test_suggested_dtype_for_simple_cast_target(self, tmp_path):
-        fix = self._ply042_fix(tmp_path, 'df.with_columns(b=pl.col("amount").cast(pl.Int64))')
+        fix = self._undeclared_column_fix(tmp_path, 'df.with_columns(b=pl.col("amount").cast(pl.Int64))')
         assert fix["suggested_dtype"] == "pl.Int64"
 
     def test_suggested_dtype_omitted_for_unconstrained_column(self, tmp_path):
         # A bare ``pl.col("amount") + 1`` resolves to Unknown → omit (no
         # regression: this is today's behavior).
-        fix = self._ply042_fix(tmp_path, 'df.with_columns(b=pl.col("amount") + 1)')
+        fix = self._undeclared_column_fix(tmp_path, 'df.with_columns(b=pl.col("amount") + 1)')
         assert "suggested_dtype" not in fix
 
     def test_suggested_dtype_omitted_for_bare_reference(self, tmp_path):
         # ``pl.col("amount")`` with no constraint at all → Unknown → omit.
-        fix = self._ply042_fix(tmp_path, 'df.with_columns(b=pl.col("amount"))')
+        fix = self._undeclared_column_fix(tmp_path, 'df.with_columns(b=pl.col("amount"))')
         assert "suggested_dtype" not in fix
 
     def test_cast_to_nullable_renders_inner_dtype(self, tmp_path):
         # Nullability is declared via pa.Field, not the annotation — so a
         # nested container cast renders its inner dtype string.
-        fix = self._ply042_fix(
+        fix = self._undeclared_column_fix(
             tmp_path, 'df.with_columns(b=pl.col("amount").cast(pl.List(pl.Int64)))'
         )
         assert fix["suggested_dtype"] == "pl.List(pl.Int64)"
 
 
-class TestPly042RelaxParamHelper:
+class TestUndeclaredColumnRelaxParamHelper:
     """Batch B, Request 4 (low priority): the pple-undeclared-column diagnostic whose fix is
     "relax the param" carries ``param_name`` and ``param_annotation_range``
     ({line, column, end_line, end_column}) sourced from the resolved param
@@ -741,9 +741,9 @@ class TestPly042RelaxParamHelper:
         )
         results = check_file(app)
         diags = _diagnostics_from_results(results, app)
-        ply042 = [d for d in diags if d.get("code") == "pple-undeclared-column"]
-        assert ply042, diags
-        d = ply042[0]
+        undeclared_column = [d for d in diags if d.get("code") == "pple-undeclared-column"]
+        assert undeclared_column, diags
+        d = undeclared_column[0]
         assert d["param_name"] == "df"
         rng = d["param_annotation_range"]
         # ``def f(df: DataFrame[InputSchema])`` is on line 13.
@@ -826,7 +826,7 @@ class TestStructuredFieldsEndToEnd:
         assert d["declared_type"] == "Int64"
         assert d["inferred_type"] == "Float64"
 
-    def test_ply042_from_analysis_carries_column_and_schema(self):
+    def test_undeclared_column_from_analysis_carries_column_and_schema(self):
         diagnostics = self._diagnostics(
             """
             import polars as pl
@@ -843,9 +843,9 @@ class TestStructuredFieldsEndToEnd:
                 return df.with_columns(b=pl.col("amount") + 1)
             """
         )
-        ply042 = [d for d in diagnostics if d.get("code") == "pple-undeclared-column"]
-        assert ply042, diagnostics
-        d = ply042[0]
+        undeclared_column = [d for d in diagnostics if d.get("code") == "pple-undeclared-column"]
+        assert undeclared_column, diagnostics
+        d = undeclared_column[0]
         assert d["column_name"] == "amount"
         assert d["schema"] == "InputSchema"
 
