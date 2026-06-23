@@ -5586,7 +5586,7 @@ class TestM15LazyEagerDistinction:
         assert any("pple-eager-only-method" in e and "write_csv" in e for e in results[0].errors)
         assert any("collect" in e for e in results[0].errors)
 
-    def test_sink_on_eager_emits_ply031(self):
+    def test_sink_on_eager_emits_lazy_only_method(self):
         source = textwrap.dedent(
             self.LF_HEADER
             + """
@@ -5600,7 +5600,7 @@ class TestM15LazyEagerDistinction:
         results = analyze_source(source)
         assert any("pple-lazy-only-method" in e and "sink_csv" in e for e in results[0].errors)
 
-    def test_collect_on_eager_emits_ply031(self):
+    def test_collect_on_eager_emits_lazy_only_method(self):
         source = textwrap.dedent(
             self.LF_HEADER
             + """
