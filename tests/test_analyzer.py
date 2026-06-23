@@ -3679,7 +3679,7 @@ class TestExprListArgs:
         assert ft.columns["a"].dtype == Int64()
         assert ft.columns["b"].dtype == Int64()
 
-    def test_struct_mixed_varargs_and_list_flags_ply017(self):
+    def test_struct_mixed_varargs_and_list_flags_list_literal_misuse(self):
         # Issue #59: mixing a list literal with further positional args does
         # NOT flatten — polars raises TypeError ("Nested object types") at
         # runtime, so the pre-#59 flatten-as-varargs typing was a false
@@ -3828,7 +3828,7 @@ class TestMixedListArgsListLiteralMisuse:
             "pl.mean_horizontal([pl.col('a')], pl.col('b'))",
         ],
     )
-    def test_mixed_list_args_flag_ply017_and_degrade_to_unknown(self, expr: str) -> None:
+    def test_mixed_list_args_flag_list_literal_misuse_and_degrade_to_unknown(self, expr: str) -> None:
         source = textwrap.dedent(
             PANDERA_HEADER
             + self._SCHEMA
