@@ -42,7 +42,7 @@ def _check(body: str) -> dict:
     return {r.function_name: r for r in check_source(src)}
 
 
-def _has_ply043(result) -> bool:
+def _has_rowpoly_not_preserved(result) -> bool:
     return any("pple-rowpoly-not-preserved" in str(e) for e in result.errors)
 
 
@@ -54,7 +54,7 @@ def test_with_columns_preserves_row_variable() -> None:
             return df.with_columns(score=pl.col("id").cast(pl.Float64))
     """)
     assert results["add_score"].passed
-    assert not _has_ply043(results["add_score"])
+    assert not _has_rowpoly_not_preserved(results["add_score"])
 
 
 def test_explicit_select_drops_row_variable() -> None:
@@ -66,7 +66,7 @@ def test_explicit_select_drops_row_variable() -> None:
             return df.select("id").with_columns(score=pl.col("id").cast(pl.Float64))
     """)
     assert not results["add_score"].passed
-    assert _has_ply043(results["add_score"])
+    assert _has_rowpoly_not_preserved(results["add_score"])
 
 
 def test_group_by_agg_drops_row_variable() -> None:
@@ -82,7 +82,7 @@ def test_group_by_agg_drops_row_variable() -> None:
         def summarize(df: DataFrame[InId]) -> DataFrame[Grouped]:
             return df.group_by("id").agg(total=pl.col("id").cast(pl.Float64).sum())
     """)
-    assert _has_ply043(results["summarize"])
+    assert _has_rowpoly_not_preserved(results["summarize"])
 
 
 def test_non_rowpoly_helper_is_not_preservation_checked() -> None:
@@ -92,7 +92,7 @@ def test_non_rowpoly_helper_is_not_preservation_checked() -> None:
         def add_score(df: DataFrame[InId]) -> DataFrame[OutScore]:
             return df.select("id").with_columns(score=pl.col("id").cast(pl.Float64))
     """)
-    assert not _has_ply043(results["add_score"])
+    assert not _has_rowpoly_not_preserved(results["add_score"])
 
 
 def test_multi_frame_param_helper_is_not_preservation_checked() -> None:
@@ -112,7 +112,7 @@ def test_multi_frame_param_helper_is_not_preservation_checked() -> None:
         def joined(df: DataFrame[InId], o: DataFrame[Other]) -> DataFrame[InId]:
             return o.select("id")
     """)
-    assert not _has_ply043(results["joined"])
+    assert not _has_rowpoly_not_preserved(results["joined"])
 
 
 # --- C-14 Tier 5 remainder (1a): no false positive for legitimately-preserving
@@ -132,7 +132,7 @@ def test_select_all_pl_preserves_row_variable() -> None:
             return df.select(pl.all()).with_columns(score=pl.col("id").cast(pl.Float64))
     """)
     assert results["add_score"].passed
-    assert not _has_ply043(results["add_score"])
+    assert not _has_rowpoly_not_preserved(results["add_score"])
 
 
 def test_select_all_cs_preserves_row_variable() -> None:
@@ -144,7 +144,7 @@ def test_select_all_cs_preserves_row_variable() -> None:
             return df.select(cs.all()).with_columns(score=pl.col("id").cast(pl.Float64))
     """)
     assert results["add_score"].passed
-    assert not _has_ply043(results["add_score"])
+    assert not _has_rowpoly_not_preserved(results["add_score"])
 
 
 def test_drop_real_column_preserves_row_variable() -> None:
@@ -161,7 +161,7 @@ def test_drop_real_column_preserves_row_variable() -> None:
         def reshape(df: DataFrame[InId]) -> DataFrame[OutDropped]:
             return df.drop("id").with_columns(score=pl.lit(1.0))
     """)
-    assert not _has_ply043(results["reshape"])
+    assert not _has_rowpoly_not_preserved(results["reshape"])
 
 
 def test_rename_real_column_preserves_row_variable() -> None:
@@ -177,7 +177,7 @@ def test_rename_real_column_preserves_row_variable() -> None:
         def reshape(df: DataFrame[InId]) -> DataFrame[Renamed]:
             return df.rename({"id": "key"})
     """)
-    assert not _has_ply043(results["reshape"])
+    assert not _has_rowpoly_not_preserved(results["reshape"])
 
 
 def test_conditional_early_return_preserves_row_variable() -> None:
@@ -190,7 +190,7 @@ def test_conditional_early_return_preserves_row_variable() -> None:
                 return df.with_columns(score=pl.lit(0.0))
             return df.with_columns(score=pl.col("id").cast(pl.Float64))
     """)
-    assert not _has_ply043(results["add_score"])
+    assert not _has_rowpoly_not_preserved(results["add_score"])
 
 
 def test_pl_concat_preserves_row_variable() -> None:
@@ -201,7 +201,7 @@ def test_pl_concat_preserves_row_variable() -> None:
         def doubled(df: DataFrame[InId]) -> DataFrame[InId]:
             return pl.concat([df, df])
     """)
-    assert not _has_ply043(results["doubled"])
+    assert not _has_rowpoly_not_preserved(results["doubled"])
 
 
 # --- C-14 follow-up #3: pattern/selector reductions that DROP the row variable.
@@ -227,7 +227,7 @@ def test_select_exclude_regex_drops_row_variable() -> None:
                 pl.exclude("^tmp_.*$")
             ).with_columns(score=pl.col("id").cast(pl.Float64))
     """)
-    assert _has_ply043(results["add_score"])
+    assert _has_rowpoly_not_preserved(results["add_score"])
 
 
 def test_select_cs_starts_with_drops_row_variable() -> None:
@@ -240,7 +240,7 @@ def test_select_cs_starts_with_drops_row_variable() -> None:
                 cs.starts_with("id")
             ).with_columns(score=pl.col("id").cast(pl.Float64))
     """)
-    assert _has_ply043(results["add_score"])
+    assert _has_rowpoly_not_preserved(results["add_score"])
 
 
 def test_select_cs_numeric_drops_row_variable() -> None:
@@ -253,7 +253,7 @@ def test_select_cs_numeric_drops_row_variable() -> None:
                 cs.numeric()
             ).with_columns(score=pl.col("id").cast(pl.Float64))
     """)
-    assert _has_ply043(results["add_score"])
+    assert _has_rowpoly_not_preserved(results["add_score"])
 
 
 def test_select_narrowing_regex_drops_row_variable() -> None:
@@ -266,7 +266,7 @@ def test_select_narrowing_regex_drops_row_variable() -> None:
                 pl.col("^id$")
             ).with_columns(score=pl.col("id").cast(pl.Float64))
     """)
-    assert _has_ply043(results["add_score"])
+    assert _has_rowpoly_not_preserved(results["add_score"])
 
 
 def test_drop_cs_predicate_drops_row_variable() -> None:
@@ -283,7 +283,7 @@ def test_drop_cs_predicate_drops_row_variable() -> None:
         def reshape(df: DataFrame[InId]) -> DataFrame[OutTag]:
             return df.drop(cs.numeric()).with_columns(tag=pl.lit("x"))
     """)
-    assert _has_ply043(results["reshape"])
+    assert _has_rowpoly_not_preserved(results["reshape"])
 
 
 def test_drop_regex_drops_row_variable() -> None:
@@ -300,7 +300,7 @@ def test_drop_regex_drops_row_variable() -> None:
         def reshape(df: DataFrame[InId]) -> DataFrame[OutTag]:
             return df.drop(pl.col("^tmp_.*$"))
     """)
-    assert _has_ply043(results["reshape"])
+    assert _has_rowpoly_not_preserved(results["reshape"])
 
 
 # --- Boundary: PRESERVING forms below must stay silent (no false pple-rowpoly-not-preserved). ---
@@ -316,7 +316,7 @@ def test_select_match_all_regex_preserves_row_variable() -> None:
                 pl.col("^.*$")
             ).with_columns(score=pl.col("id").cast(pl.Float64))
     """)
-    assert not _has_ply043(results["add_score"])
+    assert not _has_rowpoly_not_preserved(results["add_score"])
 
 
 def test_select_exclude_literal_name_preserves_row_variable() -> None:
@@ -333,7 +333,7 @@ def test_select_exclude_literal_name_preserves_row_variable() -> None:
         def reshape(df: DataFrame[InId]) -> DataFrame[OutDropped]:
             return df.select(pl.exclude("id")).with_columns(score=pl.lit(1.0))
     """)
-    assert not _has_ply043(results["reshape"])
+    assert not _has_rowpoly_not_preserved(results["reshape"])
 
 
 def test_drop_literal_name_preserves_row_variable() -> None:
@@ -349,7 +349,7 @@ def test_drop_literal_name_preserves_row_variable() -> None:
         def reshape(df: DataFrame[InId]) -> DataFrame[OutDropped]:
             return df.drop("id").with_columns(score=pl.lit(1.0))
     """)
-    assert not _has_ply043(results["reshape"])
+    assert not _has_rowpoly_not_preserved(results["reshape"])
 
 
 def test_select_pl_all_still_preserves_row_variable() -> None:
@@ -360,7 +360,7 @@ def test_select_pl_all_still_preserves_row_variable() -> None:
         def add_score(df: DataFrame[InId]) -> DataFrame[OutScore]:
             return df.select(pl.all()).with_columns(score=pl.col("id").cast(pl.Float64))
     """)
-    assert not _has_ply043(results["add_score"])
+    assert not _has_rowpoly_not_preserved(results["add_score"])
 
 
 def test_select_cs_all_still_preserves_row_variable() -> None:
@@ -369,7 +369,7 @@ def test_select_cs_all_still_preserves_row_variable() -> None:
         def add_score(df: DataFrame[InId]) -> DataFrame[OutScore]:
             return df.select(cs.all()).with_columns(score=pl.col("id").cast(pl.Float64))
     """)
-    assert not _has_ply043(results["add_score"])
+    assert not _has_rowpoly_not_preserved(results["add_score"])
 
 
 def test_with_columns_still_preserves_row_variable() -> None:
@@ -379,7 +379,7 @@ def test_with_columns_still_preserves_row_variable() -> None:
         def add_score(df: DataFrame[InId]) -> DataFrame[OutScore]:
             return df.with_columns(score=pl.col("id").cast(pl.Float64))
     """)
-    assert not _has_ply043(results["add_score"])
+    assert not _has_rowpoly_not_preserved(results["add_score"])
 
 
 def test_rename_still_preserves_row_variable() -> None:
@@ -394,7 +394,7 @@ def test_rename_still_preserves_row_variable() -> None:
         def reshape(df: DataFrame[InId]) -> DataFrame[Renamed]:
             return df.rename({"id": "key"})
     """)
-    assert not _has_ply043(results["reshape"])
+    assert not _has_rowpoly_not_preserved(results["reshape"])
 
 
 # --- C-14 follow-up: @rowpoly("R", drops=<selector>) declares an INTENTIONAL
@@ -413,7 +413,7 @@ def test_drops_select_complement_of_declared_is_accepted() -> None:
         def sanitize(df: DataFrame[InId]) -> DataFrame[InId]:
             return df.select(~cs.starts_with("_internal_"))
     """)
-    assert not _has_ply043(results["sanitize"])
+    assert not _has_rowpoly_not_preserved(results["sanitize"])
 
 
 def test_drops_drop_declared_selector_is_accepted() -> None:
@@ -424,7 +424,7 @@ def test_drops_drop_declared_selector_is_accepted() -> None:
         def sanitize(df: DataFrame[InId]) -> DataFrame[InId]:
             return df.drop(cs.starts_with("_internal_"))
     """)
-    assert not _has_ply043(results["sanitize"])
+    assert not _has_rowpoly_not_preserved(results["sanitize"])
 
 
 def test_drops_with_trailing_with_columns_is_accepted() -> None:
@@ -437,7 +437,7 @@ def test_drops_with_trailing_with_columns_is_accepted() -> None:
                 score=pl.col("id").cast(pl.Float64)
             )
     """)
-    assert not _has_ply043(results["sanitize"])
+    assert not _has_rowpoly_not_preserved(results["sanitize"])
 
 
 def test_drops_regex_matches_matching_body_is_accepted() -> None:
@@ -451,7 +451,7 @@ def test_drops_regex_matches_matching_body_is_accepted() -> None:
                 score=pl.col("id").cast(pl.Float64)
             )
     """)
-    assert not _has_ply043(results["sanitize"])
+    assert not _has_rowpoly_not_preserved(results["sanitize"])
 
 
 def test_drops_narrower_than_declared_is_accepted() -> None:
@@ -463,10 +463,10 @@ def test_drops_narrower_than_declared_is_accepted() -> None:
         def sanitize(df: DataFrame[InId]) -> DataFrame[InId]:
             return df.select(~cs.starts_with("_internal_secret"))
     """)
-    assert not _has_ply043(results["sanitize"])
+    assert not _has_rowpoly_not_preserved(results["sanitize"])
 
 
-def test_drops_broader_than_declared_still_ply043() -> None:
+def test_drops_broader_than_declared_still_rowpoly_not_preserved() -> None:
     # Declared drops=cs.starts_with("_internal_") but the body drops the BROADER
     # cs.starts_with("_") (every underscore-prefixed column). That removes
     # caller extras OUTSIDE the declared pattern (e.g. "_other") => still
@@ -476,10 +476,10 @@ def test_drops_broader_than_declared_still_ply043() -> None:
         def sanitize(df: DataFrame[InId]) -> DataFrame[InId]:
             return df.select(~cs.starts_with("_"))
     """)
-    assert _has_ply043(results["sanitize"])
+    assert _has_rowpoly_not_preserved(results["sanitize"])
 
 
-def test_drops_different_pattern_still_ply043() -> None:
+def test_drops_different_pattern_still_rowpoly_not_preserved() -> None:
     # Declared drops a name pattern; the body drops by DTYPE (cs.numeric()).
     # A non-numeric caller extra outside the declared name pattern is dropped
     # => still pple-rowpoly-not-preserved.
@@ -488,7 +488,7 @@ def test_drops_different_pattern_still_ply043() -> None:
         def sanitize(df: DataFrame[InId]) -> DataFrame[InId]:
             return df.drop(cs.numeric())
     """)
-    assert _has_ply043(results["sanitize"])
+    assert _has_rowpoly_not_preserved(results["sanitize"])
 
 
 def test_drops_does_not_relax_fixed_name_select() -> None:
@@ -500,10 +500,10 @@ def test_drops_does_not_relax_fixed_name_select() -> None:
         def sanitize(df: DataFrame[InId]) -> DataFrame[OutScore]:
             return df.select("id").with_columns(score=pl.col("id").cast(pl.Float64))
     """)
-    assert _has_ply043(results["sanitize"])
+    assert _has_rowpoly_not_preserved(results["sanitize"])
 
 
-def test_without_drops_pattern_drop_still_ply043_no_regression() -> None:
+def test_without_drops_pattern_drop_still_rowpoly_not_preserved_no_regression() -> None:
     # The SAME body as the accepted sanitizer, but WITHOUT drops= => no
     # declaration, so the pattern drop is rejected exactly as today.
     results = _check("""
@@ -511,7 +511,7 @@ def test_without_drops_pattern_drop_still_ply043_no_regression() -> None:
         def sanitize(df: DataFrame[InId]) -> DataFrame[InId]:
             return df.select(~cs.starts_with("_internal_"))
     """)
-    assert _has_ply043(results["sanitize"])
+    assert _has_rowpoly_not_preserved(results["sanitize"])
 
 
 def test_drops_non_selector_value_is_ignored() -> None:
@@ -523,10 +523,10 @@ def test_drops_non_selector_value_is_ignored() -> None:
         def sanitize(df: DataFrame[InId]) -> DataFrame[InId]:
             return df.select(~cs.starts_with("_internal_"))
     """)
-    assert _has_ply043(results["sanitize"])
+    assert _has_rowpoly_not_preserved(results["sanitize"])
 
 
-def test_drops_stacked_reductions_still_ply043() -> None:
+def test_drops_stacked_reductions_still_rowpoly_not_preserved() -> None:
     # Two stacked predicate reductions: the drop is no longer attributable to a
     # single selector, so containment cannot be proven => still pple-rowpoly-not-preserved even
     # though the first reduction alone is within the declaration.
@@ -535,4 +535,4 @@ def test_drops_stacked_reductions_still_ply043() -> None:
         def sanitize(df: DataFrame[InId]) -> DataFrame[InId]:
             return df.select(~cs.starts_with("_internal_")).select(~cs.ends_with("_tmp"))
     """)
-    assert _has_ply043(results["sanitize"])
+    assert _has_rowpoly_not_preserved(results["sanitize"])

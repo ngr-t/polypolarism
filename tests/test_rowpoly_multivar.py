@@ -64,7 +64,7 @@ def _check(body: str) -> dict:
     return {r.function_name: r for r in check_source(src)}
 
 
-def _has_ply043(result) -> bool:
+def _has_rowpoly_not_preserved(result) -> bool:
     return any("pple-rowpoly-not-preserved" in str(e) for e in result.errors)
 
 
@@ -106,7 +106,7 @@ def test_merge_body_preserving_both_is_accepted() -> None:
             return 0
     """)
     # `merge` itself (in the prelude) joins both sides -> both row vars preserved.
-    assert not _has_ply043(results["merge"])
+    assert not _has_rowpoly_not_preserved(results["merge"])
 
 
 def test_dropping_one_side_is_flagged_for_that_row_var() -> None:
@@ -116,7 +116,7 @@ def test_dropping_one_side_is_flagged_for_that_row_var() -> None:
             # Drops b entirely: B's row variable R2 is not preserved.
             return a.join(b, on="id", how="inner").select("id")
     """)
-    assert _has_ply043(results["merge_bad"])
+    assert _has_rowpoly_not_preserved(results["merge_bad"])
     assert any("R2" in str(e) for e in results["merge_bad"].errors)
 
 
@@ -128,4 +128,4 @@ def test_keyword_for_unknown_param_is_ignored() -> None:
             return a
     """)
     assert results["passthrough"].passed
-    assert not _has_ply043(results["passthrough"])
+    assert not _has_rowpoly_not_preserved(results["passthrough"])
