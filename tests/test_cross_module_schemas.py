@@ -867,7 +867,7 @@ class TestUnresolvedImportDiagnostic:
     pplw-unknown-schema must say that instead of suggesting an import the user
     already wrote (user report 2026-06-12)."""
 
-    def test_plw006_names_the_unresolved_import(self, tmp_path: Path):
+    def test_unknown_schema_names_the_unresolved_import(self, tmp_path: Path):
         _project_marker(tmp_path)
         _write(
             tmp_path / "app.py",
