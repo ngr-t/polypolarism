@@ -12160,8 +12160,8 @@ class TestAnnotatedAssignmentChecking:
             return df
             """
         )
-        non_ply033 = [e for e in result.errors if "pple-annotation-conflict" not in e]
-        assert non_ply033 == [], result.errors
+        non_annotation_conflict = [e for e in result.errors if "pple-annotation-conflict" not in e]
+        assert non_annotation_conflict == [], result.errors
 
     def test_missing_column_over_nonstrict_select_is_narrowing(self):
         # Halved declares 'half' and the select result lacks it, but the
