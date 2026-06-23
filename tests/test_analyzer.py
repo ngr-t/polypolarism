@@ -2452,7 +2452,7 @@ class TestCumulativeStrictDtypes:
         ],
         ids=lambda p: str(p),
     )
-    def test_invalid_receiver_flags_ply016_and_degrades(self, method, receiver):
+    def test_invalid_receiver_flags_non_numeric_operand_and_degrades(self, method, receiver):
         analyzer = self._run(receiver, method)
         assert len(analyzer.errors) == 1, analyzer.errors
         err = analyzer.errors[0]
@@ -3071,7 +3071,7 @@ class TestRollingStrictDtypes:
         ],
         ids=lambda p: str(p),
     )
-    def test_invalid_receiver_flags_ply016_and_degrades(self, method, receiver):
+    def test_invalid_receiver_flags_non_numeric_operand_and_degrades(self, method, receiver):
         analyzer = self._run(receiver, method)
         assert len(analyzer.errors) == 1, analyzer.errors
         err = analyzer.errors[0]
@@ -3220,7 +3220,7 @@ class TestNumericElementwiseStrictDtypes:
         ],
         ids=lambda p: str(p),
     )
-    def test_invalid_receiver_flags_ply016_and_degrades(self, call, receiver):
+    def test_invalid_receiver_flags_non_numeric_operand_and_degrades(self, call, receiver):
         analyzer = self._run(receiver, call)
         assert len(analyzer.errors) == 1, analyzer.errors
         err = analyzer.errors[0]
@@ -3322,7 +3322,7 @@ class TestFloatReturnStrictDtypes:
         ],
         ids=lambda p: str(p),
     )
-    def test_invalid_receiver_flags_ply016_and_degrades(self, call, receiver):
+    def test_invalid_receiver_flags_non_numeric_operand_and_degrades(self, call, receiver):
         analyzer = self._run(receiver, call)
         assert len(analyzer.errors) == 1, analyzer.errors
         err = analyzer.errors[0]
@@ -9230,7 +9230,7 @@ class TestContainerAggMatrix:
             'pl.col("a_struct").arr.min()',
         ],
     )
-    def test_probed_invalid_cells_flag_ply016(self, expr: str):
+    def test_probed_invalid_cells_flag_non_numeric_operand(self, expr: str):
         errors, dtype = self._analyze(expr)
         assert any("pple-non-numeric-operand" in e for e in errors), (expr, errors)
         # The output column still exists at runtime semantics-wise; it is
@@ -10249,7 +10249,7 @@ class TestArrayOperationLayers:
     # -- cum_* (probed: cum_sum/cum_prod/cum_min/cum_max reject Array) ----------
 
     @pytest.mark.parametrize("method", ["cum_sum", "cum_prod", "cum_min", "cum_max"])
-    def test_cum_methods_on_array_flag_ply016(self, method: str):
+    def test_cum_methods_on_array_flag_non_numeric_operand(self, method: str):
         analyzer = _run_body(self._frame(), f'out = df.select(r=pl.col("q").{method}())')
         assert any("pple-non-numeric-operand" in e for e in analyzer.errors), (
             method,
@@ -13101,7 +13101,7 @@ class TestPctChangeDtype:
         ],
         ids=["bin", "cat", "enum", "list", "array", "struct"],
     )
-    def test_invalid_receiver_flags_ply016(self, receiver):
+    def test_invalid_receiver_flags_non_numeric_operand(self, receiver):
         analyzer = self._run(receiver)
         assert len(analyzer.errors) == 1, analyzer.errors
         assert "pple-non-numeric-operand" in analyzer.errors[0]
@@ -13220,7 +13220,7 @@ class TestNotBitwiseDtype:
         ],
     )
     @pytest.mark.parametrize("expr", ['pl.col("v").not_()', '~pl.col("v")'], ids=["not_", "~"])
-    def test_invalid_receiver_flags_ply016(self, receiver, expr):
+    def test_invalid_receiver_flags_non_numeric_operand(self, receiver, expr):
         analyzer = self._run(receiver, expr)
         assert len(analyzer.errors) == 1, analyzer.errors
         assert "pple-non-numeric-operand" in analyzer.errors[0]

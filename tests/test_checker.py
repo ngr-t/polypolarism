@@ -2771,7 +2771,7 @@ class TestIssue49CumSumOnStringEndToEnd:
     """
     )
 
-    def test_repro_fails_with_ply016(self):
+    def test_repro_fails_with_non_numeric_operand(self):
         results = check_source(self.SOURCE)
         assert len(results) == 1
         assert results[0].passed is False
@@ -3115,7 +3115,7 @@ class TestIssue55ListSumOnStringsEndToEnd:
             tags: pl.List(pl.Utf8) = pa.Field()
     """)
 
-    def test_declared_int_fails_with_ply016(self):
+    def test_declared_int_fails_with_non_numeric_operand(self):
         source = self.HEADER + textwrap.dedent(
             """
             class WrongInt(pa.DataFrameModel):
@@ -3135,7 +3135,7 @@ class TestIssue55ListSumOnStringsEndToEnd:
             0
         ].errors
 
-    def test_declared_str_fails_with_ply016(self):
+    def test_declared_str_fails_with_non_numeric_operand(self):
         source = self.HEADER + textwrap.dedent(
             """
             class WrongStr(pa.DataFrameModel):
