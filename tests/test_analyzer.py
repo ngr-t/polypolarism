@@ -11445,7 +11445,7 @@ class TestTzMismatchedDatetimeOps:
 
     # -- concat (pple-concat-mismatch via unify_types) ----------------------------------------
 
-    def test_concat_vertical_tz_mismatch_flags_ply020(self) -> None:
+    def test_concat_vertical_tz_mismatch_flags_concat_mismatch(self) -> None:
         naive = FrameType({"t": Datetime()})
         utc = FrameType({"t": Datetime(tz="UTC")})
         analyzer = self._run_two(naive, utc, "out = pl.concat([a, b], how='vertical')")

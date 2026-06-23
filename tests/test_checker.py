@@ -2796,7 +2796,7 @@ class TestIssue50TzMixingEndToEnd:
         """
     )
 
-    def test_concat_naive_and_utc_fails_with_ply020(self):
+    def test_concat_naive_and_utc_fails_with_concat_mismatch(self):
         source = self.HEADER + textwrap.dedent(
             """
             class TsNaive(pa.DataFrameModel):
