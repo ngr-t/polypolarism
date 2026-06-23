@@ -8258,7 +8258,7 @@ class TestImplicitListAggregation:
             {"k": Utf8(), "vs": ListT(Nullable(Int64()))}
         )
 
-    def test_missing_column_raises_ply011(self):
+    def test_missing_column_raises_groupby(self):
         """A bare reference to a missing column still surfaces pple-groupby."""
         source = self.HEADER + textwrap.dedent(
             """
@@ -14522,7 +14522,7 @@ class TestGroupedAllNullTemporalAggs:
         assert inferred is not None
         assert inferred.columns["x"].dtype == Nullable(Datetime())
 
-    def test_select_std_datetime_keeps_ply011_proof(self):
+    def test_select_std_datetime_keeps_groupby_proof(self):
         source = textwrap.dedent(
             self._SCHEMA
             + """
