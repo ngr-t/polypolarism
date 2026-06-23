@@ -8758,7 +8758,7 @@ class TestNamespaceReceiverDtype:
             'pl.col("st").arr.sum()',
         ],
     )
-    def test_wrong_receiver_dtype_flags_ply012(self, expr: str):
+    def test_wrong_receiver_dtype_flags_wrong_namespace_dtype(self, expr: str):
         results = self._analyze(expr)
         assert any("pple-wrong-namespace-dtype" in e for e in results[0].errors), (
             expr,
@@ -8820,7 +8820,7 @@ class TestNamespaceReceiverDtype:
         results = analyze_source(source)
         assert results[0].errors == [], results[0].errors
 
-    def test_nullable_wrong_receiver_flags_ply012(self):
+    def test_nullable_wrong_receiver_flags_wrong_namespace_dtype(self):
         source = textwrap.dedent(
             PANDERA_HEADER
             + """
@@ -11640,7 +11640,7 @@ class TestBinNamespace:
         )
 
     @pytest.mark.parametrize("col", ["i", "s"])
-    def test_bin_on_non_binary_flags_ply012(self, col: str) -> None:
+    def test_bin_on_non_binary_flags_wrong_namespace_dtype(self, col: str) -> None:
         analyzer = _run_body(self._frame(), f"out = df.select(r=pl.col('{col}').bin.size())")
         assert len(analyzer.errors) == 1, analyzer.errors
         assert "pple-wrong-namespace-dtype" in analyzer.errors[0]

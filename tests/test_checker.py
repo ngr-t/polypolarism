@@ -910,12 +910,12 @@ class TestArrayCatEndToEnd:
         assert len(results) == 1
         return results[0]
 
-    def test_arr_on_list_fails_ply012(self):
+    def test_arr_on_list_fails_wrong_namespace_dtype(self):
         result = self._check('pl.col("xs").arr.sum()')
         assert result.passed is False
         assert any("pple-wrong-namespace-dtype" in str(e) for e in result.errors)
 
-    def test_list_on_array_fails_ply012(self):
+    def test_list_on_array_fails_wrong_namespace_dtype(self):
         result = self._check('pl.col("q").list.sum()')
         assert result.passed is False
         assert any("pple-wrong-namespace-dtype" in str(e) for e in result.errors)
@@ -929,7 +929,7 @@ class TestArrayCatEndToEnd:
     def test_list_sum_on_list_passes(self):
         assert self._check('pl.col("xs").list.sum()').passed is True
 
-    def test_cat_on_int_fails_ply012(self):
+    def test_cat_on_int_fails_wrong_namespace_dtype(self):
         result = self._check('pl.col("a").cat.get_categories()')
         assert result.passed is False
         assert any(
@@ -2910,7 +2910,7 @@ class TestIssue51BinNamespaceEndToEnd:
         """
     )
 
-    def test_bin_on_int_fails_with_ply012(self):
+    def test_bin_on_int_fails_with_wrong_namespace_dtype(self):
         source = self.HEADER + textwrap.dedent(
             """
             class In(pa.DataFrameModel):

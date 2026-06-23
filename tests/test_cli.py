@@ -106,7 +106,7 @@ class TestCheckDirectory:
         assert len(results) == 1
         assert results[0].passed is False
 
-    def test_namespace_wrong_dtype_fixture_fails_with_ply012(self):
+    def test_namespace_wrong_dtype_fixture_fails_with_wrong_namespace_dtype(self):
         """Issue #31 fixture: namespace accessors on wrong-dtype columns."""
         results = check_file(FIXTURES_DIR / "invalid" / "namespace_wrong_dtype.py")
 
