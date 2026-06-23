@@ -283,7 +283,7 @@ class TestStructuredDiagnosticFields:
         assert diag["message"] == str(error)
         assert diag["message"] == f"[pple-undeclared-column] {message}"
 
-    def test_ply001_exposes_column_without_schema(self):
+    def test_column_not_found_exposes_column_without_schema(self):
         error = tagged_error(
             "pple-column-not-found",
             "Column 'missing' not found. Available columns: ['a', 'b']",
@@ -849,7 +849,7 @@ class TestStructuredFieldsEndToEnd:
         assert d["column_name"] == "amount"
         assert d["schema"] == "InputSchema"
 
-    def test_ply001_from_analysis_carries_column(self):
+    def test_column_not_found_from_analysis_carries_column(self):
         diagnostics = self._diagnostics(
             """
             import polars as pl
@@ -872,9 +872,9 @@ class TestStructuredFieldsEndToEnd:
                 return df.select(pl.col("nope"))
             """
         )
-        ply001 = [d for d in diagnostics if d.get("code") == "pple-column-not-found"]
-        assert ply001, diagnostics
-        d = ply001[0]
+        column_not_found = [d for d in diagnostics if d.get("code") == "pple-column-not-found"]
+        assert column_not_found, diagnostics
+        d = column_not_found[0]
         assert d["column_name"] == "nope"
         assert "schema" not in d
 

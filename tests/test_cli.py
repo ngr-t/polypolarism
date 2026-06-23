@@ -80,7 +80,7 @@ class TestCheckDirectory:
         assert results[0].passed is False
         assert any("pple-non-boolean-predicate" in str(e) for e in results[0].errors)
 
-    def test_sort_missing_column_fixture_fails_with_ply007(self):
+    def test_sort_missing_column_fixture_fails_with_column_not_found(self):
         """Issue #29 fixture: sort key column doesn't exist."""
         results = check_file(FIXTURES_DIR / "invalid" / "sort_missing_column.py")
 
@@ -114,7 +114,7 @@ class TestCheckDirectory:
         assert all(r.passed is False for r in results)
         assert all(any("pple-wrong-namespace-dtype" in str(e) for e in r.errors) for r in results)
 
-    def test_over_missing_column_fixture_fails_with_ply001(self):
+    def test_over_missing_column_fixture_fails_with_column_not_found(self):
         """Issue #32 fixture: over() partition column doesn't exist."""
         results = check_file(FIXTURES_DIR / "invalid" / "over_missing_column.py")
 

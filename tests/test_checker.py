@@ -2060,7 +2060,7 @@ class TestSortKeyEndToEnd:
                 coerce = True
     """)
 
-    def test_missing_sort_key_fails_with_ply007(self):
+    def test_missing_sort_key_fails_with_column_not_found(self):
         source = self.HEADER + textwrap.dedent(
             """
             @pa.check_types
@@ -2493,7 +2493,7 @@ class TestUniqueSubsetEndToEnd:
                 coerce = True
     """)
 
-    def test_missing_subset_column_fails_with_ply014(self):
+    def test_missing_subset_column_fails_with_column_not_found(self):
         source = self.HEADER + textwrap.dedent(
             """
             @pa.check_types

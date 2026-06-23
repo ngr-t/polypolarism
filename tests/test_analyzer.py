@@ -3702,7 +3702,7 @@ class TestExprListArgs:
         assert ft is not None
         assert ft.columns["ab"].dtype == Unknown()
 
-    def test_struct_unknown_string_column_ply001(self):
+    def test_struct_unknown_string_column_column_not_found(self):
         source = textwrap.dedent(
             PANDERA_HEADER
             + """
@@ -3775,7 +3775,7 @@ class TestExprListArgs:
         assert ft is not None
         assert ft.columns["full"].dtype == Utf8()
 
-    def test_concat_str_list_form_missing_column_ply001(self):
+    def test_concat_str_list_form_missing_column_column_not_found(self):
         source = textwrap.dedent(
             PANDERA_HEADER
             + """
@@ -4108,7 +4108,7 @@ class TestConcatListAndHorizontal:
         assert ft is not None
         assert ft.columns["out"].dtype == Nullable(Float64())
 
-    def test_horizontal_missing_column_ply001(self):
+    def test_horizontal_missing_column_column_not_found(self):
         source = textwrap.dedent(
             PANDERA_HEADER
             + """
@@ -8454,7 +8454,7 @@ class TestFilterPredicateDtype:
         results = analyze_source(source)
         assert any("pple-non-boolean-predicate" in e for e in results[0].errors)
 
-    def test_bare_string_missing_column_is_ply001_not_non_boolean_predicate(self):
+    def test_bare_string_missing_column_is_column_not_found_not_non_boolean_predicate(self):
         results = self._analyze('df.filter("ghost")')
         assert any("pple-column-not-found" in e and "ghost" in e for e in results[0].errors)
         assert not any("pple-non-boolean-predicate" in e for e in results[0].errors)
@@ -8567,7 +8567,7 @@ class TestExprFilterPredicateDtype:
         results = self._analyze('df.select(pl.col("a").filter(pl.col("v") > 0).alias("x"))')
         assert results[0].errors == []
 
-    def test_missing_column_string_predicate_is_ply001_not_non_boolean_predicate(self):
+    def test_missing_column_string_predicate_is_column_not_found_not_non_boolean_predicate(self):
         results = self._analyze('df.select(pl.col("v").filter("ghost").alias("x"))')
         assert any("pple-undeclared-column" in e and "ghost" in e for e in results[0].errors)
         assert not any("pple-non-boolean-predicate" in e for e in results[0].errors)
@@ -8598,7 +8598,7 @@ class TestSortKeyValidation:
         )
         return analyze_source(source)
 
-    def test_missing_string_key_flags_ply007(self):
+    def test_missing_string_key_flags_column_not_found(self):
         results = self._analyze('df.sort("ghost")')
         assert any("pple-column-not-found" in e and "ghost" in e for e in results[0].errors)
 
@@ -8614,7 +8614,7 @@ class TestSortKeyValidation:
         results = self._analyze('df.sort(["a", "ghost"])')
         assert any("pple-column-not-found" in e and "ghost" in e for e in results[0].errors)
 
-    def test_by_kwarg_missing_key_flags_ply007(self):
+    def test_by_kwarg_missing_key_flags_column_not_found(self):
         results = self._analyze('df.sort(by="ghost")')
         assert any("pple-column-not-found" in e and "ghost" in e for e in results[0].errors)
 
@@ -8633,7 +8633,7 @@ class TestSortKeyValidation:
         results = analyze_source(source)
         assert any("pple-column-not-found" in e and "ghost" in e for e in results[0].errors)
 
-    def test_pl_col_missing_key_flags_ply001(self):
+    def test_pl_col_missing_key_flags_column_not_found(self):
         results = self._analyze('df.sort(pl.col("ghost"))')
         assert any("pple-undeclared-column" in e and "ghost" in e for e in results[0].errors)
 
@@ -9351,7 +9351,7 @@ class TestOverKeyValidation:
         )
         return analyze_source(source)
 
-    def test_missing_literal_key_flags_ply001(self):
+    def test_missing_literal_key_flags_column_not_found(self):
         results = self._analyze('df.select(pl.col("v").sum().over("ghost"))')
         assert any("pple-undeclared-column" in e and "ghost" in e for e in results[0].errors)
 
@@ -9371,7 +9371,7 @@ class TestOverKeyValidation:
         results = self._analyze('df.select(pl.col("v").sum().over(["s", "ghost"]))')
         assert any("pple-undeclared-column" in e and "ghost" in e for e in results[0].errors)
 
-    def test_expr_key_missing_flags_ply001(self):
+    def test_expr_key_missing_flags_column_not_found(self):
         results = self._analyze('df.select(pl.col("v").sum().over(pl.col("ghost")))')
         assert any("pple-undeclared-column" in e and "ghost" in e for e in results[0].errors)
 
@@ -9379,7 +9379,7 @@ class TestOverKeyValidation:
         results = self._analyze('df.select(pl.col("v").sum().over(pl.col("s")))')
         assert results[0].errors == [], results[0].errors
 
-    def test_order_by_kwarg_missing_flags_ply001(self):
+    def test_order_by_kwarg_missing_flags_column_not_found(self):
         results = self._analyze('df.select(pl.col("v").first().over("s", order_by="ghost"))')
         assert any("pple-undeclared-column" in e and "ghost" in e for e in results[0].errors)
 
@@ -9391,7 +9391,7 @@ class TestOverKeyValidation:
         results = self._analyze('df.select(pl.col("v").first().over("s", order_by=["t", "ghost"]))')
         assert any("pple-undeclared-column" in e and "ghost" in e for e in results[0].errors)
 
-    def test_partition_by_kwarg_missing_flags_ply001(self):
+    def test_partition_by_kwarg_missing_flags_column_not_found(self):
         results = self._analyze('df.select(pl.col("v").sum().over(partition_by="ghost"))')
         assert any("pple-undeclared-column" in e and "ghost" in e for e in results[0].errors)
 
@@ -9426,7 +9426,7 @@ class TestOverKeyValidation:
         assert ft is not None
         assert ft.columns["x"].dtype == Float64()
 
-    def test_with_columns_over_missing_flags_ply001(self):
+    def test_with_columns_over_missing_flags_column_not_found(self):
         """Issue #32 repro shape: with_columns(g=...over("ghost"))."""
         results = self._analyze('df.with_columns(g=pl.col("v").sum().over("ghost"))')
         assert any("pple-undeclared-column" in e and "ghost" in e for e in results[0].errors)
@@ -10337,7 +10337,7 @@ class TestWhenConditionDtype:
         results = self._analyze('df.select(x=pl.when("flag").then(1).otherwise(0))')
         assert results[0].errors == []
 
-    def test_missing_column_condition_is_ply001_not_non_boolean_predicate(self):
+    def test_missing_column_condition_is_column_not_found_not_non_boolean_predicate(self):
         results = self._analyze('df.select(x=pl.when("ghost").then(1).otherwise(0))')
         assert any("pple-undeclared-column" in e and "ghost" in e for e in results[0].errors)
         assert not any("pple-non-boolean-predicate" in e for e in results[0].errors)
@@ -10633,19 +10633,19 @@ class TestUniqueSubsetValidation:
         )
         return analyze_source(source)
 
-    def test_missing_subset_list_kwarg_flags_ply014(self):
+    def test_missing_subset_list_kwarg_flags_column_not_found(self):
         results = self._analyze('df.unique(subset=["ghost"])')
         assert any("pple-column-not-found" in e and "ghost" in e for e in results[0].errors)
 
-    def test_missing_subset_string_kwarg_flags_ply014(self):
+    def test_missing_subset_string_kwarg_flags_column_not_found(self):
         results = self._analyze('df.unique(subset="ghost")')
         assert any("pple-column-not-found" in e and "ghost" in e for e in results[0].errors)
 
-    def test_missing_subset_positional_list_flags_ply014(self):
+    def test_missing_subset_positional_list_flags_column_not_found(self):
         results = self._analyze('df.unique(["a", "ghost"])')
         assert any("pple-column-not-found" in e and "ghost" in e for e in results[0].errors)
 
-    def test_missing_subset_positional_string_flags_ply014(self):
+    def test_missing_subset_positional_string_flags_column_not_found(self):
         results = self._analyze('df.unique("ghost")')
         assert any("pple-column-not-found" in e and "ghost" in e for e in results[0].errors)
 
@@ -13884,7 +13884,7 @@ class TestCheckedIslandNonStrictSchemas:
         errors = [str(e) for e in results[0].errors]
         assert any("pple-undeclared-column" in e and "region" in e for e in errors), errors
 
-    def test_strict_schema_keeps_ply001_proof(self):
+    def test_strict_schema_keeps_column_not_found_proof(self):
         source = textwrap.dedent(
             """
             import polars as pl
@@ -14310,7 +14310,7 @@ class TestValidateResultBinding:
         errors = [str(e) for e in results[0].errors]
         assert any("pple-undeclared-column" in e and "open_schema" in e for e in errors), errors
 
-    def test_filter_removed_column_lookup_is_ply001_proof(self):
+    def test_filter_removed_column_lookup_is_column_not_found_proof(self):
         source = textwrap.dedent(
             """
             import polars as pl
@@ -14906,7 +14906,7 @@ class TestSchemaContextInMessages:
         ) + textwrap.dedent(body)
         return analyze_source(source)
 
-    def test_ply001_names_schema_on_parameter_frame(self):
+    def test_column_not_found_names_schema_on_parameter_frame(self):
         analyses = self._analyze(
             """
             def f(df: DataFrame[Sales]) -> DataFrame[Sales]:
