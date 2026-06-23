@@ -215,7 +215,7 @@ class TestImportedPlainHelper:
 
 
 class TestExternalImportStillUnresolved:
-    def test_stdlib_import_still_warns_plw003(self, tmp_path: Path) -> None:
+    def test_stdlib_import_still_warns_unknown_function(self, tmp_path: Path) -> None:
         # A genuinely external helper (here a stdlib name) must NOT resolve —
         # the old pplw-unknown-function path is preserved (no false resolution).
         _project_marker(tmp_path)
