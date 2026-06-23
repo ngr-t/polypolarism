@@ -11854,7 +11854,7 @@ class TestNameNamespace:
         assert set(ft.columns) == {"b"}
         assert ft.rest is not None
 
-    def test_name_map_warns_plw004_and_opens_the_frame(self):
+    def test_name_map_warns_untyped_callable_and_opens_the_frame(self):
         result = self._frame('df.select(pl.col("a").name.map(lambda c: c.upper()))')
         assert any("pplw-untyped-callable" in w for w in result.warnings), result.warnings
         ft = result.inferred_return_type
@@ -11862,7 +11862,7 @@ class TestNameNamespace:
         assert ft.columns == {}
         assert ft.rest is not None
 
-    def test_map_fields_warns_plw004_dtype_unknown_name_kept(self):
+    def test_map_fields_warns_untyped_callable_dtype_unknown_name_kept(self):
         result = self._frame('df.select(pl.col("a").name.map_fields(lambda c: c.upper()))')
         assert any("pplw-untyped-callable" in w for w in result.warnings), result.warnings
         ft = result.inferred_return_type
