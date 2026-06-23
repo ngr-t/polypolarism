@@ -141,7 +141,7 @@ class TestCheckDirectory:
         assert results[0].passed is False
         assert any("pple-invalid-cast" in str(e) for e in results[0].errors)
 
-    def test_duplicate_output_fixture_fails_with_ply015(self):
+    def test_duplicate_output_fixture_fails_with_duplicate_column(self):
         """Issue #36 fixture: two select outputs share the name 'a'."""
         results = check_file(FIXTURES_DIR / "invalid" / "duplicate_output.py")
 
