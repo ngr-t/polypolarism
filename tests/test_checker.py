@@ -2013,7 +2013,7 @@ class TestFilterPredicateEndToEnd:
                 coerce = True
     """)
 
-    def test_nonbool_predicate_fails_with_ply008(self):
+    def test_nonbool_predicate_fails_with_non_boolean_predicate(self):
         source = self.HEADER + textwrap.dedent(
             """
             @pa.check_types
@@ -2105,7 +2105,7 @@ class TestWhenConditionEndToEnd:
             flag: bool
     """)
 
-    def test_nonbool_when_condition_fails_with_ply008(self):
+    def test_nonbool_when_condition_fails_with_non_boolean_predicate(self):
         source = self.HEADER + textwrap.dedent(
             """
             class Out(pa.DataFrameModel):

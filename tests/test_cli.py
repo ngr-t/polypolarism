@@ -72,7 +72,7 @@ class TestCheckDirectory:
         results = check_directory(tmp_path)
         assert results == []
 
-    def test_filter_nonbool_fixture_fails_with_ply008(self):
+    def test_filter_nonbool_fixture_fails_with_non_boolean_predicate(self):
         """Issue #28 fixture: non-boolean filter predicate."""
         results = check_file(FIXTURES_DIR / "invalid" / "filter_nonbool_predicate.py")
 
@@ -88,7 +88,7 @@ class TestCheckDirectory:
         assert results[0].passed is False
         assert any("pple-column-not-found" in str(e) for e in results[0].errors)
 
-    def test_when_nonbool_fixture_fails_with_ply008(self):
+    def test_when_nonbool_fixture_fails_with_non_boolean_predicate(self):
         """Issue #37 fixture: non-boolean pl.when condition."""
         results = check_file(FIXTURES_DIR / "invalid" / "when_nonbool_condition.py")
 

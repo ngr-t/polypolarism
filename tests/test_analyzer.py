@@ -8435,15 +8435,15 @@ class TestFilterPredicateDtype:
         )
         return analyze_source(source)
 
-    def test_nonbool_column_expr_predicate_flags_ply008(self):
+    def test_nonbool_column_expr_predicate_flags_non_boolean_predicate(self):
         results = self._analyze('df.filter(pl.col("a"))')
         assert any("pple-non-boolean-predicate" in e and "Boolean" in e for e in results[0].errors)
 
-    def test_nonbool_bare_string_predicate_flags_ply008(self):
+    def test_nonbool_bare_string_predicate_flags_non_boolean_predicate(self):
         results = self._analyze('df.filter("a")')
         assert any("pple-non-boolean-predicate" in e for e in results[0].errors)
 
-    def test_nonbool_const_name_predicate_flags_ply008(self):
+    def test_nonbool_const_name_predicate_flags_non_boolean_predicate(self):
         source = self.HEADER + textwrap.dedent(
             """
             def f(df: DataFrame[In]):
@@ -8454,7 +8454,7 @@ class TestFilterPredicateDtype:
         results = analyze_source(source)
         assert any("pple-non-boolean-predicate" in e for e in results[0].errors)
 
-    def test_bare_string_missing_column_is_ply001_not_ply008(self):
+    def test_bare_string_missing_column_is_ply001_not_non_boolean_predicate(self):
         results = self._analyze('df.filter("ghost")')
         assert any("pple-column-not-found" in e and "ghost" in e for e in results[0].errors)
         assert not any("pple-non-boolean-predicate" in e for e in results[0].errors)
@@ -8507,8 +8507,8 @@ class TestFilterPredicateDtype:
 
     def test_each_positional_predicate_is_checked(self):
         results = self._analyze('df.filter(pl.col("flag"), pl.col("a"))')
-        ply008 = [e for e in results[0].errors if "pple-non-boolean-predicate" in e]
-        assert len(ply008) == 1
+        non_boolean_predicate = [e for e in results[0].errors if "pple-non-boolean-predicate" in e]
+        assert len(non_boolean_predicate) == 1
 
     def test_kwarg_equality_constraint_not_flagged(self):
         # ``filter(a=1)`` is an equality constraint — boolean by construction.
@@ -8545,13 +8545,13 @@ class TestExprFilterPredicateDtype:
         )
         return analyze_source(source)
 
-    def test_nonbool_predicate_in_agg_flags_ply008(self):
+    def test_nonbool_predicate_in_agg_flags_non_boolean_predicate(self):
         results = self._analyze(
             'df.group_by("g").agg(pl.col("v").filter(pl.col("a")).sum().alias("s"))'
         )
         assert any("pple-non-boolean-predicate" in e for e in results[0].errors)
 
-    def test_nonbool_bare_string_predicate_flags_ply008(self):
+    def test_nonbool_bare_string_predicate_flags_non_boolean_predicate(self):
         results = self._analyze('df.select(pl.col("v").filter("a").alias("x"))')
         assert any("pple-non-boolean-predicate" in e for e in results[0].errors)
 
@@ -8567,7 +8567,7 @@ class TestExprFilterPredicateDtype:
         results = self._analyze('df.select(pl.col("a").filter(pl.col("v") > 0).alias("x"))')
         assert results[0].errors == []
 
-    def test_missing_column_string_predicate_is_ply001_not_ply008(self):
+    def test_missing_column_string_predicate_is_ply001_not_non_boolean_predicate(self):
         results = self._analyze('df.select(pl.col("v").filter("ghost").alias("x"))')
         assert any("pple-undeclared-column" in e and "ghost" in e for e in results[0].errors)
         assert not any("pple-non-boolean-predicate" in e for e in results[0].errors)
@@ -10310,20 +10310,20 @@ class TestWhenConditionDtype:
         )
         return analyze_source(source)
 
-    def test_nonbool_column_condition_flags_ply008(self):
+    def test_nonbool_column_condition_flags_non_boolean_predicate(self):
         results = self._analyze('df.select(x=pl.when(pl.col("a")).then(1).otherwise(0))')
         assert any(
             "pple-non-boolean-predicate" in e and "when" in e and "Int64" in e
             for e in results[0].errors
         ), results[0].errors
 
-    def test_chained_when_nonbool_condition_flags_ply008(self):
+    def test_chained_when_nonbool_condition_flags_non_boolean_predicate(self):
         results = self._analyze(
             'df.select(x=pl.when(pl.col("flag")).then(1).when(pl.col("a")).then(2).otherwise(0))'
         )
         assert any("pple-non-boolean-predicate" in e and "when" in e for e in results[0].errors)
 
-    def test_nonbool_constant_condition_flags_ply008(self):
+    def test_nonbool_constant_condition_flags_non_boolean_predicate(self):
         # Probed: ``pl.when(1)`` raises SchemaError (expected Boolean, got i32).
         results = self._analyze("df.select(x=pl.when(1).then(1).otherwise(0))")
         assert any("pple-non-boolean-predicate" in e for e in results[0].errors)
@@ -10337,7 +10337,7 @@ class TestWhenConditionDtype:
         results = self._analyze('df.select(x=pl.when("flag").then(1).otherwise(0))')
         assert results[0].errors == []
 
-    def test_missing_column_condition_is_ply001_not_ply008(self):
+    def test_missing_column_condition_is_ply001_not_non_boolean_predicate(self):
         results = self._analyze('df.select(x=pl.when("ghost").then(1).otherwise(0))')
         assert any("pple-undeclared-column" in e and "ghost" in e for e in results[0].errors)
         assert not any("pple-non-boolean-predicate" in e for e in results[0].errors)
@@ -10361,8 +10361,8 @@ class TestWhenConditionDtype:
         results = self._analyze(
             'df.select(x=pl.when(pl.col("flag"), pl.col("a")).then(1).otherwise(0))'
         )
-        ply008 = [e for e in results[0].errors if "pple-non-boolean-predicate" in e]
-        assert len(ply008) == 1
+        non_boolean_predicate = [e for e in results[0].errors if "pple-non-boolean-predicate" in e]
+        assert len(non_boolean_predicate) == 1
 
     def test_kwarg_equality_constraint_not_flagged(self):
         # ``when(a=1)`` is an equality constraint — boolean by construction.
