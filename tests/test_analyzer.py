@@ -9997,7 +9997,7 @@ class TestCastImpossibleDtypes:
             "pl.col('nli').cast(pl.Int64)",
         ],
     )
-    def test_impossible_cast_flags_ply013_and_degrades_to_unknown(self, expr: str) -> None:
+    def test_impossible_cast_flags_invalid_cast_and_degrades_to_unknown(self, expr: str) -> None:
         analyzer = _run_body(self._frame(), f"out = df.select(r={expr})")
         assert len(analyzer.errors) == 1, analyzer.errors
         assert "pple-invalid-cast" in analyzer.errors[0]
@@ -10085,7 +10085,7 @@ class TestCastImpossibleFrameLevel:
             }
         )
 
-    def test_frame_cast_list_to_int_flags_ply013(self):
+    def test_frame_cast_list_to_int_flags_invalid_cast(self):
         analyzer = _run_body(self._frame(), "out = df.cast({'v': pl.Int64})")
         assert len(analyzer.errors) == 1, analyzer.errors
         assert "pple-invalid-cast" in analyzer.errors[0]
@@ -10170,7 +10170,7 @@ class TestArrayCastDtypes:
             "pl.col('nq').cast(pl.Int64)",
         ],
     )
-    def test_impossible_array_cast_flags_ply013(self, expr: str) -> None:
+    def test_impossible_array_cast_flags_invalid_cast(self, expr: str) -> None:
         analyzer = _run_body(self._frame(), f"out = df.select(r={expr})")
         assert len(analyzer.errors) == 1, (expr, analyzer.errors)
         assert "pple-invalid-cast" in analyzer.errors[0]
@@ -12421,7 +12421,7 @@ class TestArrayWidthCast:
     def _frame(self) -> FrameType:
         return FrameType({"q": Array(Int64(), 3)})
 
-    def test_width_change_cast_flags_ply013(self):
+    def test_width_change_cast_flags_invalid_cast(self):
         analyzer = _run_body(
             self._frame(), 'out = df.select(r=pl.col("q").cast(pl.Array(pl.Int64, 5)))'
         )

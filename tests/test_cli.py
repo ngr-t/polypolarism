@@ -133,7 +133,7 @@ class TestCheckDirectory:
             assert result.passed is False
             assert any("pple-incompatible-operands" in str(e) for e in result.errors)
 
-    def test_cast_impossible_fixture_fails_with_ply013(self):
+    def test_cast_impossible_fixture_fails_with_invalid_cast(self):
         """Issue #34 fixture: List(Int64) -> Int64 cast is structurally impossible."""
         results = check_file(FIXTURES_DIR / "invalid" / "cast_impossible.py")
 
