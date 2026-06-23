@@ -8851,14 +8851,40 @@ def _declared_drop_probe_columns(drops_node: ast.expr) -> dict[str, ColumnSpec]:
 
 def _name_matching_regex(pattern: str) -> str | None:
     """A synthetic column name matched by ``pattern`` (``re.search`` semantics),
-    or ``None`` when one cannot be cheaply produced. Tries the NUL-prefixed
-    probe base and a small spread of plausible names; returns the first that
-    ``re.search``-matches so the declared-drop probe is a genuine match."""
+    or ``None`` when one cannot be cheaply produced.
+
+    ``cs.matches`` / a ``pl.col`` regex select via ``re.search`` — UNANCHORED.
+    The probe must therefore exercise the regex's full interior-match breadth,
+    not its implicit-anchoring behaviour, or the containment test in
+    ``_reduction_within_declared_drop`` is toothless against a body that matches
+    in the INTERIOR (issue #115). Consider an unanchored ``"_internal_"`` against
+    a declared ``cs.starts_with("_internal_")``: ``re.search`` also drops
+    ``region_internal_flag`` (a non-empty prefix before the match), so the body
+    is strictly BROADER than the declaration. A probe like ``"_internal_x"``
+    would hide this — it starts with the needle, so ``starts_with`` matches it
+    too and ``removed ⊆ declared_matched`` wrongly holds.
+
+    So try INTERIOR-match candidates FIRST: a distinctive non-empty prefix
+    (``"zzz"`` / the NUL probe base) ahead of common needles. An unanchored
+    pattern matches one of these and lands OUTSIDE a start-anchored declaration,
+    exposing the breadth. A ``^``-anchored pattern cannot match an interior
+    candidate (``^`` pins the start), so it falls through to the start-anchored
+    candidates — preserving the legitimate anchored-body verdict (no false
+    positive). Returns the first ``re.search``-match, else ``None``."""
     try:
         rx = re.compile(pattern)
     except re.error:
         return None
     candidates = (
+        # Interior-match probes: the match (if any) sits AFTER a distinctive
+        # prefix a start-anchored declaration does NOT match. These come first
+        # so an unanchored body regex reveals its true breadth.
+        f"zzz{_DROP_PROBE_PREFIX}re__",
+        "zzz_internal_flag",
+        "zzz_tmp_junk",
+        "zzz_a_zzz",
+        # Start-anchored / generic fallbacks for ``^``-anchored patterns, which
+        # cannot match the interior candidates above.
         f"{_DROP_PROBE_PREFIX}re__",
         "tmp_junk",
         "_internal_x",

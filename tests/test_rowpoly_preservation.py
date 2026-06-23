@@ -536,3 +536,41 @@ def test_drops_stacked_reductions_still_rowpoly_not_preserved() -> None:
             return df.select(~cs.starts_with("_internal_")).select(~cs.ends_with("_tmp"))
     """)
     assert _has_rowpoly_not_preserved(results["sanitize"])
+
+
+def test_drops_unanchored_matches_broader_than_declared_still_rowpoly_not_preserved() -> None:
+    # Issue #115: declared drops=cs.starts_with("_internal_") but the body uses
+    # an UNANCHORED cs.matches("_internal_"). ``cs.matches`` is re.search, so it
+    # drops any caller extra whose name merely CONTAINS "_internal_" (e.g.
+    # "region_internal_flag", "x_internal_y") — strictly BROADER than the
+    # start-anchored declaration => must flag pple-rowpoly-not-preserved.
+    results = _check("""
+        @rowpoly("R", drops=cs.starts_with("_internal_"))
+        def bug_unanchored_matches(df: DataFrame[InId]) -> DataFrame[InId]:
+            return df.select(~cs.matches("_internal_"))
+    """)
+    assert _has_rowpoly_not_preserved(results["bug_unanchored_matches"])
+
+
+def test_drops_unanchored_contains_broader_than_declared_still_rowpoly_not_preserved() -> None:
+    # Control for issue #115: cs.contains("_internal_") selects the SAME runtime
+    # column set as the unanchored cs.matches above; it has always (correctly)
+    # flagged and must continue to.
+    results = _check("""
+        @rowpoly("R", drops=cs.starts_with("_internal_"))
+        def control_contains(df: DataFrame[InId]) -> DataFrame[InId]:
+            return df.select(~cs.contains("_internal_"))
+    """)
+    assert _has_rowpoly_not_preserved(results["control_contains"])
+
+
+def test_drops_anchored_matches_equal_to_declared_is_accepted() -> None:
+    # Issue #115 soundness boundary (no false positive): a START-ANCHORED body
+    # regex (``^_internal_``) matched against a start-anchored declaration drops
+    # EXACTLY the declared pattern => must stay accepted (no pple-rowpoly-not-preserved).
+    results = _check("""
+        @rowpoly("R", drops=cs.starts_with("_internal_"))
+        def sanitize(df: DataFrame[InId]) -> DataFrame[InId]:
+            return df.select(~cs.matches("^_internal_"))
+    """)
+    assert not _has_rowpoly_not_preserved(results["sanitize"])
