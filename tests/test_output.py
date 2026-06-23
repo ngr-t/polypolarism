@@ -304,7 +304,7 @@ class TestStructuredDiagnosticFields:
         for key in ("column_name", "schema", "declared_type", "inferred_type"):
             assert key not in diag
 
-    def test_untyped_ply032_error_omits_structured_fields(self):
+    def test_untyped_eager_lazy_mismatch_error_omits_structured_fields(self):
         # A tagged-but-plain ``str`` error (no structured carrier) still omits
         # the new fields — they aren't regexed out of the message.
         diag = self._diag(

@@ -1961,7 +1961,7 @@ class TestFrameLiteralEndToEnd:
         assert results[0].passed is False
         assert any(isinstance(e, TypeDifference) and e.column == "a" for e in results[0].errors)
 
-    def test_lazy_literal_where_dataframe_declared_is_ply032(self):
+    def test_lazy_literal_where_dataframe_declared_is_eager_lazy_mismatch(self):
         """A ``pl.LazyFrame({...})`` literal returned from a function declared
         ``-> DataFrame[...]`` trips the eager/lazy mismatch check."""
         source = self.HEADER + textwrap.dedent(
