@@ -5167,7 +5167,7 @@ class TestJoinWhereDegradation:
         """
     )
 
-    def test_join_where_returns_open_frame_with_plw007(self):
+    def test_join_where_returns_open_frame_with_unmodeled_method(self):
         source = self.HEADER + textwrap.dedent(
             """
             def f(a: DataFrame[LeftK], b: DataFrame[RightK]):
@@ -5180,9 +5180,9 @@ class TestJoinWhereDegradation:
         assert ft is not None
         assert ft.columns == {}
         assert ft.rest is not None
-        plw007 = [w for w in results[0].warnings if "pplw-unmodeled-method" in w]
-        assert len(plw007) == 1, results[0].warnings
-        assert "join_where" in plw007[0] and "experimental" in plw007[0]
+        unmodeled_method = [w for w in results[0].warnings if "pplw-unmodeled-method" in w]
+        assert len(unmodeled_method) == 1, results[0].warnings
+        assert "join_where" in unmodeled_method[0] and "experimental" in unmodeled_method[0]
 
     def test_join_where_on_lazyframes_stays_lazy(self):
         source = textwrap.dedent(
@@ -5209,7 +5209,7 @@ class TestJoinWhereDegradation:
         assert ft is not None
         assert ft.is_lazy is True
 
-    def test_validate_retracts_the_join_where_plw007(self):
+    def test_validate_retracts_the_join_where_unmodeled_method(self):
         # Schema.validate is exactly the repair the warning recommends.
         source = self.HEADER + textwrap.dedent(
             """
@@ -5239,8 +5239,8 @@ class TestJoinWhereDegradation:
             """
         )
         results = analyze_source(source)
-        plw007 = [w for w in results[0].warnings if "pplw-unmodeled-method" in w]
-        assert len(plw007) == 1, results[0].warnings
+        unmodeled_method = [w for w in results[0].warnings if "pplw-unmodeled-method" in w]
+        assert len(unmodeled_method) == 1, results[0].warnings
 
 
 class TestToDummiesWarning:
@@ -12012,11 +12012,11 @@ class TestUnmodeledMethodWarning:
         assert results[0].errors == [], results[0].errors
         return results[0]
 
-    def test_unmodeled_chain_method_warns_plw007(self):
+    def test_unmodeled_chain_method_warns_unmodeled_method(self):
         result = self._frame('df.select(pl.col("a").peak_max())')
         assert any("pplw-unmodeled-method" in w for w in result.warnings), result.warnings
 
-    def test_unmodeled_namespace_method_warns_plw007(self):
+    def test_unmodeled_namespace_method_warns_unmodeled_method(self):
         result = self._frame('df.select(pl.col("b").str.not_a_real_method(), pl.col("a"))')
         assert any("pplw-unmodeled-method" in w for w in result.warnings), result.warnings
 
@@ -12028,8 +12028,8 @@ class TestUnmodeledMethodWarning:
         # Only the FIRST unmodeled call warns; the second sees an
         # already-degraded receiver and stays silent (no warning pile-up).
         result = self._frame('df.select(pl.col("a").peak_max().also_not_real())')
-        plw007 = [w for w in result.warnings if "pplw-unmodeled-method" in w]
-        assert len(plw007) == 1, result.warnings
+        unmodeled_method = [w for w in result.warnings if "pplw-unmodeled-method" in w]
+        assert len(unmodeled_method) == 1, result.warnings
 
     def test_unknown_receiver_does_not_warn(self):
         # A column read off an OPEN frame is already Unknown — warning on
@@ -12475,13 +12475,13 @@ class TestUnmodeledFrameMethodWarning:
         )
         return analyze_source(source)[0]
 
-    def _plw007(self, result):
+    def _unmodeled_method(self, result):
         return [w for w in result.warnings if "pplw-unmodeled-method" in w]
 
-    def test_unmodeled_frame_returning_method_warns_plw007(self):
+    def test_unmodeled_frame_returning_method_warns_unmodeled_method(self):
         result = self._returning("df.interpolate()")
         assert result.errors == [], result.errors
-        warnings = self._plw007(result)
+        warnings = self._unmodeled_method(result)
         assert len(warnings) == 1, result.warnings
         assert ".interpolate()" in warnings[0], warnings
 
@@ -12490,17 +12490,17 @@ class TestUnmodeledFrameMethodWarning:
         # is meaningless, so there is nothing to warn about.
         result = self._returning("df.to_dicts()")
         assert result.errors == [], result.errors
-        assert self._plw007(result) == [], result.warnings
+        assert self._unmodeled_method(result) == [], result.warnings
 
     def test_unknown_method_name_stays_silent(self):
         # Typos / plugin namespaces are unknowable — stay conservative.
         result = self._returning("df.not_a_real_frame_method()")
-        assert self._plw007(result) == [], result.warnings
+        assert self._unmodeled_method(result) == [], result.warnings
 
     def test_modeled_methods_do_not_warn(self):
         result = self._returning('df.select(pl.col("a")).filter(pl.col("a") > 0).head(5)')
         assert result.errors == [], result.errors
-        assert self._plw007(result) == [], result.warnings
+        assert self._unmodeled_method(result) == [], result.warnings
 
     def test_untracked_receiver_does_not_warn(self):
         # The degradation happened upstream (unknown variable) — warning on
@@ -12513,12 +12513,12 @@ class TestUnmodeledFrameMethodWarning:
             """
         )
         result = analyze_source(source)[0]
-        assert self._plw007(result) == [], result.warnings
+        assert self._unmodeled_method(result) == [], result.warnings
 
     def test_lazy_receiver_uses_the_lazyframe_probe_set(self):
         result = self._returning("df.lazy().interpolate()")
         assert result.errors == [], result.errors
-        assert len(self._plw007(result)) == 1, result.warnings
+        assert len(self._unmodeled_method(result)) == 1, result.warnings
 
     def test_wrong_side_method_gets_the_eager_lazy_error_only(self):
         # ``transpose`` is eager-only: the lazy receiver already gets a
@@ -12526,20 +12526,20 @@ class TestUnmodeledFrameMethodWarning:
         # error would be noise (the lazy probe set does not contain it).
         result = self._returning("df.lazy().transpose()")
         assert any("pple-eager-only-method" in e for e in result.errors), result.errors
-        assert self._plw007(result) == [], result.warnings
+        assert self._unmodeled_method(result) == [], result.warnings
 
     def test_one_warning_per_chain(self):
         # After the first unmodeled call the variable is untracked; the
         # second call sees no FrameType receiver and stays silent.
         result = self._returning("df.interpolate().fill_null(0)")
-        assert len(self._plw007(result)) == 1, result.warnings
+        assert len(self._unmodeled_method(result)) == 1, result.warnings
 
     def test_agg_chain_does_not_double_fire(self):
         # ``.group_by(...).agg(...)`` analyzes the grouped receiver twice
         # (once for laziness, once inside _infer_agg_call) — the warning
         # must still fire once per source call.
         result = self._returning('df.interpolate().group_by("a").agg(pl.col("a").sum())')
-        assert len(self._plw007(result)) == 1, result.warnings
+        assert len(self._unmodeled_method(result)) == 1, result.warnings
 
     def test_validate_wrapping_the_call_retracts_the_warning(self):
         # ``Schema.validate(...)`` immediately retypes the result — exactly
@@ -12548,7 +12548,7 @@ class TestUnmodeledFrameMethodWarning:
         # cast retraction).
         result = self._returning("In.validate(df.interpolate())")
         assert result.errors == [], result.errors
-        assert self._plw007(result) == [], result.warnings
+        assert self._unmodeled_method(result) == [], result.warnings
 
     def test_validate_on_a_later_statement_keeps_the_warning(self):
         # Between the unmodeled call and the validate the variable really
@@ -12562,7 +12562,7 @@ class TestUnmodeledFrameMethodWarning:
         )
         result = analyze_source(source)[0]
         assert result.errors == [], result.errors
-        assert len(self._plw007(result)) == 1, result.warnings
+        assert len(self._unmodeled_method(result)) == 1, result.warnings
 
 
 class TestAnnotationCheckIssues63And64:
