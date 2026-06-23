@@ -1285,7 +1285,7 @@ class TestIssue30IncompatibleArithmeticEndToEnd:
         """
     )
 
-    def test_string_plus_int_fails_with_exactly_one_ply009(self):
+    def test_string_plus_int_fails_with_exactly_one_incompatible_operands(self):
         source = self.HEADER + textwrap.dedent(
             """
             class In(pa.DataFrameModel):
@@ -2826,7 +2826,7 @@ class TestIssue50TzMixingEndToEnd:
         result = check_source(source)[0]
         assert result.passed is True, result.errors
 
-    def test_aware_minus_naive_fails_with_ply009(self):
+    def test_aware_minus_naive_fails_with_incompatible_operands(self):
         source = self.HEADER + textwrap.dedent(
             """
             class Mixed(pa.DataFrameModel):
@@ -3079,7 +3079,7 @@ class TestIssue52DecimalArithmeticEndToEnd:
         assert len(results) == 1
         assert results[0].passed is True, results[0].errors
 
-    def test_decimal_floordiv_flags_ply009(self):
+    def test_decimal_floordiv_flags_incompatible_operands(self):
         source = self.HEADER + textwrap.dedent(
             """
             class Out(pa.DataFrameModel):

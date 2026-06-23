@@ -7041,7 +7041,7 @@ class TestArithmeticIncompatibleDtypes:
             "pl.col('du') ** pl.col('i')",
         ],
     )
-    def test_invalid_combination_flags_ply009(self, expr: str) -> None:
+    def test_invalid_combination_flags_incompatible_operands(self, expr: str) -> None:
         analyzer = _run_body(self._frame(), f"out = df.select(r={expr})")
         assert len(analyzer.errors) == 1, analyzer.errors
         assert "pple-incompatible-operands" in analyzer.errors[0]
@@ -7278,7 +7278,7 @@ class TestDecimalArithmetic:
             "pl.col('d') ** None",
         ],
     )
-    def test_invalid_combination_flags_ply009(self, expr: str) -> None:
+    def test_invalid_combination_flags_incompatible_operands(self, expr: str) -> None:
         analyzer = _run_body(self._frame(), f"out = df.select(r={expr})")
         assert len(analyzer.errors) == 1, analyzer.errors
         assert "pple-incompatible-operands" in analyzer.errors[0]
@@ -7296,7 +7296,7 @@ class TestDecimalArithmetic:
             "pl.col('xs') % pl.col('d')",
         ],
     )
-    def test_categorical_enum_list_partner_flags_ply009(self, expr: str) -> None:
+    def test_categorical_enum_list_partner_flags_incompatible_operands(self, expr: str) -> None:
         """Probed: every Decimal x {Categorical, Enum, List} cell errors."""
         frame = FrameType(
             {
@@ -9714,7 +9714,7 @@ class TestComparisonIncompatibleDtypes:
             "pl.col('cat') == 1",
         ],
     )
-    def test_invalid_combination_flags_ply009(self, expr: str) -> None:
+    def test_invalid_combination_flags_incompatible_operands(self, expr: str) -> None:
         analyzer = _run_body(self._frame(), f"out = df.select(m={expr})")
         assert len(analyzer.errors) == 1, analyzer.errors
         assert "pple-incompatible-operands" in analyzer.errors[0]
@@ -9875,7 +9875,7 @@ class TestIsInIncompatibleDtypes:
             "pl.col('ni').is_in(['x'])",
         ],
     )
-    def test_invalid_combination_flags_ply009(self, expr: str) -> None:
+    def test_invalid_combination_flags_incompatible_operands(self, expr: str) -> None:
         analyzer = _run_body(self._frame(), f"out = df.select(m={expr})")
         assert len(analyzer.errors) == 1, analyzer.errors
         assert "pple-incompatible-operands" in analyzer.errors[0]
@@ -10236,7 +10236,7 @@ class TestArrayOperationLayers:
         assert analyzer.errors == [], analyzer.errors
         assert analyzer.var_types["out"].columns["r"].dtype == Boolean()
 
-    def test_is_in_array_expr_arg_mismatched_element_flags_ply009(self):
+    def test_is_in_array_expr_arg_mismatched_element_flags_incompatible_operands(self):
         # Probed: Utf8.is_in(Array(Int64)) raises InvalidOperationError.
         analyzer = _run_body(self._frame(), 'out = df.select(r=pl.col("s").is_in(pl.col("q")))')
         assert any("pple-incompatible-operands" in e for e in analyzer.errors), analyzer.errors
@@ -11133,7 +11133,7 @@ class TestListEvalBody:
         assert analyzer.errors == [], analyzer.errors
         assert analyzer.var_types["out"].columns["v"].dtype == ListT(Int64())
 
-    def test_invalid_eval_body_flags_ply009(self):
+    def test_invalid_eval_body_flags_incompatible_operands(self):
         analyzer = _run_body(
             self._frame(),
             'out = df.select(pl.col("v").list.eval(pl.element() + pl.lit("x")))',
@@ -11344,7 +11344,7 @@ class TestTzMismatchedDatetimeOps:
             "pl.col('utc') - pl.col('tokyo')",
         ],
     )
-    def test_tz_mismatched_subtraction_flags_ply009(self, expr: str) -> None:
+    def test_tz_mismatched_subtraction_flags_incompatible_operands(self, expr: str) -> None:
         analyzer = _run_body(self._frame(), f"out = df.select(r={expr})")
         assert len(analyzer.errors) == 1, analyzer.errors
         assert "pple-incompatible-operands" in analyzer.errors[0]
@@ -11381,7 +11381,7 @@ class TestTzMismatchedDatetimeOps:
             "pl.col('tokyo') != pl.col('utc')",
         ],
     )
-    def test_tz_mismatched_comparison_flags_ply009(self, expr: str) -> None:
+    def test_tz_mismatched_comparison_flags_incompatible_operands(self, expr: str) -> None:
         analyzer = _run_body(self._frame(), f"out = df.select(r={expr})")
         assert len(analyzer.errors) == 1, analyzer.errors
         assert "pple-incompatible-operands" in analyzer.errors[0]

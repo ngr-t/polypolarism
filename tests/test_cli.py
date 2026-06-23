@@ -124,7 +124,7 @@ class TestCheckDirectory:
             "pple-undeclared-column" in str(e) and "ghost" in str(e) for e in results[0].errors
         )
 
-    def test_compare_incompatible_fixture_fails_with_ply009(self):
+    def test_compare_incompatible_fixture_fails_with_incompatible_operands(self):
         """Issue #33 fixture: String == Int64 comparison and Int64.is_in(list-of-str)."""
         results = check_file(FIXTURES_DIR / "invalid" / "compare_incompatible.py")
 
@@ -156,7 +156,7 @@ class TestCheckDirectory:
         assert len(results) == 2
         assert all(r.passed for r in results), [r.errors for r in results]
 
-    def test_list_eval_bad_body_fixture_fails_with_ply009(self):
+    def test_list_eval_bad_body_fixture_fails_with_incompatible_operands(self):
         """Issue #44 fixture: Int+String inside list.eval on a List(Int64) column."""
         results = check_file(FIXTURES_DIR / "invalid" / "list_eval_bad_body.py")
 
