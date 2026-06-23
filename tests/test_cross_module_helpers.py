@@ -105,7 +105,7 @@ class TestImportedRowpolyHelper:
         assert not any("pplw-unknown-function" in str(w) for w in use.warnings), use.warnings
         assert use.passed, [str(e) for e in use.errors]
 
-    def test_imported_rowpoly_wrong_extra_dtype_fails_ply040(self, tmp_path: Path) -> None:
+    def test_imported_rowpoly_wrong_extra_dtype_fails_return_type(self, tmp_path: Path) -> None:
         # `region` is really Utf8; declaring it int must FAIL with pple-return-type —
         # proving the extra was threaded with its REAL dtype, not Unknown.
         _project_marker(tmp_path)

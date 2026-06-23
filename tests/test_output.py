@@ -315,7 +315,7 @@ class TestStructuredDiagnosticFields:
             assert key not in diag
 
 
-class TestPly040RetypeFix:
+class TestReturnTypeRetypeFix:
     """Batch B, Request 3: a pple-return-type ``TypeDifference`` carries fix metadata so
     the editor can offer a "retype the schema field" quick fix without
     AST-parsing or string-building.
@@ -392,7 +392,7 @@ class TestPly040RetypeFix:
         assert "suggested_annotation" not in diag
 
 
-class TestPly040RetypeFixEndToEnd:
+class TestReturnTypeRetypeFixEndToEnd:
     """Request 3 from real analysis: the retype fix metadata is populated end
     to end with line numbers matching the real schema source."""
 
