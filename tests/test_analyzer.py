@@ -11429,7 +11429,7 @@ class TestTzMismatchedDatetimeOps:
             analyzer.visit(stmt)
         return analyzer
 
-    def test_join_on_tz_mismatched_keys_flags_ply010(self) -> None:
+    def test_join_on_tz_mismatched_keys_flags_join_key(self) -> None:
         left = FrameType({"t": Datetime(), "x": Int64()})
         right = FrameType({"t": Datetime(tz="UTC"), "y": Int64()})
         analyzer = self._run_two(left, right, "out = a.join(b, on='t', how='inner')")
