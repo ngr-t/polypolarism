@@ -4924,7 +4924,7 @@ class TestM10SelectorArithmetic:
 class TestM12Pivot:
     """``df.pivot(...)`` is data-dependent — we warn and require a typed annotation."""
 
-    def test_pivot_emits_plw005_with_actionable_message(self):
+    def test_pivot_emits_data_dependent_schema_with_actionable_message(self):
         source = textwrap.dedent(
             PANDERA_HEADER
             + """
@@ -5258,7 +5258,7 @@ class TestToDummiesWarning:
         """
     )
 
-    def test_to_dummies_emits_plw005_with_actionable_message(self):
+    def test_to_dummies_emits_data_dependent_schema_with_actionable_message(self):
         source = self.HEADER + textwrap.dedent(
             """
             def f(data: DataFrame[In]):
@@ -5325,7 +5325,7 @@ class TestGroupByMapGroupsWarning:
         """
     )
 
-    def test_map_groups_emits_plw005(self):
+    def test_map_groups_emits_data_dependent_schema(self):
         source = self.HEADER + textwrap.dedent(
             """
             def f(df: DataFrame[Src]):
