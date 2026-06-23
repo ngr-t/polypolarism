@@ -4459,7 +4459,9 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         # name method preserves the dtype; the output name is unknowable.
         return None, inner_type
 
-    def _suggest_dtype_for_undeclared_column(self, errors_before: int, target: DataType | None) -> None:
+    def _suggest_dtype_for_undeclared_column(
+        self, errors_before: int, target: DataType | None
+    ) -> None:
         """Attach a ``suggested_dtype`` to a pple-undeclared-column fix raised since
         ``errors_before`` (issue #114).
 

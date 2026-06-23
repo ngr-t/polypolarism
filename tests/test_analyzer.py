@@ -3828,7 +3828,9 @@ class TestMixedListArgsListLiteralMisuse:
             "pl.mean_horizontal([pl.col('a')], pl.col('b'))",
         ],
     )
-    def test_mixed_list_args_flag_list_literal_misuse_and_degrade_to_unknown(self, expr: str) -> None:
+    def test_mixed_list_args_flag_list_literal_misuse_and_degrade_to_unknown(
+        self, expr: str
+    ) -> None:
         source = textwrap.dedent(
             PANDERA_HEADER
             + self._SCHEMA

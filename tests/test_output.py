@@ -679,12 +679,16 @@ class TestUndeclaredColumnSuggestedDtype:
 
     def test_suggested_dtype_present_for_cast_constrained_column(self, tmp_path):
         # ``pl.col("amount").cast(pl.Float64)`` pins the column to Float64.
-        fix = self._undeclared_column_fix(tmp_path, 'df.with_columns(b=pl.col("amount").cast(pl.Float64))')
+        fix = self._undeclared_column_fix(
+            tmp_path, 'df.with_columns(b=pl.col("amount").cast(pl.Float64))'
+        )
         assert fix["column"] == "amount"
         assert fix["suggested_dtype"] == "pl.Float64"
 
     def test_suggested_dtype_for_simple_cast_target(self, tmp_path):
-        fix = self._undeclared_column_fix(tmp_path, 'df.with_columns(b=pl.col("amount").cast(pl.Int64))')
+        fix = self._undeclared_column_fix(
+            tmp_path, 'df.with_columns(b=pl.col("amount").cast(pl.Int64))'
+        )
         assert fix["suggested_dtype"] == "pl.Int64"
 
     def test_suggested_dtype_omitted_for_unconstrained_column(self, tmp_path):
