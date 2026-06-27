@@ -34,6 +34,8 @@ src/polypolarism/
 ├── pandera_dtype.py       # AST type expression -> ColumnSpec translator
 ├── pandera_schema.py      # Pandera DataFrameModel class registry
 ├── pandera_annotation.py  # DataFrame[Schema] annotation detection
+├── patito_dtype.py        # Patito field -> ColumnSpec translator (ADR-0010)
+├── patito_schema.py       # Patito Model class registry (import-anchored)
 ├── expr_infer.py          # Expression type inference
 ├── ops/
 │   ├── join.py            # Join operation type inference
@@ -56,6 +58,7 @@ This project follows TDD (t-wada style):
 ### Key Design Decisions
 
 - **Schema declaration**: Pandera class-based `pa.DataFrameModel` with `DataFrame[Schema]` / `LazyFrame[Schema]` annotations. The legacy `DF["{...}"]` DSL has been removed.
+- **Patito frontend** (ADR-0010): a second schema dialect, `patito.Model` + `pt.DataFrame[Model]`. It reuses the dialect-neutral `Schema` / `SchemaRegistry` / `FrameType` IR, checker, and narrowing; only detection (`patito_schema.py`, **import-anchored** because `Model` is collision-prone) and field translation (`patito_dtype.py`) are Patito-specific. Patito semantics that differ from Pandera: `Optional[T]` → **value nullable** (column required), the inverse of Pandera's "column may be absent"; `int`/`float`/`Literal` map to a `DataTypeGroup` (accept any width / String-or-Enum) collapsed to a canonical representative for inference math via `types.collapse_groups`; `pt.Field(dtype=...)` forces an exact dtype; nested `Model` → `Struct`; models bind `strict=True`. **Single-dialect assumption**: a file mixing Patito and Pandera is unsupported. Runtime-differential coverage for Patito is deferred (the harness's input synthesis is Pandera-specific; Patito functions are naturally out of scope).
 - **Nullable subtyping**: `T` is a subtype of `Nullable[T]`, but `Nullable[T]` is NOT a subtype of `T`. Value nullability is encoded by wrapping a column's dtype in `Nullable(...)` (declared via `pa.Field(nullable=True)`).
 - **Optional columns**: A column declared `Optional[T]` carries `ColumnSpec(dtype=T, required=False)` and is allowed to be absent in the inferred frame. An inferred optional cannot satisfy a required declared slot.
 - **Strict schemas**: `class Config: strict = True` rejects extra columns at every position the schema is the "expected" side. Default (non-strict) allows structural subtyping.
