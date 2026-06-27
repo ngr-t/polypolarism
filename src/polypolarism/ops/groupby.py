@@ -30,6 +30,7 @@ from polypolarism.types import (
     UInt64,
     UInt128,
     Unknown,
+    collapse_groups,
 )
 from polypolarism.types import (
     unwrap_nullable as _unwrap_nullable,
@@ -437,6 +438,13 @@ def infer_agg_result_type(
     Raises:
         GroupByTypeError: If the aggregation function cannot be applied to the type
     """
+    # Patito acceptance groups (ADR-0010) collapse to their canonical dtype
+    # before any numeric guard / result inference (#116): a column declared
+    # ``int`` / ``float`` is numeric, so ``sum`` / ``mean`` / ``min`` … over it
+    # must type-check — the group's representative is what the aggregation
+    # actually operates on.
+    input_type = collapse_groups(input_type)
+
     # Unknown input never raises — the gradual-typing escape hatch must not
     # produce false positives. Count-like aggregations still have a precise
     # result; everything else stays Unknown.

@@ -10,6 +10,9 @@ from polypolarism.ops.groupby import (
     infer_groupby_result,
 )
 from polypolarism.types import (
+    FLOAT_DTYPES,
+    INTEGER_DTYPES,
+    DataTypeGroup,
     Date,
     Datetime,
     Duration,
@@ -32,6 +35,35 @@ from polypolarism.types import (
     Unknown,
     Utf8,
 )
+
+
+class TestAggNumericGroup:
+    """#116: aggregations recognise Patito int/float acceptance groups."""
+
+    def _int_group(self) -> DataTypeGroup:
+        return DataTypeGroup(
+            frozenset(c() for c in INTEGER_DTYPES), label="integer", canonical=Int64()
+        )
+
+    def _float_group(self) -> DataTypeGroup:
+        return DataTypeGroup(
+            frozenset(c() for c in FLOAT_DTYPES), label="float", canonical=Float64()
+        )
+
+    def test_sum_over_integer_group(self):
+        assert infer_agg_result_type(AggFunction.SUM, self._int_group()) == Int64()
+
+    def test_sum_over_float_group(self):
+        assert infer_agg_result_type(AggFunction.SUM, self._float_group()) == Float64()
+
+    def test_mean_over_integer_group_is_float(self):
+        assert infer_agg_result_type(AggFunction.MEAN, self._int_group()) == Float64()
+
+    def test_min_over_integer_group_preserves_representative(self):
+        assert infer_agg_result_type(AggFunction.MIN, self._int_group()) == Int64()
+
+    def test_nullable_integer_group(self):
+        assert infer_agg_result_type(AggFunction.SUM, Nullable(self._int_group())) == Int64()
 
 
 class TestAggFunctionSignatures:
