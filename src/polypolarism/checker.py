@@ -13,6 +13,7 @@ from polypolarism.types import (
     NUMERIC_DTYPES,
     Array,
     DataType,
+    DataTypeGroup,
     Enum,
     FrameType,
     List,
@@ -208,6 +209,21 @@ def _subtype_verdict(inferred: DataType, declared: DataType) -> Verdict:
 
     inferred_base = _get_base_type(inferred)
     declared_base = _get_base_type(declared)
+
+    # Patito acceptance group (ADR-0010): the declared slot accepts any of a
+    # set of dtypes (``int`` -> any integer width, ``float`` -> any float,
+    # ``Literal[str]`` -> String/Enum). An inferred concrete dtype satisfies
+    # it when it is a subtype of any member. The Nullable-inferred-vs-non-
+    # nullable-declared case is already rejected above, so comparing on the
+    # unwrapped bases here handles every nullability combination. The group
+    # only appears on the declared side; an identical group on both sides is
+    # already handled by the exact-match rule.
+    if isinstance(declared_base, DataTypeGroup):
+        for member in declared_base.members:
+            verdict = _subtype_verdict(inferred_base, member)
+            if verdict.ok:
+                return verdict
+        return Verdict(False)
 
     # Enum categories are part of dtype identity (issue #67): polars and
     # pandera reject a category-sequence mismatch at runtime, so two

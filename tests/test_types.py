@@ -1,10 +1,12 @@
 """Tests for types module."""
 
 from polypolarism.types import (
+    INTEGER_DTYPES,
     Array,
     Boolean,
     Categorical,
     DataType,
+    DataTypeGroup,
     Date,
     Datetime,
     Decimal,
@@ -19,6 +21,7 @@ from polypolarism.types import (
     Time,
     Unknown,
     Utf8,
+    collapse_groups,
     unwrap_nullable,
     wrap_nullable,
 )
@@ -322,3 +325,47 @@ class TestArrayWidth:
 
     def test_str_omits_unknown_width(self):
         assert str(Array(Int64())) == "Array[Int64]"
+
+
+class TestDataTypeGroup:
+    """DataTypeGroup + collapse_groups (ADR-0010)."""
+
+    def _int_group(self) -> DataTypeGroup:
+        return DataTypeGroup(
+            frozenset(c() for c in INTEGER_DTYPES), label="integer", canonical=Int64()
+        )
+
+    def test_identity_is_member_set_not_label_or_canonical(self):
+        a = DataTypeGroup(frozenset({Int64(), Int32()}), label="x", canonical=Int64())
+        b = DataTypeGroup(frozenset({Int64(), Int32()}), label="y", canonical=Int32())
+        assert a == b
+        assert hash(a) == hash(b)
+
+    def test_str_uses_label(self):
+        assert str(self._int_group()) == "integer"
+
+    def test_representative_prefers_canonical(self):
+        assert self._int_group().representative() == Int64()
+
+    def test_representative_falls_back_deterministically(self):
+        group = DataTypeGroup(frozenset({Int64(), Int32()}))
+        # No canonical: a stable member is chosen (not an error).
+        assert group.representative() in (Int64(), Int32())
+
+    def test_collapse_replaces_group_with_representative(self):
+        assert collapse_groups(self._int_group()) == Int64()
+
+    def test_collapse_recurses_through_wrappers(self):
+        assert collapse_groups(Nullable(self._int_group())) == Nullable(Int64())
+        assert collapse_groups(List(self._int_group())) == List(Int64())
+        assert collapse_groups(Struct({"a": self._int_group()}, open=True)) == Struct(
+            {"a": Int64()}, open=True
+        )
+
+    def test_collapse_is_identity_on_group_free_dtype(self):
+        assert collapse_groups(Utf8()) == Utf8()
+        assert collapse_groups(Nullable(Int64())) == Nullable(Int64())
+
+    def test_collapse_is_idempotent(self):
+        once = collapse_groups(Nullable(self._int_group()))
+        assert collapse_groups(once) == once

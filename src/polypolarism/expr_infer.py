@@ -33,6 +33,7 @@ from polypolarism.types import (
     UInt64,
     Unknown,
     Utf8,
+    collapse_groups,
 )
 from polypolarism.types import (
     List as ListT,
@@ -238,6 +239,11 @@ def promote_types(left: DataType, right: DataType) -> DataType:
     Raises:
         TypePromotionError: If types cannot be promoted.
     """
+    # Patito acceptance groups collapse to their representative dtype before
+    # any inference math (ADR-0010) — ``int`` behaves as ``Int64`` here, etc.
+    left = collapse_groups(left)
+    right = collapse_groups(right)
+
     # Handle Null type
     if isinstance(left, Null):
         if isinstance(right, Null):
@@ -287,6 +293,10 @@ def infer_cast(source: DataType, target: DataType) -> DataType:
     Returns:
         The result type of the cast.
     """
+    # A Patito acceptance group source collapses to its representative
+    # (ADR-0010); the cast target is already a concrete user-named dtype.
+    source = collapse_groups(source)
+
     # Check if source is nullable
     source_inner, source_nullable = _unwrap_nullable(source)
 
@@ -317,6 +327,10 @@ def unify_types(left: DataType, right: DataType) -> DataType:
     Raises:
         TypeUnificationError: If types cannot be unified.
     """
+    # Collapse Patito acceptance groups to their representative (ADR-0010).
+    left = collapse_groups(left)
+    right = collapse_groups(right)
+
     # Handle Null type
     if isinstance(left, Null):
         if isinstance(right, Null):
@@ -582,6 +596,10 @@ def supertype(left: DataType, right: DataType) -> DataType | None:
           determine supertype" / InvalidOperationError) — callers may treat
           this as a guaranteed error.
     """
+    # Collapse Patito acceptance groups to their representative (ADR-0010).
+    left = collapse_groups(left)
+    right = collapse_groups(right)
+
     left_base = left.inner if isinstance(left, Nullable) else left
     right_base = right.inner if isinstance(right, Nullable) else right
     # Unknown absorbs everything — checked before Null so that

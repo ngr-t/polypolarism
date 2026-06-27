@@ -13,7 +13,10 @@ from polypolarism.checker import (
     check_source,
 )
 from polypolarism.types import (
+    FLOAT_DTYPES,
+    INTEGER_DTYPES,
     Array,
+    DataTypeGroup,
     Datetime,
     Duration,
     Enum,
@@ -3359,3 +3362,50 @@ class TestTimeUnitVerdict:
         assert _is_coercible_difference(Datetime(unit="us"), Datetime(unit="ns")) is False
         assert _is_coercible_difference(Duration(unit="us"), Duration(unit="ms")) is True
         assert _is_coercible_difference(Duration(unit="us"), Duration(unit="ns")) is False
+
+
+def _int_group() -> DataTypeGroup:
+    return DataTypeGroup(frozenset(c() for c in INTEGER_DTYPES), label="integer")
+
+
+def _float_group() -> DataTypeGroup:
+    return DataTypeGroup(frozenset(c() for c in FLOAT_DTYPES), label="float")
+
+
+def _literal_group() -> DataTypeGroup:
+    return DataTypeGroup(frozenset({Utf8(), Enum(("a", "b"))}), label="Literal")
+
+
+class TestDataTypeGroupVerdict:
+    """Patito acceptance groups (ADR-0010): any member satisfies the slot."""
+
+    def test_any_integer_width_satisfies_integer_group(self):
+        assert _subtype_verdict(UInt32(), _int_group()).ok
+        assert _subtype_verdict(Int64(), _int_group()).ok
+
+    def test_float_does_not_satisfy_integer_group(self):
+        # int and float families are disjoint (probed: an int field rejects
+        # a float column).
+        assert not _subtype_verdict(Float64(), _int_group()).ok
+
+    def test_non_numeric_does_not_satisfy_integer_group(self):
+        assert not _subtype_verdict(Utf8(), _int_group()).ok
+
+    def test_float_widths_satisfy_float_group(self):
+        assert _subtype_verdict(Float64(), _float_group()).ok
+        assert not _subtype_verdict(Int64(), _float_group()).ok
+
+    def test_literal_group_accepts_string_or_matching_enum(self):
+        assert _subtype_verdict(Utf8(), _literal_group()).ok
+        assert _subtype_verdict(Enum(("a", "b")), _literal_group()).ok
+        assert not _subtype_verdict(Enum(("x",)), _literal_group()).ok
+
+    def test_identical_group_matches_exactly(self):
+        assert _subtype_verdict(_int_group(), _int_group()).ok
+
+    def test_nullability_still_enforced_against_group(self):
+        # Non-nullable into nullable group is fine; nullable into a
+        # non-nullable group is rejected.
+        assert _subtype_verdict(UInt32(), Nullable(_int_group())).ok
+        assert not _subtype_verdict(Nullable(UInt32()), _int_group()).ok
+        assert _subtype_verdict(Nullable(UInt32()), Nullable(_int_group())).ok

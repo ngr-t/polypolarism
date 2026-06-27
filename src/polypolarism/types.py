@@ -211,23 +211,17 @@ class Float64(DataType):
 # check (``checker._is_coercible_difference``) treats differences within
 # this set as non-errors. Membership is checked via ``type(dtype)`` —
 # these classes are leaf dataclasses with no subclasses.
-NUMERIC_DTYPES: frozenset[type[DataType]] = frozenset(
-    {
-        Int8,
-        Int16,
-        Int32,
-        Int64,
-        Int128,
-        UInt8,
-        UInt16,
-        UInt32,
-        UInt64,
-        UInt128,
-        Float16,
-        Float32,
-        Float64,
-    }
+# The signed/unsigned integer widths and the float widths, split out so the
+# Patito frontend can build its ``int`` / ``float`` acceptance groups
+# (ADR-0010): Patito's ``int`` annotation accepts ANY integer dtype and
+# ``float`` ANY float dtype, but the two families are disjoint (an ``int``
+# field rejects a float column — probed).
+INTEGER_DTYPES: frozenset[type[DataType]] = frozenset(
+    {Int8, Int16, Int32, Int64, Int128, UInt8, UInt16, UInt32, UInt64, UInt128}
 )
+FLOAT_DTYPES: frozenset[type[DataType]] = frozenset({Float16, Float32, Float64})
+
+NUMERIC_DTYPES: frozenset[type[DataType]] = INTEGER_DTYPES | FLOAT_DTYPES
 
 
 @dataclass(frozen=True)
@@ -409,6 +403,54 @@ class Enum(DataType):
 
 
 @dataclass(frozen=True)
+class DataTypeGroup(DataType):
+    """A set of dtypes, ANY of which satisfies a declared slot (ADR-0010).
+
+    Models Patito's ``valid_dtypes`` groups: a Patito ``int`` field accepts
+    any of the 10 integer dtypes, ``float`` any float width, and a
+    ``Literal[str, ...]`` field accepts ``String`` or its ``Enum``. The group
+    only ever appears on the DECLARED side — an inferred concrete dtype
+    satisfies it when it is a subtype of any member (handled in the checker's
+    ``_subtype_verdict``). Mapping ``int`` to a single concrete dtype instead
+    would falsely reject a non-canonical width (ADR-0009).
+
+    ``label`` is a short human name (``"integer"`` / ``"float"``) for
+    diagnostics; structural identity is the ``members`` set alone. Equality is
+    exact set equality, so an identical group on both sides matches before the
+    membership rule is consulted.
+    """
+
+    members: frozenset[DataType]
+    label: str | None = field(default=None, compare=False)
+    # The representative dtype the group collapses to for INFERENCE math
+    # (arithmetic promotion, casts, aggregations) — Patito's canonical
+    # ``Model.dtypes`` value (``int`` -> ``Int64``, ``float`` -> ``Float64``,
+    # ``Literal[str]`` -> ``Utf8``). The group itself only describes
+    # ACCEPTANCE on the declared side; once a column's value is transformed,
+    # ``collapse_groups`` swaps in this representative so the result type is a
+    # concrete dtype. Excluded from identity (derived, not structural).
+    canonical: DataType | None = field(default=None, compare=False)
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, DataTypeGroup) and self.members == other.members
+
+    def __hash__(self) -> int:
+        return hash(("DataTypeGroup", self.members))
+
+    def __str__(self) -> str:
+        if self.label is not None:
+            return self.label
+        return "{" + " | ".join(sorted(str(m) for m in self.members)) + "}"
+
+    def representative(self) -> DataType:
+        """The concrete dtype this group collapses to for inference math."""
+        if self.canonical is not None:
+            return self.canonical
+        # Deterministic fallback when no canonical was supplied.
+        return sorted(self.members, key=str)[0]
+
+
+@dataclass(frozen=True)
 class Null(DataType):
     """Null type (for null literals)."""
 
@@ -467,6 +509,33 @@ def wrap_nullable(dtype: DataType, is_nullable: bool) -> DataType:
     """Wrap ``dtype`` in Nullable when ``is_nullable`` is true."""
     if is_nullable:
         return Nullable(dtype)
+    return dtype
+
+
+def collapse_groups(dtype: DataType) -> DataType:
+    """Replace every :class:`DataTypeGroup` with its representative dtype (ADR-0010).
+
+    Acceptance groups (Patito's ``int`` / ``float`` / ``Literal``) describe
+    what a declared slot ACCEPTS. The moment a column's value flows through an
+    inference operation that changes the dtype (arithmetic, cast, aggregation),
+    the group must collapse to a concrete representative so the result is a
+    real dtype — otherwise e.g. ``int * 1.0`` could not promote to ``Float64``.
+    Recurses through ``Nullable`` / ``List`` / ``Array`` / ``Struct`` so nested
+    groups collapse too. A group-free dtype is returned unchanged.
+    """
+    if isinstance(dtype, DataTypeGroup):
+        return collapse_groups(dtype.representative())
+    if isinstance(dtype, Nullable):
+        return Nullable(collapse_groups(dtype.inner))
+    if isinstance(dtype, List):
+        return List(collapse_groups(dtype.inner))
+    if isinstance(dtype, Array):
+        return Array(collapse_groups(dtype.inner), dtype.width)
+    if isinstance(dtype, Struct):
+        return Struct(
+            fields={k: collapse_groups(v) for k, v in dtype.fields.items()},
+            open=dtype.open,
+        )
     return dtype
 
 
