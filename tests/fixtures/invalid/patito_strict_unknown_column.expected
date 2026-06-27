@@ -1,0 +1,2 @@
+lookup_missing: FAIL
+  error: [pple-column-not-found] Column 'missing' not found in frame from schema 'In'. Available columns: ['id']

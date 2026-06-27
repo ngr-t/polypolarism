@@ -1,0 +1,2 @@
+stringify: FAIL
+  error: [pple-return-type] Column 'a' has type Utf8, but declared type is integer

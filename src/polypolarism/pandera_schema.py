@@ -339,6 +339,14 @@ def collect_schemas(tree: ast.Module, source_file: Path | None = None) -> Schema
     _collect_object_schemas(tree, registry)
     _scan_frame_aliases(tree, registry)
 
+    # Patito frontend (ADR-0010): merge any ``patito.Model`` schemas into the
+    # same registry. Import-anchored, so this is a no-op unless ``patito`` is
+    # imported. Lazy import avoids a module-load cycle (patito_schema imports
+    # the ``Schema`` / ``SchemaRegistry`` IR from this module).
+    from polypolarism.patito_schema import collect_patito_schemas
+
+    collect_patito_schemas(tree, registry, resolved_source)
+
     return registry
 
 

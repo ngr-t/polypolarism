@@ -41,8 +41,13 @@ dev = [
 ]
 # Runtime differential harness (tests/test_runtime_differential.py): executes
 # the fixture corpus against real polars/pandera to cross-check static verdicts.
+# patito is present so the harness can import the Patito fixtures (ADR-0010);
+# their functions are naturally out of scope for the pandera-specific input
+# synthesis, so they are skipped rather than executed (a documented v1 gap —
+# runtime-differential synthesis for Patito models is a deferred follow-up).
 runtime = [
     "pandera[polars]>=0.31",
+    "patito>=0.8",
 ]
 
 [build-system]
