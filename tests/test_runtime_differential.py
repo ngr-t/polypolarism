@@ -57,6 +57,15 @@ from pandera.typing.polars import LazyFrame as PanderaLazyFrame  # noqa: E402
 from polars.datatypes import DataTypeClass  # noqa: E402
 from polars.exceptions import PanicException  # noqa: E402
 
+# Patito frontend (ADR-0010): present in the ``runtime`` dependency group so the
+# harness can synthesize/validate Patito fixtures against real patito. Guarded
+# so the pandera differential suite still runs if patito is somehow absent
+# (Patito frames then fall back to "out of scope", as before patito support).
+try:
+    import patito as _pt  # noqa: E402
+except ImportError:  # pragma: no cover
+    _pt = None  # type: ignore[assignment]
+
 pytestmark = pytest.mark.runtime
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
@@ -440,11 +449,13 @@ def _polars_dtype(column: Any) -> PolarsDType:
 
 
 def _synthesize_frame(
-    model: type[DataFrameModel],
+    model: Any,
     overrides: dict[str, pl.Series],
     omit_optional: bool,
     offset: int = 0,
 ) -> pl.DataFrame:
+    if _is_patito_model(model):
+        return _synthesize_patito_frame(model, offset)
     schema = _to_schema(model)
     columns = {
         name: column
@@ -468,8 +479,14 @@ def _synthesize_frame(
 # ---------------------------------------------------------------------------
 # Annotation introspection
 # ---------------------------------------------------------------------------
-def _frame_annotation(annotation: Any) -> tuple[type[DataFrameModel], bool] | None:
-    """Return (model, is_lazy) for DataFrame[Model] / LazyFrame[Model], else None."""
+def _frame_annotation(annotation: Any) -> tuple[Any, bool] | None:
+    """Return (model, is_lazy) for DataFrame[Model] / LazyFrame[Model], else None.
+
+    Recognizes both Pandera (``pandera.typing.polars.DataFrame[Model]``) and
+    Patito (``patito.DataFrame[Model]``) generic frame annotations; the model is
+    a Pandera ``DataFrameModel`` or a Patito ``Model`` subclass, and
+    ``_synthesize_frame`` / ``_validate_return`` dispatch on which.
+    """
     origin = typing.get_origin(annotation)
     args = typing.get_args(annotation)
     if not args or not inspect.isclass(origin):
@@ -478,7 +495,39 @@ def _frame_annotation(annotation: Any) -> tuple[type[DataFrameModel], bool] | No
         return args[0], False
     if issubclass(origin, PanderaLazyFrame):
         return args[0], True
+    if _pt is not None:
+        if issubclass(origin, _pt.LazyFrame):
+            return args[0], True
+        if issubclass(origin, _pt.DataFrame):
+            return args[0], False
     return None
+
+
+def _is_patito_model(model: Any) -> bool:
+    """True when ``model`` is a Patito ``Model`` subclass (ADR-0010)."""
+    return _pt is not None and inspect.isclass(model) and issubclass(model, _pt.Model)
+
+
+def _synthesize_patito_frame(model: Any, offset: int = 0) -> pl.DataFrame:
+    """Synthesize an input frame for a Patito model via ``Model.examples``.
+
+    patito generates a valid dummy row honoring the model's dtypes (including
+    nested-model structs and ``Field(dtype=...)`` overrides — probed). N_ROWS
+    rows are produced by varying the first integer column when present so the
+    body sees more than one row; otherwise a single example row is replicated.
+    The Patito fixtures do not join, so partial-key overlap is unneeded.
+    """
+    int_col = next(
+        (name for name, dtype in model.dtypes.items() if dtype.is_integer()),
+        None,
+    )
+    if int_col is not None:
+        example = model.examples({int_col: [offset + i for i in range(N_ROWS)]})
+    else:
+        example = pl.concat([model.examples()] * N_ROWS)
+    # ``examples`` returns a model-bound patito DataFrame subclass; hand the
+    # plain polars frame to the function under test.
+    return pl.DataFrame(example)
 
 
 def _to_schema(model: type[DataFrameModel]) -> DataFrameSchema:
@@ -537,11 +586,16 @@ def _structural_validate(schema: DataFrameSchema, result: pl.DataFrame) -> None:
             raise AssertionError(f"non-nullable column {name!r} contains nulls")
 
 
-def _validate_return(model: type[DataFrameModel], result: Any) -> None:
+def _validate_return(model: Any, result: Any) -> None:
     if isinstance(result, pl.LazyFrame):
         result = result.collect()
     if not isinstance(result, pl.DataFrame):
         raise AssertionError(f"expected a frame result, got {type(result)!r}")
+    if _is_patito_model(model):
+        # patito is the runtime authority for its own models (raises
+        # DataFrameValidationError on a mismatch — probed).
+        model.validate(result)
+        return
     schema = _to_schema(model)
     if _pandera_can_validate(schema):
         with warnings.catch_warnings():
