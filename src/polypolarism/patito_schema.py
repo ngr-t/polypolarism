@@ -194,11 +194,13 @@ def _resolve_nested_structs(
     """Second pass: replace nested-model placeholders with ``Struct`` of the
     referenced model's columns.
 
-    The struct is ``open`` so the checker compares fields via the subtype
-    verdict (which honours ``DataTypeGroup`` members) rather than exact dict
-    equality — a non-canonical width inside a nested struct must not be
-    falsely rejected (ADR-0009). A reference whose model is unknown keeps its
-    open-``Struct`` placeholder.
+    The struct is CLOSED (#118): a nested Patito model has an exact field set,
+    so accessing a field it does not declare (``.struct.field("nope")``) is a
+    provable miss. Group acceptance inside the struct still works because the
+    checker compares closed-struct fields field-by-field via the subtype
+    verdict (which honours ``DataTypeGroup`` members), not by exact dict
+    equality. A reference whose model is unknown keeps its open-``Struct``
+    placeholder (fields genuinely unknown).
     """
     for schema_name, refs in nested_refs.items():
         schema = registry.schemas.get(schema_name)
@@ -210,7 +212,7 @@ def _resolve_nested_structs(
                 continue
             struct = Struct(
                 fields={cn: cs.dtype for cn, cs in target.columns.items()},
-                open=True,
+                open=False,
             )
             current = schema.columns.get(field_name)
             nullable = current is not None and isinstance(current.dtype, Nullable)

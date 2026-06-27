@@ -112,6 +112,9 @@ class TestNestedStruct:
         dtype = outer.columns["inner"].dtype
         assert isinstance(dtype, Struct)
         assert set(dtype.fields) == {"a", "b"}
+        # #118: a nested model is a CLOSED struct so a missing field access is
+        # a provable miss.
+        assert dtype.open is False
 
     def test_unknown_nested_model_keeps_open_struct(self):
         src = "import patito as pt\nclass Outer(pt.Model):\n    inner: Missing\n"

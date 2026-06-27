@@ -25,6 +25,7 @@ from polypolarism.types import (
     Int64,
     Nullable,
     RowVar,
+    Struct,
     UInt32,
     Unknown,
     Utf8,
@@ -3409,3 +3410,21 @@ class TestDataTypeGroupVerdict:
         assert _subtype_verdict(UInt32(), Nullable(_int_group())).ok
         assert not _subtype_verdict(Nullable(UInt32()), _int_group()).ok
         assert _subtype_verdict(Nullable(UInt32()), Nullable(_int_group())).ok
+
+    def test_group_inferred_against_nullable_group_declared(self):
+        # #117: a passed-through Patito column keeps its group; a non-null
+        # ``int`` group must satisfy a declared ``Optional[int]`` (nullable
+        # group). The reverse direction stays rejected.
+        assert _subtype_verdict(_int_group(), Nullable(_int_group())).ok
+        assert _subtype_verdict(_int_group(), _int_group()).ok
+        assert not _subtype_verdict(Nullable(_int_group()), _int_group()).ok
+
+    def test_closed_struct_with_group_field_accepts_concrete(self):
+        # #118: nested-model structs are CLOSED, but the field comparison uses
+        # the subtype verdict so a concrete width satisfies a group field.
+        declared = Struct({"x": _int_group(), "name": Utf8()})
+        ok_inferred = Struct({"x": UInt32(), "name": Utf8()})
+        assert _subtype_verdict(ok_inferred, declared).ok
+        # A wrong field dtype still fails, and a differing field SET fails.
+        assert not _subtype_verdict(Struct({"x": Utf8(), "name": Utf8()}), declared).ok
+        assert not _subtype_verdict(Struct({"x": UInt32()}), declared).ok

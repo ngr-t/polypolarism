@@ -219,6 +219,13 @@ def _subtype_verdict(inferred: DataType, declared: DataType) -> Verdict:
     # only appears on the declared side; an identical group on both sides is
     # already handled by the exact-match rule.
     if isinstance(declared_base, DataTypeGroup):
+        if isinstance(inferred_base, DataTypeGroup):
+            # Group vs group (#117): a passed-through Patito column keeps its
+            # acceptance group, so e.g. a non-null ``int`` column (group)
+            # against a declared ``Optional[int]`` (Nullable group) must pass.
+            # Accept when the inferred members are a subset of the declared
+            # ones; the Nullable direction is already enforced above.
+            return Verdict(inferred_base.members <= declared_base.members)
         for member in declared_base.members:
             verdict = _subtype_verdict(inferred_base, member)
             if verdict.ok:
@@ -246,7 +253,20 @@ def _subtype_verdict(inferred: DataType, declared: DataType) -> Verdict:
     # dtypes are exact, so a definite extra field cannot match).
     if isinstance(inferred_base, Struct) and isinstance(declared_base, Struct):
         if not inferred_base.open and not declared_base.open:
-            return Verdict(inferred_base.fields == declared_base.fields)
+            # Two closed structs: the field SETS must match exactly (struct
+            # dtypes are exact at runtime), but each field is compared with the
+            # full subtype verdict rather than raw ``==`` so a Patito
+            # acceptance group inside the struct (#118) and the usual
+            # non-null/Unknown leniencies apply at depth.
+            if set(inferred_base.fields) != set(declared_base.fields):
+                return Verdict(False)
+            struct_reason: str | None = None
+            for fname, declared_field in declared_base.fields.items():
+                field_verdict = _subtype_verdict(inferred_base.fields[fname], declared_field)
+                if not field_verdict.ok:
+                    return Verdict(False)
+                struct_reason = struct_reason or field_verdict.reason
+            return Verdict(True, struct_reason)
         for name, inferred_field in inferred_base.fields.items():
             declared_field = declared_base.fields.get(name)
             if declared_field is None:
