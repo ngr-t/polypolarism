@@ -91,8 +91,26 @@ def extract_dataframe_annotation(
 
     String forward-ref annotations (``"DataFrame[Schema]"``) are unwrapped
     first (C-13 gap 2) so quoted annotations resolve like the bare form.
+
+    Patito (ADR-0010) also spells frame annotations as the bare model-qualified
+    attribute ``Model.DataFrame`` / ``Model.LazyFrame`` (a per-model frame
+    class, no subscript). When the qualifier is a registered schema, that form
+    resolves to the model's FrameType too; ``pl.DataFrame`` (qualifier not a
+    schema) stays a bare-frame annotation handled elsewhere.
     """
     annotation = _unwrap_string_annotation(annotation)
+
+    # Bare model-qualified frame: ``Model.DataFrame`` / ``Model.LazyFrame``
+    # (no subscript). Only resolves when the qualifier names a registered
+    # schema — so ``pl.DataFrame`` / an unknown ``Foo.DataFrame`` fall through.
+    if isinstance(annotation, ast.Attribute) and annotation.attr in _HEAD_NAMES:
+        schema_name = _dotted_name(annotation.value)
+        if schema_name is not None and schema_name in registry:
+            return _resolve_schema_frame(
+                registry, schema_name, annotation.attr == "LazyFrame", with_field_spans
+            )
+        return None
+
     if not isinstance(annotation, ast.Subscript):
         return None
 
@@ -104,11 +122,25 @@ def extract_dataframe_annotation(
     if schema_name is None:
         return None
 
-    # ``with_field_spans`` carries the declared-field ``column_spans`` for the
-    # SECONDARY ("declared here") mismatch location — used ONLY for the
-    # function declared-RETURN binding (issue #110). Parameter / local /
-    # validate bindings stay span-free so an input schema's field spans never
-    # masquerade as a body-producing PRIMARY span on a pass-through column.
+    return _resolve_schema_frame(
+        registry, schema_name, head_name == "LazyFrame", with_field_spans
+    )
+
+
+def _resolve_schema_frame(
+    registry: SchemaRegistry,
+    schema_name: str,
+    is_lazy: bool,
+    with_field_spans: bool,
+) -> FrameType | None:
+    """Build the FrameType for ``schema_name`` with ``is_lazy`` stamped on a copy.
+
+    ``with_field_spans`` carries the declared-field ``column_spans`` for the
+    SECONDARY ("declared here") mismatch location — used ONLY for the function
+    declared-RETURN binding (issue #110). Parameter / local / validate bindings
+    stay span-free so an input schema's field spans never masquerade as a
+    body-producing PRIMARY span on a pass-through column.
+    """
     base = (
         registry.declared_return_frame(schema_name)
         if with_field_spans
@@ -121,7 +153,7 @@ def extract_dataframe_annotation(
         columns=base.columns,
         strict=base.strict,
         rest=base.rest,
-        is_lazy=(head_name == "LazyFrame"),
+        is_lazy=is_lazy,
         coerce=base.coerce,
         nonstrict_schema=base.nonstrict_schema,
         schema_name=base.schema_name,

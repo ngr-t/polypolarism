@@ -66,6 +66,33 @@ class TestSimpleAnnotations:
         assert "id" in ft.columns
 
 
+class TestModelAttributeAnnotation:
+    """Patito's bare ``Model.DataFrame`` / ``Model.LazyFrame`` form (ADR-0010 #2)."""
+
+    def test_model_dataframe_attribute_resolves(self):
+        registry = _registry_with_schema()
+        ft = extract_dataframe_annotation(_annotation_node("MySchema.DataFrame"), registry)
+        assert ft is not None
+        assert "id" in ft.columns
+        assert ft.is_lazy is False
+
+    def test_model_lazyframe_attribute_resolves(self):
+        registry = _registry_with_schema()
+        ft = extract_dataframe_annotation(_annotation_node("MySchema.LazyFrame"), registry)
+        assert ft is not None
+        assert ft.is_lazy is True
+
+    def test_pl_dataframe_attribute_is_not_a_schema_frame(self):
+        # ``pl.DataFrame`` (qualifier not a registered schema) must NOT resolve
+        # here — it is a bare-frame annotation handled elsewhere.
+        registry = _registry_with_schema()
+        assert extract_dataframe_annotation(_annotation_node("pl.DataFrame"), registry) is None
+
+    def test_unknown_model_attribute_does_not_resolve(self):
+        registry = _registry_with_schema()
+        assert extract_dataframe_annotation(_annotation_node("Unknown.DataFrame"), registry) is None
+
+
 class TestForwardReferences:
     def test_string_forward_ref(self):
         registry = _registry_with_schema()
