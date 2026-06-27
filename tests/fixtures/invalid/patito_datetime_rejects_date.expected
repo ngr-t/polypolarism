@@ -1,0 +1,2 @@
+to_date: FAIL
+  error: [pple-return-type] Column 'ts' has type Date, but declared type is datetime

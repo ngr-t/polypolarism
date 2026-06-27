@@ -37,6 +37,8 @@ from polypolarism.types import (
     ColumnSpec,
     DataType,
     DataTypeGroup,
+    Datetime,
+    Duration,
     Enum,
     Float64,
     Int64,
@@ -60,6 +62,22 @@ def float_group() -> DataTypeGroup:
     return DataTypeGroup(
         frozenset(cls() for cls in FLOAT_DTYPES), label="float", canonical=Float64()
     )
+
+
+def datetime_group() -> DataTypeGroup:
+    """Patito ``datetime.datetime`` — any Datetime (any time unit / time zone)
+    satisfies the slot (#119, probed). The single canonical member acts as a
+    Datetime type-class wildcard in the checker's group membership; a ``Date``
+    column is still rejected. Canonical ``Datetime()`` (us) for inference math.
+    """
+    return DataTypeGroup(frozenset({Datetime()}), label="datetime", canonical=Datetime())
+
+
+def duration_group() -> DataTypeGroup:
+    """Patito ``datetime.timedelta`` — any Duration (any time unit) satisfies
+    the slot (#119, probed). Canonical ``Duration()`` (us) for inference math.
+    """
+    return DataTypeGroup(frozenset({Duration()}), label="timedelta", canonical=Duration())
 
 
 def parse_patito_field(
@@ -104,6 +122,20 @@ def _strip_optional(node: ast.expr) -> tuple[ast.expr, bool]:
 
 def _patito_dtype(node: ast.expr, model_names: frozenset[str]) -> tuple[DataType, str | None]:
     """Map a (already Optional-stripped) annotation to ``(dtype, nested_model)``."""
+    # Stdlib temporal types that carry a unit map to acceptance groups (#119):
+    # ``datetime.datetime`` accepts any Datetime (unit/tz), ``timedelta`` any
+    # Duration. Matched on the trailing name so the bare (``datetime`` /
+    # ``timedelta``) and qualified (``dt.datetime`` / ``datetime.timedelta``)
+    # forms both resolve. ``date`` / ``time`` carry no unit and stay exact
+    # (handled by the leaf parser below); ``pl.Datetime`` is capitalised, so
+    # this lowercase match never claims it. A ``Field(dtype=pl.Datetime("ms"))``
+    # override is exact and handled before this function runs.
+    tail = _tail_name(node)
+    if tail == "datetime":
+        return datetime_group(), None
+    if tail == "timedelta":
+        return duration_group(), None
+
     # Bare builtin names with Patito-specific group semantics.
     if isinstance(node, ast.Name):
         if node.id == "int":

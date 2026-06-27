@@ -14,6 +14,8 @@ from polypolarism.types import (
     Array,
     DataType,
     DataTypeGroup,
+    Datetime,
+    Duration,
     Enum,
     FrameType,
     List,
@@ -227,6 +229,15 @@ def _subtype_verdict(inferred: DataType, declared: DataType) -> Verdict:
             # ones; the Nullable direction is already enforced above.
             return Verdict(inferred_base.members <= declared_base.members)
         for member in declared_base.members:
+            # Temporal acceptance groups (Patito ``datetime.datetime`` /
+            # ``timedelta``, #119) accept ANY unit/timezone of the same temporal
+            # class — the single canonical member is a Datetime/Duration
+            # type-class wildcard. A ``Date`` is not a ``Datetime`` here, so it
+            # still fails.
+            if isinstance(member, Datetime) and isinstance(inferred_base, Datetime):
+                return Verdict(True)
+            if isinstance(member, Duration) and isinstance(inferred_base, Duration):
+                return Verdict(True)
             verdict = _subtype_verdict(inferred_base, member)
             if verdict.ok:
                 return verdict

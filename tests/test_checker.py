@@ -17,6 +17,7 @@ from polypolarism.types import (
     INTEGER_DTYPES,
     Array,
     DataTypeGroup,
+    Date,
     Datetime,
     Duration,
     Enum,
@@ -3377,6 +3378,14 @@ def _literal_group() -> DataTypeGroup:
     return DataTypeGroup(frozenset({Utf8(), Enum(("a", "b"))}), label="Literal")
 
 
+def _datetime_group() -> DataTypeGroup:
+    return DataTypeGroup(frozenset({Datetime()}), label="datetime", canonical=Datetime())
+
+
+def _duration_group() -> DataTypeGroup:
+    return DataTypeGroup(frozenset({Duration()}), label="timedelta", canonical=Duration())
+
+
 class TestDataTypeGroupVerdict:
     """Patito acceptance groups (ADR-0010): any member satisfies the slot."""
 
@@ -3418,6 +3427,21 @@ class TestDataTypeGroupVerdict:
         assert _subtype_verdict(_int_group(), Nullable(_int_group())).ok
         assert _subtype_verdict(_int_group(), _int_group()).ok
         assert not _subtype_verdict(Nullable(_int_group()), _int_group()).ok
+
+    def test_datetime_group_accepts_any_unit_and_tz(self):
+        # #119: a datetime group accepts any Datetime unit/timezone.
+        assert _subtype_verdict(Datetime(unit="ns"), _datetime_group()).ok
+        assert _subtype_verdict(Datetime(unit="ms"), _datetime_group()).ok
+        assert _subtype_verdict(Datetime(unit="ns", tz="UTC"), _datetime_group()).ok
+
+    def test_datetime_group_rejects_date(self):
+        # A Date is not a Datetime — still rejected.
+        assert not _subtype_verdict(Date(), _datetime_group()).ok
+
+    def test_duration_group_accepts_any_unit(self):
+        assert _subtype_verdict(Duration(unit="ms"), _duration_group()).ok
+        assert _subtype_verdict(Duration(unit="ns"), _duration_group()).ok
+        assert not _subtype_verdict(Datetime(), _duration_group()).ok
 
     def test_closed_struct_with_group_field_accepts_concrete(self):
         # #118: nested-model structs are CLOSED, but the field comparison uses

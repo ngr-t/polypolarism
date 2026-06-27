@@ -10,6 +10,8 @@ from polypolarism.types import (
     Boolean,
     DataTypeGroup,
     Date,
+    Datetime,
+    Duration,
     Enum,
     Float64,
     Int64,
@@ -53,6 +55,24 @@ class TestScalarMappings:
 
     def test_stdlib_temporal(self):
         assert _parse("datetime.date")[0].dtype == Date()
+
+    def test_datetime_is_acceptance_group(self):
+        # #119: datetime.datetime accepts any unit/tz -> a group, not exact.
+        for src in ("datetime", "datetime.datetime", "dt.datetime"):
+            dtype = _parse(src)[0].dtype
+            assert isinstance(dtype, DataTypeGroup), src
+            assert dtype.representative() == Datetime()
+
+    def test_timedelta_is_acceptance_group(self):
+        for src in ("timedelta", "datetime.timedelta", "dt.timedelta"):
+            dtype = _parse(src)[0].dtype
+            assert isinstance(dtype, DataTypeGroup), src
+            assert dtype.representative() == Duration()
+
+    def test_date_and_time_stay_exact(self):
+        # date/time carry no unit, so they remain exact (not groups).
+        assert _parse("datetime.date")[0].dtype == Date()
+        assert not isinstance(_parse("datetime.time")[0].dtype, DataTypeGroup)
 
 
 class TestNullability:
