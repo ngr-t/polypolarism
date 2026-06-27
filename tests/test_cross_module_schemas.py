@@ -61,6 +61,56 @@ class TestSiblingFileImport:
         assert results[0].function_name == "take_users"
         assert results[0].passed, results[0].errors
 
+    def test_resolves_patito_subclass_of_imported_model(self, tmp_path: Path):
+        # ADR-0010 #3: a Patito model whose base is imported from a sibling
+        # file resolves with Patito semantics (the importing file need not
+        # import patito itself), and the inherited nullable field keeps its
+        # value-nullable meaning rather than being mis-parsed as Pandera.
+        _project_marker(tmp_path)
+        _write(
+            tmp_path / "base.py",
+            """
+            import patito as pt
+
+
+            class WithId(pt.Model):
+                id: int
+                note: str | None
+            """,
+        )
+        _write(
+            tmp_path / "app.py",
+            """
+            import patito as pt
+            import polars as pl
+            from base import WithId
+
+
+            class Users(WithId):
+                name: str
+
+
+            def keep(df: pt.DataFrame[Users]) -> pt.DataFrame[Users]:
+                return df.select("id", "note", "name")
+            """,
+        )
+        registry = collect_schemas_with_imports(
+            ast.parse((tmp_path / "app.py").read_text()), tmp_path / "app.py"
+        )
+        users = registry.get("Users")
+        assert users is not None
+        assert users.dialect == "patito"
+        assert users.strict is True
+        assert set(users.columns) == {"id", "note", "name"}
+        # Inherited nullable field keeps patito (value-nullable) semantics.
+        assert users.columns["note"].dtype.__class__.__name__ == "Nullable"
+        assert users.columns["note"].required is True
+
+        results = check_file(tmp_path / "app.py")
+        assert len(results) == 1, [r.errors for r in results]
+        assert results[0].function_name == "keep"
+        assert results[0].passed, results[0].errors
+
     def test_string_check_source_without_path_warns_on_unresolved(self):
         # When no file_path is provided (and no in-source schema), the
         # function should still surface so the user knows nothing was

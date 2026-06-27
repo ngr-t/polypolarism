@@ -27,7 +27,11 @@ from polypolarism.pandera_schema import (
     Schema,
     SchemaRegistry,
     _annotation_span,
+    _collect_name_aliases,
+    _dotted_base_name,
     _import_statements,
+    _resolve_name,
+    _resolve_source_file,
     _topo_sort,
 )
 from polypolarism.patito_dtype import parse_patito_field
@@ -102,6 +106,84 @@ def collect_patito_schemas(
     _resolve_nested_structs(registry, nested_refs)
 
 
+def collect_patito_inherited_subclasses(
+    main_tree: ast.Module,
+    imported_trees: list[tuple[ast.Module, object]],
+    registry: SchemaRegistry,
+    main_source_file: object | None = None,
+) -> None:
+    """Cross-file Patito inheritance (ADR-0010 follow-up #3).
+
+    A class whose base is an imported Patito model
+    (``from base import WithId`` + ``class Users(WithId)``) is invisible to the
+    per-file pass — ``base`` is unknown until imports are merged, and the
+    importing file may not import ``patito`` itself. After the merge, re-scan
+    every parsed tree against the registry and parse the classes whose base is
+    now a registered Patito schema, to a fixpoint (so in-file chains rooted at
+    an imported base resolve too). Mirrors the Pandera
+    ``_collect_inherited_subclasses`` pass but routes through the Patito parser
+    so the dialect's field semantics are preserved.
+    """
+    main_source = _resolve_source_file(main_source_file)  # type: ignore[arg-type]
+    changed = True
+    while changed:
+        changed = False
+        changed |= _scan_patito_subclasses(
+            main_tree, registry, _collect_name_aliases(main_tree), main_source
+        )
+        for sub_tree, sub_path in imported_trees:
+            changed |= _scan_patito_subclasses(
+                sub_tree,
+                registry,
+                _collect_name_aliases(sub_tree),
+                _resolve_source_file(sub_path),  # type: ignore[arg-type]
+            )
+
+
+def _scan_patito_subclasses(
+    tree: ast.Module,
+    registry: SchemaRegistry,
+    aliases: dict[str, str],
+    source_file: str | None,
+) -> bool:
+    """Parse not-yet-registered classes whose base is a registered Patito schema."""
+    patito_names = frozenset(
+        name for name, schema in registry.schemas.items() if schema.dialect == "patito"
+    )
+    changed = False
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef) or node.name in registry.schemas:
+            continue
+        if not _base_is_patito_schema(node, registry, aliases):
+            continue
+        schema, refs = _parse_patito_schema(node, registry, patito_names, source_file)
+        registry.schemas[node.name] = schema
+        if refs:
+            _resolve_nested_structs(registry, {node.name: refs})
+        changed = True
+    return changed
+
+
+def _base_is_patito_schema(
+    node: ast.ClassDef,
+    registry: SchemaRegistry,
+    aliases: dict[str, str],
+) -> bool:
+    """True when any base of ``node`` resolves to a registered Patito schema."""
+    for base in node.bases:
+        name: str | None = None
+        if isinstance(base, ast.Name):
+            resolved = _resolve_name(base.id, aliases)
+            name = resolved if resolved in registry.schemas else base.id
+        elif isinstance(base, ast.Attribute):
+            name = _dotted_base_name(base)
+        if name is not None:
+            schema = registry.schemas.get(name)
+            if schema is not None and schema.dialect == "patito":
+                return True
+    return False
+
+
 def _is_patito_base(
     base: ast.expr,
     module_aliases: frozenset[str],
@@ -150,6 +232,7 @@ def _parse_patito_schema(
     schema = Schema(
         name=node.name,
         strict=True,
+        dialect="patito",
         source_file=source_file,
         header_line=node.lineno,
     )

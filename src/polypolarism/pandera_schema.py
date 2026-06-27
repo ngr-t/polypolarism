@@ -42,6 +42,11 @@ class Schema:
     # lookups are pple-column-not-found proofs).
     filters_extras: bool = False
     coerce: bool = False
+    # Which frontend produced this schema: ``"pandera"`` (default) or
+    # ``"patito"`` (ADR-0010). Used to route a cross-file subclass through the
+    # right field parser and to keep the Pandera inheritance pass from
+    # mis-claiming a Patito subclass (single-dialect assumption).
+    dialect: str = "pandera"
     bases: list[str] = field(default_factory=list)
     # Field annotations that provably crash pandera at runtime (issue #69):
     # field name -> detail from ``annotated_arity_error``. Inherited from
@@ -297,6 +302,13 @@ def collect_schemas_with_imports(tree: ast.Module, file_path: Path) -> SchemaReg
     _merge_imports(tree, file_path, registry, visited, imported_trees)
     _merge_module_imports(tree, file_path, registry)
     aliases = _collect_name_aliases(tree)
+    # Patito cross-file inheritance (ADR-0010 #3) runs FIRST so a subclass of an
+    # imported Patito model is parsed with Patito semantics and dialect-tagged;
+    # the Pandera pass below then skips those (it would otherwise mis-claim
+    # them, since the base is just "a registered schema" to it).
+    from polypolarism.patito_schema import collect_patito_inherited_subclasses
+
+    collect_patito_inherited_subclasses(tree, imported_trees, registry, main_source_file=file_path)
     _collect_inherited_subclasses(
         tree, imported_trees, registry, own_names, aliases, main_source_file=file_path
     )
@@ -1302,6 +1314,12 @@ def _collect_inherited_subclasses(
         changed = False
         for node in main_tree.body:
             if not isinstance(node, ast.ClassDef) or node.name in own_names:
+                continue
+            # A Patito subclass was already parsed (with Patito semantics) by
+            # the Patito inheritance pass — never re-parse it as Pandera
+            # (single-dialect; ADR-0010 #3).
+            existing = registry.schemas.get(node.name)
+            if existing is not None and existing.dialect == "patito":
                 continue
             if not _bases_resolve(node, registry, _aliases):
                 continue
