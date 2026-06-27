@@ -278,12 +278,29 @@ and not just the checker.
   produce the expected `pple-return-type` / `pple-column-not-found`.
 - `uv run pytest` green (3941 passed), `ruff` + `pyright` clean.
 
-### Deferred (follow-ups)
+### Follow-ups (all resolved)
 
-- Runtime-differential coverage for Patito (the harness's input synthesis is
-  Pandera-specific; Patito functions are naturally out of scope today).
-- The `Model.DataFrame` / `Model.LazyFrame` bare-attribute annotation forms.
-- Cross-file Patito inheritance where the base is imported (the inherited-
-  subclass fixpoint pass is Pandera-base-aware).
-- The probes listed above (superfluous-column config, Python-default columns,
-  `Field(nullable=...)`).
+The deferred items below were completed after the initial landing:
+
+- **Runtime-differential coverage for Patito** — done. The harness recognizes
+  `pt.DataFrame[Model]`, synthesizes inputs via `Model.examples` (nested-model
+  structs and `Field(dtype=)` included), and validates returns via
+  `Model.validate`; 8 Patito fixture functions now cross-check static vs real
+  patito runtime.
+- **`Model.DataFrame` / `Model.LazyFrame` bare-attribute annotations** — done.
+  `extract_dataframe_annotation` resolves the attribute form when the qualifier
+  is a registered schema.
+- **Cross-file Patito inheritance** — done. A new Patito inheritance pass runs
+  before the Pandera one and tags subclasses `dialect="patito"`; `Schema`
+  gained a `dialect` field so the Pandera pass no longer mis-claims a Patito
+  subclass (single-dialect).
+- **Remaining probes** — done (patito 0.8.6):
+  - Superfluous columns: there is no model-level "open" config; strictness is a
+    per-`validate`-call kwarg. `allow_superfluous_columns=True` passes extras
+    through, so that narrowing now binds an OPEN frame (avoids a false
+    `pple-column-not-found`); `drop_superfluous_columns` / the default stay
+    closed. The model binding (`pt.DataFrame[Model]`) is always strict.
+  - A Python default value (`b: int = 5`) does NOT make a column absent-allowed
+    at validate time — columns stay required (current behavior already correct).
+  - `pt.Field(nullable=...)` is rejected by patito (`Optional[T]` is the only
+    nullability path) — no modeling needed.

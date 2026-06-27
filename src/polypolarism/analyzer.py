@@ -5690,6 +5690,10 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         if isinstance(arg, ast.Name) and arg.id in self.var_types:
             # Preserve laziness from the variable being narrowed.
             schema_ft.is_lazy = self.var_types[arg.id].is_lazy
+            # Patito ``allow_superfluous_columns=True`` keeps the input's
+            # extras, so the narrowed frame stays open (ADR-0010 #4).
+            if self._validate_opens_extras(call, schema_node.id):
+                schema_ft.rest = RowVar(schema_node.id)
             self.var_types[arg.id] = schema_ft
             self.var_alt_types.pop(arg.id, None)
 
@@ -6452,6 +6456,27 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                         f"SchemaError on every call"
                     )
 
+    def _validate_opens_extras(self, call: ast.Call, schema_name: str) -> bool:
+        """True for ``PatitoModel.validate(df, allow_superfluous_columns=True)``.
+
+        Patito models are strict by default, but that validate kwarg passes the
+        input's extra columns THROUGH (probed, ADR-0010 #4), so the
+        narrowed/result frame must be OPEN — otherwise a later access of a
+        passed-through extra would be a false ``pple-column-not-found``
+        (ADR-0009). ``drop_superfluous_columns`` removes them, so the closed
+        default is already correct there. Scoped to Patito schemas (the kwarg
+        is patito.validate's; Pandera has no such argument).
+        """
+        schema = self.schema_registry.get(schema_name)
+        if schema is None or schema.dialect != "patito":
+            return False
+        return any(
+            kw.arg == "allow_superfluous_columns"
+            and isinstance(kw.value, ast.Constant)
+            and kw.value.value is True
+            for kw in call.keywords
+        )
+
     def _infer_validate_call(self, node: ast.Call) -> FrameType | None:
         """Resolve ``Schema.validate(df_or_lf)`` to the schema's FrameType.
 
@@ -6468,6 +6493,8 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         ft = self.schema_registry.validate_result_frame(schema_node.id)
         if ft is not None:
             self._note_schema_use(schema_node.id)
+            if self._validate_opens_extras(node, schema_node.id):
+                ft.rest = RowVar(schema_node.id)
         if ft is None or not node.args:
             return ft
         # The validation retypes the result to the schema — exactly the

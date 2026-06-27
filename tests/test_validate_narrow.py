@@ -173,3 +173,45 @@ class TestNoNarrowingAcrossInvalidPattern:
         results = check_source(src)
         # Expect a failure: 'value' is unknown because narrowing was nested.
         assert any(not r.passed for r in results)
+
+
+PATITO_SCHEMAS = """
+import polars as pl
+import patito as pt
+
+
+class S(pt.Model):
+    a: int
+"""
+
+
+def _check_patito(body: str) -> list:
+    src = textwrap.dedent(PATITO_SCHEMAS) + textwrap.dedent(body)
+    return check_source(src)
+
+
+class TestPatitoValidateSuperfluous:
+    """Patito Model.validate(df, allow_superfluous_columns=...) (ADR-0010 #4)."""
+
+    def test_allow_superfluous_opens_frame(self):
+        # The kwarg passes extras through, so accessing one is not a miss.
+        results = _check_patito(
+            """
+            def f(df: pl.DataFrame) -> pl.DataFrame:
+                S.validate(df, allow_superfluous_columns=True)
+                return df.select("a", "extra")
+            """
+        )
+        assert all(r.passed for r in results), [r.errors for r in results]
+
+    def test_default_validate_stays_strict(self):
+        # Without the kwarg the narrowed frame is closed: 'extra' is a miss.
+        results = _check_patito(
+            """
+            def f(df: pl.DataFrame) -> pl.DataFrame:
+                S.validate(df)
+                return df.select("a", "extra")
+            """
+        )
+        assert any(not r.passed for r in results)
+        assert any("pple-column-not-found" in e for r in results for e in r.errors)
