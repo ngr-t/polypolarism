@@ -19,6 +19,7 @@ from polypolarism.types import (
     Boolean,
     Categorical,
     DataType,
+    DataTypeGroup,
     Date,
     Datetime,
     Decimal,
@@ -63,6 +64,21 @@ class TestInferCol:
         frame = FrameType(columns={"x": Int64(), "y": Utf8()})
         result = infer_col("y", frame)
         assert result == Utf8()
+
+    def test_col_collapses_acceptance_group_to_canonical(self) -> None:
+        # #120: a column reference feeding expression inference collapses a
+        # Patito acceptance group to its canonical dtype, so every downstream
+        # dtype predicate sees a concrete dtype (not the group).
+        intg = DataTypeGroup(frozenset({Int64(), Int32()}), label="integer", canonical=Int64())
+        dtg = DataTypeGroup(frozenset({Datetime()}), label="datetime", canonical=Datetime())
+        frame = FrameType(columns={"i": intg, "ts": dtg})
+        assert infer_col("i", frame) == Int64()
+        assert infer_col("ts", frame) == Datetime()
+
+    def test_col_collapses_group_under_nullable(self) -> None:
+        intg = DataTypeGroup(frozenset({Int64()}), label="integer", canonical=Int64())
+        frame = FrameType(columns={"i": Nullable(intg)})
+        assert infer_col("i", frame) == Nullable(Int64())
 
     def test_col_raises_error_for_nonexistent_column(self) -> None:
         """pl.col("z") should raise error when z doesn't exist."""

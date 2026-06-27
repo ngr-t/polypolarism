@@ -168,7 +168,17 @@ def infer_col(column_name: str, frame: FrameType) -> DataType:
             f"Column '{column_name}' not found{frame.origin_note()}. Available columns: {available}",
             column=column_name,
         )
-    return dtype
+    # A Patito acceptance group (ADR-0010) collapses to its canonical dtype the
+    # moment a column REFERENCE feeds expression inference (#120): this is the
+    # single point through which ``pl.col(...)`` dtypes flow, so every
+    # downstream dtype predicate (``.dt`` accessor, temporal/numeric
+    # arithmetic, aggregations, casts) sees a concrete dtype rather than the
+    # group — fixing the whole class of "group not recognized by predicate X"
+    # regressions at the source instead of per-predicate. Pure column
+    # pass-through (``df.select("a")``) copies the ColumnSpec without going
+    # through here, so the declared-side group survives for the checker's
+    # group-vs-group comparison.
+    return collapse_groups(dtype)
 
 
 def infer_lit(value: Any) -> DataType:
