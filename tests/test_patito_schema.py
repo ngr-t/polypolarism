@@ -70,24 +70,32 @@ class TestDetection:
 class TestSchemaShape:
     def test_models_bind_strict(self):
         reg = _registry("import patito as pt\nclass S(pt.Model):\n    a: int\n")
-        assert reg.get("S").strict is True
+        schema = reg.get("S")
+        assert schema is not None
+        assert schema.strict is True
 
     def test_field_dtype_override(self):
         src = (
             "import patito as pt\nimport polars as pl\n"
             "class S(pt.Model):\n    rank: int = pt.Field(dtype=pl.UInt16)\n"
         )
-        assert _registry(src).get("S").columns["rank"].dtype == UInt16()
+        schema = _registry(src).get("S")
+        assert schema is not None
+        assert schema.columns["rank"].dtype == UInt16()
 
     def test_optional_is_nullable_and_required(self):
         src = "import patito as pt\nclass S(pt.Model):\n    note: str | None\n"
-        spec = _registry(src).get("S").columns["note"]
+        schema = _registry(src).get("S")
+        assert schema is not None
+        spec = schema.columns["note"]
         assert spec.dtype == Nullable(Utf8())
         assert spec.required is True
 
     def test_int_field_is_acceptance_group(self):
         reg = _registry("import patito as pt\nclass S(pt.Model):\n    a: int\n")
-        assert isinstance(reg.get("S").columns["a"].dtype, DataTypeGroup)
+        schema = reg.get("S")
+        assert schema is not None
+        assert isinstance(schema.columns["a"].dtype, DataTypeGroup)
 
 
 class TestInheritance:
@@ -98,6 +106,7 @@ class TestInheritance:
             "class Child(Base):\n    name: str\n"
         )
         child = _registry(src).get("Child")
+        assert child is not None
         assert set(child.columns) == {"id", "name"}
 
 
@@ -109,6 +118,7 @@ class TestNestedStruct:
             "class Outer(pt.Model):\n    id: int\n    inner: Inner\n"
         )
         outer = _registry(src).get("Outer")
+        assert outer is not None
         dtype = outer.columns["inner"].dtype
         assert isinstance(dtype, Struct)
         assert set(dtype.fields) == {"a", "b"}
@@ -118,7 +128,9 @@ class TestNestedStruct:
 
     def test_unknown_nested_model_keeps_open_struct(self):
         src = "import patito as pt\nclass Outer(pt.Model):\n    inner: Missing\n"
-        dtype = _registry(src).get("Outer").columns["inner"].dtype
+        outer = _registry(src).get("Outer")
+        assert outer is not None
+        dtype = outer.columns["inner"].dtype
         # ``Missing`` is not a patito model name, so it is not a nested ref —
         # it degrades through the leaf parser to Unknown, not a struct.
         assert not isinstance(dtype, Struct)

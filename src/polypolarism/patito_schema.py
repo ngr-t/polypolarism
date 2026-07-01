@@ -21,6 +21,7 @@ the same name (should one somehow coexist) wins.
 from __future__ import annotations
 
 import ast
+from pathlib import Path
 
 from polypolarism.compat.patito_api import PATITO_MODEL_BASE, PATITO_PACKAGE
 from polypolarism.pandera_schema import (
@@ -108,9 +109,9 @@ def collect_patito_schemas(
 
 def collect_patito_inherited_subclasses(
     main_tree: ast.Module,
-    imported_trees: list[tuple[ast.Module, object]],
+    imported_trees: list[tuple[ast.Module, Path]],
     registry: SchemaRegistry,
-    main_source_file: object | None = None,
+    main_source_file: Path | None = None,
 ) -> None:
     """Cross-file Patito inheritance (ADR-0010 follow-up #3).
 
@@ -124,7 +125,7 @@ def collect_patito_inherited_subclasses(
     ``_collect_inherited_subclasses`` pass but routes through the Patito parser
     so the dialect's field semantics are preserved.
     """
-    main_source = _resolve_source_file(main_source_file)  # type: ignore[arg-type]
+    main_source = _resolve_source_file(main_source_file)
     changed = True
     while changed:
         changed = False
@@ -136,7 +137,7 @@ def collect_patito_inherited_subclasses(
                 sub_tree,
                 registry,
                 _collect_name_aliases(sub_tree),
-                _resolve_source_file(sub_path),  # type: ignore[arg-type]
+                _resolve_source_file(sub_path),
             )
 
 

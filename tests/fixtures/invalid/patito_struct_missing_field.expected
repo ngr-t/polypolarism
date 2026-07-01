@@ -1,4 +1,4 @@
 pick_missing: FAIL
-  error: [pple-column-not-found] struct.field: 'nope' not found in Struct{name: Utf8, x: integer}. Available fields: ['x', 'name']
+  error: [pple-column-not-found] struct.field: 'nope' not found in Struct{name: Utf8, x: Int64}. Available fields: ['x', 'name']
   warning: [pplw-unmodeled-method] `.struct.field()` is not modeled by polypolarism — the result dtype degrades to Unknown and downstream dtype checks weaken. Pin the dtype with `.cast(...)` after the call, or validate the frame against a schema, to keep checking precise.
   via: column 'x': passed via Unknown

@@ -122,9 +122,7 @@ def extract_dataframe_annotation(
     if schema_name is None:
         return None
 
-    return _resolve_schema_frame(
-        registry, schema_name, head_name == "LazyFrame", with_field_spans
-    )
+    return _resolve_schema_frame(registry, schema_name, head_name == "LazyFrame", with_field_spans)
 
 
 def _resolve_schema_frame(
