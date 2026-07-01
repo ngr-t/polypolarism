@@ -2071,6 +2071,64 @@ class TestM4Explode:
         assert results[0].has_errors is True
         assert any("missing" in e for e in results[0].errors)
 
+    def test_explode_empty_as_null_true_makes_nullable(self):
+        # polars 1.42: empty_as_null=True turns an empty sub-list into a null
+        # element, so List[Int64] explodes to a NULLABLE Int64 (#123).
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            from typing import Annotated
+
+            class In(pa.DataFrameModel):
+                vals: Annotated[pl.List, pl.Int64()]
+
+            def f(data: DataFrame[In]):
+                return data.explode("vals", empty_as_null=True)
+        """
+        )
+        results = analyze_source(source)
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["vals"].dtype == Nullable(Int64())
+
+    def test_explode_empty_as_null_false_stays_non_null(self):
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            from typing import Annotated
+
+            class In(pa.DataFrameModel):
+                vals: Annotated[pl.List, pl.Int64()]
+
+            def f(data: DataFrame[In]):
+                return data.explode("vals", empty_as_null=False)
+        """
+        )
+        results = analyze_source(source)
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["vals"].dtype == Int64()
+
+    def test_explode_default_stays_non_null(self):
+        # Bare explode() (no keyword) keeps the current non-null result — a
+        # deliberate value-inference choice for the transitional default (#123).
+        source = textwrap.dedent(
+            PANDERA_HEADER
+            + """
+            from typing import Annotated
+
+            class In(pa.DataFrameModel):
+                vals: Annotated[pl.List, pl.Int64()]
+
+            def f(data: DataFrame[In]):
+                return data.explode("vals")
+        """
+        )
+        results = analyze_source(source)
+        ft = results[0].inferred_return_type
+        assert ft is not None
+        assert ft.columns["vals"].dtype == Int64()
+
 
 class TestM4Concat:
     """`pl.concat([f1, f2], how=...)`."""

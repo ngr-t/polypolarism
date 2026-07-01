@@ -7975,6 +7975,17 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         if not targets:
             return input_frame
 
+        # ``explode(empty_as_null=True)`` (polars 1.42) turns an empty sub-list
+        # into a NULL element, so exploding ``List[T]`` yields a nullable ``T`` —
+        # the same null-injection tracked for ``shift``/``diff`` (#123). Read only
+        # an explicit literal; the bare default stays non-null (see #123).
+        empty_as_null = any(
+            kw.arg == "empty_as_null"
+            and isinstance(kw.value, ast.Constant)
+            and kw.value.value is True
+            for kw in node.keywords
+        )
+
         result_columns: dict[str, ColumnSpec] = dict(input_frame.columns)
         for col in targets:
             spec = result_columns.get(col)
@@ -7994,7 +8005,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 # An Unknown column might hold lists — exploding it yields
                 # elements of an unknown dtype, never an error.
                 unknown_elem: DataType = Unknown()
-                if outer_nullable:
+                if outer_nullable or empty_as_null:
                     unknown_elem = Nullable(unknown_elem)
                 result_columns[col] = ColumnSpec(dtype=unknown_elem, required=spec.required)
                 continue
@@ -8006,7 +8017,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 )
                 continue
             elem_dtype: DataType = inner.inner
-            if outer_nullable:
+            if outer_nullable or empty_as_null:
                 elem_dtype = Nullable(elem_dtype)
             result_columns[col] = ColumnSpec(dtype=elem_dtype, required=spec.required)
         return FrameType(

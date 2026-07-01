@@ -169,6 +169,15 @@ SKIP: dict[str, str] = {
         "bare pl.Struct = unknown fields statically but Struct([]) at runtime; "
         "check_types+coerce strips all fields"
     ),
+    # -- issue #123 (pple-return-type): explode(empty_as_null=True) is nullable
+    #    ONLY when a sub-list is empty. patito's Model.examples synthesizes a
+    #    NON-empty list, so the explode injects no null and the result validates
+    #    cleanly against the non-null field — the sound static FAIL has no
+    #    runtime counterpart without an adversarial empty-sub-list input.
+    "invalid/patito_explode_empty_as_null.py::bug": (
+        "explode(empty_as_null=True) only nulls on an EMPTY sub-list; synthesized "
+        "inputs have non-empty lists, so no null is injected at runtime"
+    ),
     # -- documented int-literal leniency IS this function's subject:
     #    then(1).otherwise(0) is Int32 at runtime but polypolarism models int
     #    literals as Int64 (expr_infer.infer_lit), so the declared ``a: int``

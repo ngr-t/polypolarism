@@ -1,0 +1,2 @@
+bug: FAIL
+  error: [pple-return-type] Column 'vals' has type integer?, but declared type is integer
