@@ -81,7 +81,7 @@ def _leading_digits(s: str) -> int | None:
 # When polars ships a new minor, bump ``POLARS_LATEST_KNOWN``; only move
 # ``POLARS_FLOOR`` deliberately, with corpus evidence. Anything below the
 # floor triggers a pplw-unsupported-version warning.
-POLARS_LATEST_KNOWN = Version(1, 41, 0)
+POLARS_LATEST_KNOWN = Version(1, 42, 0)
 POLARS_FLOOR = Version(1, 37, 0)
 POLARS_SUPPORT_NOTE = (
     f"polypolarism supports polars >= {POLARS_FLOOR} "
