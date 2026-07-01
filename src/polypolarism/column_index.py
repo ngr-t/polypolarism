@@ -815,7 +815,7 @@ def build_column_index(file_path: Path) -> list[ColumnRef]:
       name)`` identity are indexed — never a same-named but unrelated schema.
     """
     try:
-        main_tree = ast.parse(file_path.read_text())
+        main_tree = ast.parse(file_path.read_text(), filename=str(file_path))
     except (OSError, UnicodeDecodeError, SyntaxError):
         return []
 
@@ -841,7 +841,7 @@ def build_column_index(file_path: Path) -> list[ColumnRef]:
     # live there when the query started on a reference).
     for imported in _imported_module_paths(main_tree, file_path):
         try:
-            sub_tree = ast.parse(imported.read_text())
+            sub_tree = ast.parse(imported.read_text(), filename=str(imported))
         except (OSError, UnicodeDecodeError, SyntaxError):
             continue
         index_file(imported, sub_tree, collect_schemas_with_imports(sub_tree, imported))
@@ -854,7 +854,7 @@ def build_column_index(file_path: Path) -> list[ColumnRef]:
         if _abs(candidate) in seen_files:
             continue
         try:
-            sub_tree = ast.parse(candidate.read_text())
+            sub_tree = ast.parse(candidate.read_text(), filename=str(candidate))
         except (OSError, UnicodeDecodeError, SyntaxError):
             continue
         sub_registry = collect_schemas_with_imports(sub_tree, candidate)

@@ -1073,7 +1073,7 @@ def collect_imported_function_defs(
         funcs = parsed.get(real)
         if funcs is None:
             try:
-                sub_tree = ast.parse(resolved.read_text())
+                sub_tree = ast.parse(resolved.read_text(), filename=str(resolved))
             except (OSError, UnicodeDecodeError, SyntaxError):
                 parsed[real] = {}
                 continue
@@ -1137,7 +1137,7 @@ def _merge_imports(
             visited.add(real)
             try:
                 sub_source = resolved.read_text()
-                sub_tree = ast.parse(sub_source)
+                sub_tree = ast.parse(sub_source, filename=str(resolved))
             except (OSError, UnicodeDecodeError, SyntaxError):
                 sub_registries[real] = None
                 continue
@@ -1216,7 +1216,7 @@ def _merge_module_imports(
                 continue
             try:
                 sub_source = resolved.read_text()
-                sub_tree = ast.parse(sub_source)
+                sub_tree = ast.parse(sub_source, filename=str(resolved))
             except (OSError, UnicodeDecodeError, SyntaxError):
                 continue
 

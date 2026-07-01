@@ -9693,7 +9693,7 @@ def analyze_source(
         List of FunctionAnalysis results for functions with
         ``DataFrame[Schema]`` / ``LazyFrame[Schema]`` annotations
     """
-    tree = ast.parse(source)
+    tree = ast.parse(source, filename=str(file_path) if file_path is not None else "<unknown>")
 
     # Pass 0: Collect Pandera DataFrameModel schemas — from this module
     # plus any project-local modules it imports from.
