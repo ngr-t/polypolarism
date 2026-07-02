@@ -4389,6 +4389,32 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             return None
         return infer_shift_fill(receiver_type, fill_dtype, fill_is_literal=False)
 
+    def _fill_null_value_keeps_nulls(self, fill_node: ast.expr) -> bool:
+        """Whether a ``fill_null(value=<fill_node>)`` argument can itself be
+        null, so the receiver's nulls are not fully removed (issue #124).
+
+        A ``None`` / ``pl.lit(None)`` fill is a no-op (every null stays); a
+        resolved ``Nullable`` / ``Null`` expression can plug a null back in.
+        Bare literals and provably non-null expressions cover every null.
+        An unresolved fill is assumed non-null — consistent with
+        ``_shift_fill_dtype``, which fills the slots with *something* rather
+        than guessing a wrapper.
+        """
+        lit_dtype: DataType | None = None
+        if isinstance(fill_node, ast.Constant) and (
+            fill_node.value is None or isinstance(fill_node.value, (bool, int, float, str))
+        ):
+            lit_dtype = infer_lit(fill_node.value)
+        else:
+            lit_dtype = self._extract_lit_type(fill_node)
+        if lit_dtype is not None:
+            return isinstance(lit_dtype, Null)
+
+        _, fill_dtype = self.analyze_select_expr(fill_node)
+        if fill_dtype is None:
+            return False
+        return isinstance(fill_dtype, (Nullable, Null))
+
     def _analyze_name_method(
         self, method: str, inner_expr: ast.expr, call_node: ast.Call
     ) -> tuple[str | None, DataType | None] | None:
@@ -4628,12 +4654,37 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         if method == "not_":
             return receiver_name, self._not_dtype(receiver_type, op_desc="not_")
 
-        # fill_null / fill_nan strip the Nullable wrapper.
-        if method in ("fill_null", "fill_nan"):
-            inner_dtype = receiver_type
-            if isinstance(receiver_type, Nullable):
-                inner_dtype = receiver_type.inner
-            return receiver_name, inner_dtype if inner_dtype is not None else Boolean()
+        # ``fill_nan`` replaces NaN floats only — nulls are untouched, so the
+        # receiver's nullability flows through unchanged (issue #124).
+        if method == "fill_nan":
+            return receiver_name, receiver_type
+
+        # ``fill_null`` removes nulls only when the fill provably covers every
+        # null row. A literal / non-null expression fill strips the Nullable
+        # wrapper (the historical behaviour); but a ``strategy=`` fill leaves a
+        # leading/trailing (or whole-column) null unfilled, and a nullable
+        # expression fill can plug a null back in — both keep the receiver
+        # Nullable (issue #124, mirroring ``infer_shift_fill``).
+        if method == "fill_null":
+            if receiver_type is None:
+                return receiver_name, Boolean()
+            if not isinstance(receiver_type, Nullable):
+                # Nothing to fill; dtype and nullability are unchanged.
+                return receiver_name, receiver_type
+            strategy_kw = next((kw for kw in node.keywords if kw.arg == "strategy"), None)
+            has_strategy = strategy_kw is not None and not (
+                isinstance(strategy_kw.value, ast.Constant) and strategy_kw.value.value is None
+            )
+            if has_strategy:
+                return receiver_name, receiver_type
+            fill_node = (
+                node.args[0]
+                if node.args
+                else next((kw.value for kw in node.keywords if kw.arg == "value"), None)
+            )
+            if fill_node is not None and self._fill_null_value_keeps_nulls(fill_node):
+                return receiver_name, receiver_type
+            return receiver_name, receiver_type.inner
 
         # ``Expr.filter(...)`` is row-subsetting: the dtype is preserved
         # (Nullable wrapper included — nulls may survive the predicate).
