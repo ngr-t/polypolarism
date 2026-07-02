@@ -7838,8 +7838,15 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         )
 
     def _infer_rename_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
-        if not node.args or not isinstance(node.args[0], ast.Dict):
+        if not node.args:
             return input_frame
+        if not isinstance(node.args[0], ast.Dict):
+            # A callable rename (``df.rename(lambda c: ...)``) cannot be
+            # evaluated statically. Loud-degrade instead of silently pretending
+            # identity (issue #131): the old names would otherwise produce
+            # phantom missing/extra-column errors. Warn and untrack the schema.
+            self.warnings.append(_unmodeled_method_warning(".rename()", frame=True))
+            return None
         mapping_node = node.args[0]
         mapping: dict[str, str] = {}
         for key_node, val_node in zip(mapping_node.keys, mapping_node.values, strict=False):

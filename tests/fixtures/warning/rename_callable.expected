@@ -1,0 +1,2 @@
+rename_callable: WARN
+  warning: [pplw-unmodeled-method] `.rename()` is not modeled by polypolarism — the frame's schema is no longer tracked and downstream checks go silent. Validate the result against a schema (`Schema.validate(...)`) to keep checking precise.
