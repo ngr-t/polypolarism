@@ -3971,6 +3971,38 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             return Unknown()
         return verdict
 
+    @staticmethod
+    def _null_on_oob_true(call_node: ast.Call | None) -> bool:
+        """True if a ``list/arr.get(...)`` call passes literal ``null_on_oob=True``.
+
+        Default (``False``) raises on out-of-bounds; ``True`` maps OOB to null.
+        A non-literal keyword is treated as the default (only claim nullable
+        when provable) — see issue #128.
+        """
+        if call_node is None:
+            return False
+        for kw in call_node.keywords:
+            if kw.arg == "null_on_oob":
+                return isinstance(kw.value, ast.Constant) and kw.value.value is True
+        return False
+
+    def _element_return_is_nullable(
+        self, namespace: str, method: str, call_node: ast.Call | None
+    ) -> bool:
+        """Whether a list/arr element accessor can yield null (issue #128).
+
+        ``list.first`` / ``list.last`` always can — ``List(T)`` admits empty
+        sub-lists, which produce a null element (probed polars 1.41.2). ``get``
+        can when ``null_on_oob=True`` is passed (the default raises on OOB
+        instead). Fixed-width ``arr.first`` / ``arr.last`` never yield null
+        (probed), so only ``arr.get(null_on_oob=True)`` does.
+        """
+        if method in ("first", "last"):
+            return namespace == "list"
+        if method == "get":
+            return self._null_on_oob_true(call_node)
+        return False
+
     def _dispatch_namespace_method(
         self,
         namespace: str,
@@ -4062,6 +4094,11 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             elif isinstance(receiver_inner, ListT):
                 if method in self._LIST_ELEMENT_RETURN:
                     result = receiver_inner.inner
+                    if self._element_return_is_nullable(
+                        "list", method, call_node
+                    ) and not isinstance(result, (Nullable, Unknown)):
+                        # An empty / too-short sub-list yields null (issue #128).
+                        result = Nullable(result)
                 elif method in CONTAINER_AGG_METHODS:
                     result = self._container_agg_result("list", method, receiver_inner)
         elif namespace == "arr":
@@ -4107,6 +4144,12 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 element = receiver_inner.inner
                 if method in ARR_NAMESPACE_ELEMENT_RETURN:
                     result = element
+                    if self._element_return_is_nullable(
+                        "arr", method, call_node
+                    ) and not isinstance(result, (Nullable, Unknown)):
+                        # arr.get(null_on_oob=True) yields null out of bounds
+                        # (issue #128); fixed-width first/last never do.
+                        result = Nullable(result)
                 elif method in ARR_NAMESPACE_TO_LIST:
                     result = ListT(element)
                 elif method in CONTAINER_AGG_METHODS:
