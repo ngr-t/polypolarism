@@ -1204,6 +1204,80 @@ def _cast_nonstrict_nullable(source_inner: DataType, target: DataType) -> DataTy
     return Nullable(target_inner)
 
 
+# Inverse of _INT_SIGN_WIDTH, for fitting integer literals (issue #147).
+_INT_BY_SIGN_WIDTH: dict[tuple[bool, int], type[DataType]] = {
+    sw: cls for cls, sw in _INT_SIGN_WIDTH.items()
+}
+
+
+def _minimal_int_dtype(col_inner: DataType, value: int) -> DataType | None:
+    """Smallest same-sign integer dtype (at least as wide as ``col_inner``) that
+    holds ``value`` — the literal-fitting rule (issue #147). ``None`` when the
+    value fits no modeled width of that sign (e.g. a negative into an unsigned
+    column)."""
+    sw = _INT_SIGN_WIDTH.get(type(col_inner))
+    if sw is None:
+        return None
+    signed, col_width = sw
+    for width in sorted({w for (s, w) in _INT_BY_SIGN_WIDTH if s == signed}):
+        if width < col_width:
+            continue
+        if signed:
+            if -(1 << (width - 1)) <= value <= (1 << (width - 1)) - 1:
+                return _INT_BY_SIGN_WIDTH[(True, width)]()
+        elif 0 <= value <= (1 << width) - 1:
+            return _INT_BY_SIGN_WIDTH[(False, width)]()
+    return None
+
+
+def _fit_literal_dtype(
+    col_inner: DataType, lit_inner: DataType, lit_value: int | float
+) -> DataType:
+    """Fit a numeric literal to the column operand's dtype (issue #147).
+
+    A float column absorbs any literal into its own width; an integer column
+    adopts its dtype for an int literal that fits (else the minimal same-sign
+    widening). An integer column with a FLOAT literal keeps the literal dtype so
+    the supertype widens to Float64 (probed). Unfittable cells keep the literal.
+    """
+    if type(col_inner) in FLOAT_DTYPES:
+        return col_inner
+    if type(col_inner) in INTEGER_DTYPES and isinstance(lit_value, int):
+        fitted = _minimal_int_dtype(col_inner, lit_value)
+        if fitted is not None:
+            return fitted
+    return lit_inner
+
+
+def _arith_literal_value(node: ast.expr) -> int | float | None:
+    """The numeric value of a bare int/float literal operand (issue #147).
+
+    Recognises a bare ``ast.Constant`` (int/float, not bool) and
+    ``pl.lit(<int/float const>)`` without an explicit ``dtype=`` (a pinned dtype
+    is not fitted). Columns, expressions and dtyped literals return ``None``.
+    """
+    if (
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, (int, float))
+        and not isinstance(node.value, bool)
+    ):
+        return node.value
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "lit"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "pl"
+        and not any(kw.arg == "dtype" for kw in node.keywords)
+        and node.args
+        and isinstance(node.args[0], ast.Constant)
+        and isinstance(node.args[0].value, (int, float))
+        and not isinstance(node.args[0].value, bool)
+    ):
+        return node.args[0].value
+    return None
+
+
 # ``Expr.diff`` on an unsigned-int receiver widens to the signed dtype of
 # the next width so negative differences are representable (probed polars
 # 1.41.2; issue #46). UInt128 is absent: it has no wider signed dtype and
@@ -3641,6 +3715,16 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             if left_type is not None and right_type is not None:
                 left_inner = left_type.inner if isinstance(left_type, Nullable) else left_type
                 right_inner = right_type.inner if isinstance(right_type, Nullable) else right_type
+                # Literal-operand fitting (issue #147): a bare numeric literal
+                # adopts the COLUMN operand's dtype (minimal widening if it does
+                # not fit), rather than promoting as a uniform Int64/Float64.
+                # Only when exactly one side is a literal.
+                left_lit = _arith_literal_value(inner_node.left)
+                right_lit = _arith_literal_value(inner_node.right)
+                if right_lit is not None and left_lit is None:
+                    right_inner = _fit_literal_dtype(left_inner, right_inner, right_lit)
+                elif left_lit is not None and right_lit is None:
+                    left_inner = _fit_literal_dtype(right_inner, left_inner, left_lit)
                 # Null literals keep promote_types' Null -> Nullable[T]
                 # rules — except next to a Decimal, where polars widens the
                 # precision even against an all-null literal (probed:
