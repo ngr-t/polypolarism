@@ -5005,12 +5005,17 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             ns_result = self._dispatch_namespace_method(ns, method, col_type, node)
             if ns_result is None:
                 # Unmodeled namespace method on a receiver that passed the
-                # dtype-validity gate above: the column silently degrades —
-                # warn (backlog B-4). Unresolved/Unknown receivers stay
-                # silent (the degradation happened upstream).
+                # dtype-validity gate above: the column degrades — warn
+                # (backlog B-4). Unresolved/Unknown receivers stay silent (the
+                # degradation happened upstream). Honor the (name, Unknown)
+                # contract (issue #144, #8 principle): the column still exists
+                # at runtime under ``col_name``, so register it as Unknown
+                # rather than discarding it — otherwise a positional select
+                # hard-fails (FP) and a with_columns keeps the stale precise
+                # dtype (FN).
                 if col_type is not None and not _base_is_unknown(col_type):
                     self.warnings.append(_unmodeled_method_warning(f".{ns}.{method}()"))
-                return None
+                return col_name, None
             return col_name, ns_result
 
         # ``.name`` namespace (issue #56): renames the OUTPUT column (or
