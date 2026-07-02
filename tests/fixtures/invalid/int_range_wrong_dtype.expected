@@ -1,0 +1,4 @@
+int_range_declared_str: FAIL
+  error: [pple-return-type] Column 'r' has type Int64, but declared type is Utf8
+int_range_dtype_mismatch: FAIL
+  error: [pple-return-type] Column 'r' has type UInt32, but declared type is Int64

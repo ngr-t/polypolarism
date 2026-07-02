@@ -1,0 +1,3 @@
+fold_unmodeled: WARN
+  warning: [pplw-unmodeled-method] `pl.fold()` is not modeled by polypolarism — the result dtype degrades to Unknown and downstream dtype checks weaken. Pin the dtype with `.cast(...)` after the call, or validate the frame against a schema, to keep checking precise.
+  via: column 'r': passed via Unknown

@@ -6267,12 +6267,13 @@ class TestUnknownColumnRegistration:
         assert inferred.columns["total"].dtype == Int64()
 
     def test_agg_kwarg_uninferable_registers_unknown(self):
-        # ``pl.int_range(...)`` is not an aggregation polypolarism models —
-        # the kwarg output column must still register (as Unknown).
+        # ``pl.reduce(...)`` is not modeled (int_range is, since #140) — the
+        # kwarg output column must still register (as Unknown) even when the
+        # value degrades loudly.
         source = self.HEADER + textwrap.dedent(
             """
             def f(df: DataFrame[In]) -> DataFrame[In]:
-                return df.group_by("v").agg(n=pl.int_range(10))
+                return df.group_by("v").agg(n=pl.reduce(lambda acc, x: acc + x, pl.col("v")))
             """
         )
         results = analyze_source(source)

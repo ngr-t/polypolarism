@@ -4098,6 +4098,30 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 result = Nullable(result)
             return None, result
 
+        # Range constructors (issue #140): probed 1.41.2. ``int_range`` -> Int64
+        # (or an explicit literal ``dtype=``); ``int_ranges`` -> List of that;
+        # ``datetime_ranges`` -> List(Datetime[us]) — the plurals of the already
+        # modeled ``pl.datetime_range``.
+        if name in ("int_range", "int_ranges"):
+            range_dtype: DataType = Int64()
+            for kw in node.keywords:
+                if kw.arg == "dtype":
+                    resolved_dtype = _resolve_pl_dtype(kw.value)
+                    if resolved_dtype is not None:
+                        range_dtype = resolved_dtype
+            return None, ListT(range_dtype) if name == "int_ranges" else range_dtype
+
+        if name == "datetime_ranges":
+            return None, ListT(Datetime())
+
+        # Any other ``pl.<fn>(...)`` expression constructor is unmodeled: loud-
+        # degrade to Unknown with a warning, symmetric with an unmodeled method
+        # (issue #140), rather than the old silent hard-fail. ``pl.col`` /
+        # ``pl.lit`` are handled by the caller after this returns None.
+        if name not in ("col", "lit"):
+            self.warnings.append(_unmodeled_method_warning(f"pl.{name}()"))
+            return None, Unknown()
+
         return None
 
     def _resolve_expr_or_col_str(self, node: ast.expr) -> tuple[str | None, DataType | None]:
