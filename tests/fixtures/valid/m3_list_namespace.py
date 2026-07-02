@@ -16,7 +16,8 @@ class Out(pa.DataFrameModel):
     user_id: int
     score_sum: pl.Float64
     score_count: pl.UInt32
-    top_score: pl.Float64
+    # list.max nulls on an empty sub-list, so the result is nullable (#130).
+    top_score: pl.Float64 = pa.Field(nullable=True)
 
 
 def summarize(df: DataFrame[In]) -> DataFrame[Out]:

@@ -1,0 +1,10 @@
+list_max_nonnull: FAIL
+  error: [pple-return-type] Column 'x' has type Int64?, but declared type is Int64
+list_min_nonnull: FAIL
+  error: [pple-return-type] Column 'x' has type Int64?, but declared type is Int64
+list_mean_nonnull: FAIL
+  error: [pple-return-type] Column 'x' has type Float64?, but declared type is Float64
+list_median_nonnull: FAIL
+  error: [pple-return-type] Column 'x' has type Float64?, but declared type is Float64
+list_std_nonnull: FAIL
+  error: [pple-return-type] Column 'x' has type Float64?, but declared type is Float64

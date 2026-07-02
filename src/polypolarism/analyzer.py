@@ -488,6 +488,10 @@ def _wrap_nullable_if_any(result: DataType, operands: list[DataType]) -> DataTyp
 # at runtime (InvalidOperationError) — report pple-incompatible-operands.
 _ARITH_INVALID = object()
 
+# ``list.<agg>`` reductions that return null for an empty sub-list (issue #130).
+# ``sum`` (empty -> 0) and ``len`` are excluded — they stay non-null.
+_LIST_AGG_EMPTY_NULLABLE = frozenset({"min", "max", "mean", "median", "std", "var"})
+
 _OP_SYMBOLS: dict[type[ast.operator], str] = {
     ast.Add: "+",
     ast.Sub: "-",
@@ -3969,6 +3973,18 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 )
             )
             return Unknown()
+        # An empty sub-list aggregates to null for the reducing aggregations
+        # (min/max/mean/median/std/var), and ``List(T)`` always admits empty
+        # sub-lists, so the result is unconditionally nullable (issue #130).
+        # ``sum`` (empty -> 0) and ``len`` stay non-null; fixed-width ``arr``
+        # sub-lists are never empty, so only the ``list`` namespace wraps.
+        if (
+            namespace == "list"
+            and method in _LIST_AGG_EMPTY_NULLABLE
+            and isinstance(verdict, DataType)
+            and not isinstance(verdict, (Nullable, Unknown))
+        ):
+            return Nullable(verdict)
         return verdict
 
     @staticmethod

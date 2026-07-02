@@ -362,6 +362,12 @@ def _value_overrides() -> dict[str, dict[str, pl.Series]]:
                 ["2026-01-01 00:00:00", "2026-01-02 00:00:00", "2026-01-03 00:00:00"]
             ),
         },
+        # issue #130: list.min/max/mean/... null only on an EMPTY sub-list,
+        # which generic (non-empty) list samples never produce. A leading empty
+        # sub-list injects the null the sound static FAIL predicts.
+        "invalid/list_agg_nullable.py": {
+            "xs": pl.Series([[], [1, 2], [3, 4]], dtype=pl.List(pl.Int64)),
+        },
     }
 
 
