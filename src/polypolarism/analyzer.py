@@ -1114,13 +1114,13 @@ def _cast_invalid(source_inner: DataType, target_inner: DataType) -> bool:
     return _cast_verdict(source_inner, target_inner) == "never"
 
 
-def _cast_strict_false(node: ast.Call) -> bool:
-    """True if the call passes an explicit ``strict=False`` (issue #125).
+def _has_strict_false_kw(node: ast.Call) -> bool:
+    """True if the call passes an explicit literal ``strict=False``.
 
-    ``strict`` is keyword-only on both ``Expr.cast`` and ``DataFrame.cast``.
-    Under ``strict=False`` polars turns every unconvertible value into null, so
-    a *value-dependent* cast injects nulls and its result is nullable even from
-    a non-null receiver.
+    ``strict`` is a keyword-only flag on several polars calls with opposite
+    consequences: on ``Expr.cast`` / ``DataFrame.cast`` / ``str.to_integer`` /
+    ``str.to_datetime`` it injects nulls (issues #125/#129), while on
+    ``DataFrame.drop`` it makes a missing column a legal no-op (issue #132).
     """
     for kw in node.keywords:
         if kw.arg == "strict" and isinstance(kw.value, ast.Constant) and kw.value.value is False:
@@ -4072,7 +4072,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 and result is not None
                 and not isinstance(result, (Nullable, Unknown))
                 and call_node is not None
-                and _cast_strict_false(call_node)
+                and _has_strict_false_kw(call_node)
             ):
                 result = Nullable(result)
         elif namespace == "dt":
@@ -5275,7 +5275,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                         )
                     )
                     return receiver_name, None
-                if _cast_strict_false(node):
+                if _has_strict_false_kw(node):
                     nn = _cast_nonstrict_nullable(receiver_inner, target)
                     if nn is not None:
                         return receiver_name, nn
@@ -7788,9 +7788,17 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
 
     def _infer_drop_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
         targets = self._collect_drop_targets(node, input_frame)
+        # ``strict=False`` is polars' documented "drop if present" idiom — a
+        # missing target is a legal no-op rather than a ColumnNotFoundError
+        # (issue #132; FP-direction twin of #125/#129). Default (strict=True)
+        # keeps raising, so its static FAIL is preserved.
+        strict = not _has_strict_false_kw(node)
         result_columns = dict(input_frame.columns)
         for name in targets:
             if name not in result_columns:
+                if not strict:
+                    # drop-if-present: the column is simply not removed.
+                    continue
                 if input_frame.rest is None:
                     self.errors.append(
                         tag(
@@ -7991,7 +7999,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 )
                 continue
             result_dtype = _wrap_like(spec.dtype, target)
-            if _cast_strict_false(node):
+            if _has_strict_false_kw(node):
                 nn = _cast_nonstrict_nullable(source_inner, target)
                 if nn is not None:
                     result_dtype = nn

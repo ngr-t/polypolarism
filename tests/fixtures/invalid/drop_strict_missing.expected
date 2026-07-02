@@ -1,0 +1,2 @@
+drop_strict_missing: FAIL
+  error: [pple-column-not-found] drop: column 'q2' not found in frame from schema 'NoQ2'
