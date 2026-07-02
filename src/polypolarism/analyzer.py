@@ -546,7 +546,11 @@ def _numeric_arith(
 ) -> DataType | object | None:
     """Arithmetic where both operands are numeric or Boolean."""
     if isinstance(op, ast.Div):
-        # True division always yields Float64, bool operands included.
+        # True division yields Float64 — except Float32 / Float32, which keeps
+        # Float32 (probed 1.41.2; issue #135). Any other operand (a wider
+        # float, an int, or a bool) widens the result to Float64.
+        if isinstance(left, Float32) and isinstance(right, Float32):
+            return Float32()
         return Float64()
     if isinstance(op, ast.Pow):
         # ``**`` rejects bool as base or exponent.
