@@ -21,6 +21,7 @@ from polypolarism.compat.pandera_api import (
 from polypolarism.compat.pandera_api import SCHEMA_BASE_NAMES as _BASE_NAMES
 from polypolarism.pandera_dtype import (
     annotated_arity_error,
+    field_alias,
     parse_field_annotation,
     unrecognized_field_spec,
 )
@@ -870,7 +871,16 @@ def _parse_schema(
     # Parse this class's body.
     for stmt in node.body:
         if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
-            field_name = stmt.target.id
+            attr_name = stmt.target.id
+            # pandera's metaclass treats leading-underscore attributes as
+            # private — ``to_schema().columns`` omits them, so they are not
+            # columns (issue #148).
+            if attr_name.startswith("_"):
+                continue
+            # The column name is ``Field(alias=...)`` when present, else the
+            # attribute name (issue #148) — the only way to declare column
+            # names that aren't valid identifiers or start with ``_``.
+            field_name = field_alias(stmt.value) or attr_name
             # Issue #110: pinpoint the declared field for mismatch
             # diagnostics. The span covers the whole ``name: ann`` line; a
             # child re-declaring an inherited field overrides the span.

@@ -1,8 +1,11 @@
-"""Valid: group_by_dynamic(include_boundaries=True) adds boundary columns (issue #141).
+"""Valid: group_by_dynamic(include_boundaries=True) boundary columns (issues #141, #148).
 
 ``include_boundaries=True`` prepends ``_lower_boundary`` / ``_upper_boundary``
-columns (the index column's dtype, non-null) to the output. The keyword was not
-read, so declaring them was rejected as missing columns.
+columns (the index dtype). Under a strict schema those underscore-named columns
+must be declared via ``pa.Field(alias=...)`` — pandera ignores leading-underscore
+attributes and validates under the alias (issue #148). This is the runtime-valid,
+statically-checkable form: the boundary columns are added (#141) and matched by
+alias under ``strict=True`` (#148).
 """
 
 from datetime import datetime
@@ -16,12 +19,18 @@ class TsIn(pa.DataFrameModel):
     ts: datetime
     v: int
 
+    class Config:
+        strict = True
+
 
 class BoundOut(pa.DataFrameModel):
-    _lower_boundary: datetime
-    _upper_boundary: datetime
+    lower: datetime = pa.Field(alias="_lower_boundary")
+    upper: datetime = pa.Field(alias="_upper_boundary")
     ts: datetime
     s: int
+
+    class Config:
+        strict = True
 
 
 def dynamic_boundaries(df: DataFrame[TsIn]) -> DataFrame[BoundOut]:

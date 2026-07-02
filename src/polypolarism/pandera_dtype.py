@@ -617,6 +617,35 @@ def _is_field_with_nullable(node: ast.expr) -> bool:
     return any(kw.arg == "nullable" and _is_true_constant(kw.value) for kw in node.keywords)
 
 
+def field_alias(node: ast.expr | None) -> str | None:
+    """The ``alias=`` column name from a ``Field(...)`` value (issue #148).
+
+    pandera validates the column under ``Field(alias=...)`` when present rather
+    than the attribute name — the only way to declare column names that aren't
+    valid Python identifiers or start with ``_``. Returns ``None`` when there is
+    no ``Field(...)`` call or no string-literal ``alias=``.
+    """
+    if not isinstance(node, ast.Call):
+        return None
+    func = node.func
+    if isinstance(func, ast.Name):
+        if func.id != FIELD_CALLABLE_NAME:
+            return None
+    elif isinstance(func, ast.Attribute):
+        if func.attr != FIELD_CALLABLE_NAME:
+            return None
+    else:
+        return None
+    for kw in node.keywords:
+        if (
+            kw.arg == "alias"
+            and isinstance(kw.value, ast.Constant)
+            and isinstance(kw.value.value, str)
+        ):
+            return kw.value.value
+    return None
+
+
 def _is_true_constant(node: ast.expr) -> bool:
     return isinstance(node, ast.Constant) and node.value is True
 
