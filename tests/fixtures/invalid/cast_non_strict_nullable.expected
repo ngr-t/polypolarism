@@ -1,0 +1,8 @@
+non_strict_expr_cast: FAIL
+  error: [pple-return-type] Column 'v' has type Int64?, but declared type is Int64
+non_strict_int_narrowing: FAIL
+  error: [pple-return-type] Column 'n' has type Int8?, but declared type is Int8
+non_strict_float_to_int: FAIL
+  error: [pple-return-type] Column 'fi' has type Int64?, but declared type is Int64
+non_strict_frame_cast: FAIL
+  error: [pple-return-type] Column 's' has type Int64?, but declared type is Int64

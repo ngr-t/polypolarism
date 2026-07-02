@@ -127,6 +127,8 @@ from polypolarism.pandera_schema import (
     collect_schemas_with_imports,
 )
 from polypolarism.types import (
+    FLOAT_DTYPES,
+    INTEGER_DTYPES,
     NUMERIC_DTYPES,
     Array,
     Binary,
@@ -1106,6 +1108,92 @@ def _cast_verdict(source_inner: DataType, target_inner: DataType) -> CastVerdict
 def _cast_invalid(source_inner: DataType, target_inner: DataType) -> bool:
     """True when polars provably rejects the cast even with ``strict=False``."""
     return _cast_verdict(source_inner, target_inner) == "never"
+
+
+def _cast_strict_false(node: ast.Call) -> bool:
+    """True if the call passes an explicit ``strict=False`` (issue #125).
+
+    ``strict`` is keyword-only on both ``Expr.cast`` and ``DataFrame.cast``.
+    Under ``strict=False`` polars turns every unconvertible value into null, so
+    a *value-dependent* cast injects nulls and its result is nullable even from
+    a non-null receiver.
+    """
+    for kw in node.keywords:
+        if kw.arg == "strict" and isinstance(kw.value, ast.Constant) and kw.value.value is False:
+            return True
+    return False
+
+
+# (signed?, bit-width) for every integer dtype — drives the strict=False
+# null-injection check (issue #125). An integer cast target holds the source's
+# full value domain (so strict=False adds no nulls) iff it is at least as wide
+# with a compatible sign; otherwise overflow / a negative-into-unsigned value
+# is mapped to null.
+_INT_SIGN_WIDTH: dict[type[DataType], tuple[bool, int]] = {
+    Int8: (True, 8),
+    Int16: (True, 16),
+    Int32: (True, 32),
+    Int64: (True, 64),
+    Int128: (True, 128),
+    UInt8: (False, 8),
+    UInt16: (False, 16),
+    UInt32: (False, 32),
+    UInt64: (False, 64),
+    UInt128: (False, 128),
+}
+
+
+def _int_target_holds_source(source_inner: DataType, target_inner: DataType) -> bool:
+    """True if every value of integer ``source`` fits in integer ``target``."""
+    s = _INT_SIGN_WIDTH.get(type(source_inner))
+    t = _INT_SIGN_WIDTH.get(type(target_inner))
+    if s is None or t is None:
+        return True  # unknown width — assume safe (never over-nullify)
+    s_signed, s_width = s
+    t_signed, t_width = t
+    if s_signed == t_signed:
+        return t_width >= s_width
+    if not s_signed and t_signed:
+        # unsigned -> signed needs a strictly wider signed type (UInt8's 255
+        # does not fit in Int8, but fits in Int16).
+        return t_width > s_width
+    # signed -> unsigned: negative values never fit.
+    return False
+
+
+def _cast_injects_nulls(source_inner: DataType, target_inner: DataType) -> bool:
+    """Whether ``source.cast(target, strict=False)`` can turn an in-domain
+    source value into null — i.e. ``strict=True`` would raise (issue #125).
+
+    Probed polars 1.41.2. Returns True ONLY for provably-fallible casts
+    (default False), so a non-strict cast is over-nullified only when null
+    injection is certain — widening / lossless casts (int->float, narrow->wide
+    int, float->float, bool->numeric, ->Utf8) keep the receiver's nullability.
+    """
+    # Utf8 source: an unparseable string becomes null when parsed to a numeric
+    # or temporal target (str->str / ->Categorical / ->Enum never fail).
+    if isinstance(source_inner, Utf8):
+        return type(target_inner) in NUMERIC_DTYPES or isinstance(
+            target_inner, (Date, Datetime, Time, Duration)
+        )
+    tgt_is_int = type(target_inner) in INTEGER_DTYPES
+    # Float -> integer: NaN / inf / out-of-range values become null.
+    if type(source_inner) in FLOAT_DTYPES and tgt_is_int:
+        return True
+    # Integer -> integer: overflow / sign mismatch becomes null.
+    if type(source_inner) in INTEGER_DTYPES and tgt_is_int:
+        return not _int_target_holds_source(source_inner, target_inner)
+    return False
+
+
+def _cast_nonstrict_nullable(source_inner: DataType, target: DataType) -> DataType | None:
+    """``Nullable(target)`` when a ``strict=False`` cast provably injects nulls
+    (issue #125); ``None`` otherwise (the caller keeps the receiver's own
+    nullability — a lossless cast adds nothing)."""
+    target_inner = target.inner if isinstance(target, Nullable) else target
+    if not _cast_injects_nulls(source_inner, target_inner):
+        return None
+    return Nullable(target_inner)
 
 
 # ``Expr.diff`` on an unsigned-int receiver widens to the signed dtype of
@@ -5115,6 +5203,10 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                         )
                     )
                     return receiver_name, None
+                if _cast_strict_false(node):
+                    nn = _cast_nonstrict_nullable(receiver_inner, target)
+                    if nn is not None:
+                        return receiver_name, nn
                 return receiver_name, _wrap_like(receiver_type, target)
             if target is not None:
                 # Receiver dtype was uninferable (e.g. ``.interpolate()``)
@@ -7819,8 +7911,13 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     )
                 )
                 continue
+            result_dtype = _wrap_like(spec.dtype, target)
+            if _cast_strict_false(node):
+                nn = _cast_nonstrict_nullable(source_inner, target)
+                if nn is not None:
+                    result_dtype = nn
             result_columns[col] = ColumnSpec(
-                dtype=_wrap_like(spec.dtype, target),
+                dtype=result_dtype,
                 required=spec.required,
             )
         return FrameType(
