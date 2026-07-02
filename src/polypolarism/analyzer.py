@@ -556,7 +556,15 @@ def _numeric_arith(
         return right  # bool acts as an int — numeric operand's dtype wins
     if rcat == "bool":
         return left
-    return _promote_or_none(left, right)
+    # Both operands numeric: follow polars' probed common-supertype lattice
+    # over the full integer/float width matrix (issue #127). ``+ - * // %``
+    # all agree on it (probed 1.41.2). This replaces the old keep-left
+    # fallback, which was wrong for 26/32 mixed-sign and every narrow
+    # same-sign pair. Unprobed widths (Float16/UInt128) come back Unknown —
+    # honest degradation rather than an invented dtype. (``**`` keeps the
+    # base dtype and is handled by its own branch above.)
+    result = supertype(left, right)
+    return result if result is not None else _promote_or_none(left, right)
 
 
 def _datetime_plus_duration(dt: Datetime, dur: Duration) -> Datetime:
