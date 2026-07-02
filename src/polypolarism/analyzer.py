@@ -7484,6 +7484,27 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                             _all_null_agg_warning(agg_expr.function, direct_col_type)
                         )
             result = infer_groupby_result(input_frame, keys, agg_exprs)
+            # ``group_by_dynamic(include_boundaries=True)`` prepends
+            # ``_lower_boundary`` / ``_upper_boundary`` columns of the index
+            # column's dtype (non-null), probed on polars 1.41.2 (issue #141).
+            if (
+                grouper == "group_by_dynamic"
+                and index_col is not None
+                and any(
+                    kw.arg == "include_boundaries"
+                    and isinstance(kw.value, ast.Constant)
+                    and kw.value.value is True
+                    for kw in groupby_receiver.keywords
+                )
+            ):
+                idx_dtype = input_frame.get_column_type(index_col)
+                if idx_dtype is not None:
+                    bound = idx_dtype.inner if isinstance(idx_dtype, Nullable) else idx_dtype
+                    result.columns = {
+                        "_lower_boundary": ColumnSpec(dtype=bound),
+                        "_upper_boundary": ColumnSpec(dtype=bound),
+                        **result.columns,
+                    }
             # Stamp only the columns we actually produced spans for; keys and
             # unstamped outputs fall back to the return line (#110).
             for name, span in column_spans.items():
