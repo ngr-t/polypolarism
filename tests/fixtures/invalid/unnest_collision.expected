@@ -1,0 +1,4 @@
+unnest_two_structs: FAIL
+  error: [pple-duplicate-column] unnest: field 'a' collides with an existing column — polars raises DuplicateError at runtime; rename the field or column first
+unnest_collides_existing: FAIL
+  error: [pple-duplicate-column] unnest: field 'a' collides with an existing column — polars raises DuplicateError at runtime; rename the field or column first

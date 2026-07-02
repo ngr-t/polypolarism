@@ -8888,6 +8888,21 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 # branch above, but the pinned fields still register.
                 result_rest = RowVar("unnest")
             for field_name, field_dtype in inner.fields.items():
+                if field_name in result_columns:
+                    # polars raises DuplicateError unconditionally when an
+                    # unnested field collides with a pre-existing column or a
+                    # previously-unnested field (issue #145). Fields of the same
+                    # struct can't collide; a collision against an open frame's
+                    # unknown extras is not provable and stays silent.
+                    self.errors.append(
+                        tag(
+                            DUPLICATE_COLUMN,
+                            f"unnest: field '{field_name}' collides with an existing "
+                            f"column — polars raises DuplicateError at runtime; "
+                            f"rename the field or column first",
+                        )
+                    )
+                    continue
                 wrapped: DataType = field_dtype
                 if outer_nullable and not isinstance(wrapped, Nullable):
                     wrapped = Nullable(wrapped)
