@@ -1,0 +1,3 @@
+bool_agg: OK
+bool_select_sum: OK
+bool_select_stats: OK
