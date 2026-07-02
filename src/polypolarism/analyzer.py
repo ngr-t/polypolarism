@@ -3577,15 +3577,30 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             resolved = [t for t in operand_types if t is not None]
             return alias, _wrap_nullable_if_any(Boolean(), resolved)
 
-        # Logical operators expressed as bitwise: a & b, a | b, a ^ b -> Boolean.
-        # Nullability propagates from either operand (``null & true`` is null).
+        # Bitwise a & b, a | b, a ^ b. On Boolean operands these are logical
+        # operators -> Boolean; on INTEGER operands polars performs real
+        # bitwise arithmetic and returns the integer promotion result (issue
+        # #137: ``i8 & i16`` -> Int16, same-dtype -> same dtype). Nullability
+        # propagates from either operand (``null & true`` is null).
         if isinstance(inner_node, ast.BinOp) and isinstance(
             inner_node.op, (ast.BitAnd, ast.BitOr, ast.BitXor)
         ):
             _, left_type = self.analyze_select_expr(inner_node.left)
             _, right_type = self.analyze_select_expr(inner_node.right)
             resolved = [t for t in (left_type, right_type) if t is not None]
-            return alias, _wrap_nullable_if_any(Boolean(), resolved)
+            left_inner = left_type.inner if isinstance(left_type, Nullable) else left_type
+            right_inner = right_type.inner if isinstance(right_type, Nullable) else right_type
+            result: DataType = Boolean()
+            if (
+                left_inner is not None
+                and right_inner is not None
+                and type(left_inner) in INTEGER_DTYPES
+                and type(right_inner) in INTEGER_DTYPES
+            ):
+                promoted = supertype(left_inner, right_inner)
+                if promoted is not None:
+                    result = promoted
+            return alias, _wrap_nullable_if_any(result, resolved)
 
         # ``~expr`` negates Booleans but operates BITWISE on integers,
         # preserving the dtype (issue #72) — same matrix as ``Expr.not_``;
