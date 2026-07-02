@@ -3766,7 +3766,27 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             )
             return None, Unknown()
 
-        if name == "concat_str" or name == "format":
+        if name == "concat_str":
+            # Under the default ``ignore_nulls=False`` a null in ANY operand
+            # nulls the whole result, so the output is nullable iff an operand
+            # is nullable (issue #138). ``ignore_nulls=True`` drops nulls before
+            # joining, so the result stays non-null. Each operand is resolved
+            # (a bare string is a column ref) to read its nullability and keep
+            # the column-not-found validation.
+            any_nullable = False
+            for arg in _flatten_expr_args(node.args):
+                _, arg_type = self._resolve_expr_or_col_str(arg)
+                if isinstance(arg_type, (Nullable, Null)):
+                    any_nullable = True
+            ignore_nulls = any(
+                kw.arg == "ignore_nulls"
+                and isinstance(kw.value, ast.Constant)
+                and kw.value.value is True
+                for kw in node.keywords
+            )
+            return None, Nullable(Utf8()) if (any_nullable and not ignore_nulls) else Utf8()
+
+        if name == "format":
             for arg in _flatten_expr_args(node.args):
                 self._validate_subexpr(arg)
             return None, Utf8()
