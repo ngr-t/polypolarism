@@ -3205,6 +3205,22 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         UInt128,
     )
 
+    # Receivers ``-expr`` (unary minus / ``ast.USub``) is dtype-preserving on
+    # (issue #136, probed 1.41.2): signed ints, floats, Duration, Decimal.
+    # Unsigned ints, Boolean and Date/Datetime/Time raise InvalidOperationError.
+    _NEG_VALID_RECEIVERS = (
+        Int8,
+        Int16,
+        Int32,
+        Int64,
+        Int128,
+        Float16,
+        Float32,
+        Float64,
+        Duration,
+        Decimal,
+    )
+
     # Methods that return Float64 from any numeric receiver.
     _FLOAT_RETURN_METHODS = frozenset(
         {
@@ -3578,6 +3594,14 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         if isinstance(inner_node, ast.UnaryOp) and isinstance(inner_node.op, ast.Invert):
             _, operand_type = self.analyze_select_expr(inner_node.operand)
             return alias, self._not_dtype(operand_type, op_desc="~")
+
+        # ``-expr`` (unary minus): dtype-preserving for signed ints / floats /
+        # Duration / Decimal; unsigned ints and Boolean (and Date/Datetime/
+        # Time) raise InvalidOperationError at runtime -> pple-non-numeric-operand
+        # (issue #136). ``-null`` is null, so nullability carries through.
+        if isinstance(inner_node, ast.UnaryOp) and isinstance(inner_node.op, ast.USub):
+            _, operand_type = self.analyze_select_expr(inner_node.operand)
+            return alias, self._neg_dtype(operand_type)
 
         # Python ``not expr`` -> Boolean. On a polars Expr it raises
         # TypeError at expression-construction time (``Expr.__bool__`` is
@@ -4254,6 +4278,30 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             tag(
                 NON_NUMERIC_OPERAND,
                 f"{op_desc}: operation not supported for dtype {inner} — "
+                f"polars raises InvalidOperationError at runtime",
+            )
+        )
+        return None
+
+    def _neg_dtype(self, receiver_type: DataType | None) -> DataType | None:
+        """Result dtype of ``-expr`` (unary minus / ``ast.USub``) — issue #136.
+
+        Dtype-preserving for signed ints / floats / Duration / Decimal (see
+        ``_NEG_VALID_RECEIVERS``); the Nullable wrapper flows through. Unsigned
+        ints, Boolean and Date/Datetime/Time raise InvalidOperationError at
+        runtime -> pple-non-numeric-operand. Unknown / unresolved stay silent.
+        """
+        if receiver_type is None:
+            return None
+        inner = receiver_type.inner if isinstance(receiver_type, Nullable) else receiver_type
+        if isinstance(inner, Unknown):
+            return receiver_type
+        if isinstance(inner, self._NEG_VALID_RECEIVERS):
+            return receiver_type
+        self.errors.append(
+            tag(
+                NON_NUMERIC_OPERAND,
+                f"unary '-': operation not supported for dtype {inner} — "
                 f"polars raises InvalidOperationError at runtime",
             )
         )

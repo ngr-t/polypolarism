@@ -1,0 +1,6 @@
+neg_unsigned: FAIL
+  error: [pple-non-numeric-operand] unary '-': operation not supported for dtype UInt32 — polars raises InvalidOperationError at runtime
+  via: column 'r': passed via Unknown
+neg_boolean: FAIL
+  error: [pple-non-numeric-operand] unary '-': operation not supported for dtype Boolean — polars raises InvalidOperationError at runtime
+  via: column 'r': passed via Unknown
