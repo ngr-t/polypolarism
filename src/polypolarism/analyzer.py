@@ -6542,9 +6542,12 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     return _lazy_like(self._infer_unique_call(receiver_type, node), receiver_type)
                 elif method_name == "explode":
                     return _lazy_like(self._infer_explode_call(receiver_type, node), receiver_type)
-                elif method_name == "vstack":
+                elif method_name in ("vstack", "extend"):
+                    # ``extend`` appends ROWS (memory-level vertical concat),
+                    # schema-preserving like ``vstack`` — NOT a horizontal
+                    # concat (issue #133).
                     return _lazy_like(self._infer_vstack_call(receiver_type, node), receiver_type)
-                elif method_name in ("hstack", "extend"):
+                elif method_name == "hstack":
                     return _lazy_like(self._infer_hstack_call(receiver_type, node), receiver_type)
                 elif method_name in ("unpivot", "melt"):
                     return _lazy_like(self._infer_unpivot_call(receiver_type, node), receiver_type)
