@@ -3592,6 +3592,55 @@ class ExpressionAnalyzer(ast.NodeVisitor):
     _DT_RETURN = DT_NAMESPACE_RETURN
     _DT_PRESERVING = DT_NAMESPACE_PRESERVING
     _LIST_PRESERVING = LIST_NAMESPACE_PRESERVING
+
+    # Per-method receiver validity for the ``.dt`` namespace (issue #139),
+    # probed on polars 1.41.2: each method maps to the temporal receiver
+    # classes it is INVALID on (a runtime InvalidOperationError / SchemaError).
+    # Calendar accessors + date/timestamp/epoch + truncate/round/offset_by/
+    # month_* need Date/Datetime; time-of-day needs Datetime/Time; total_* needs
+    # Duration. ``replace/convert_time_zone`` (Datetime-only at runtime) stay out
+    # of this map: a non-Datetime receiver keeps the deliberate legacy leniency
+    # (issue #50 tz surface). Methods absent from the map (e.g. to_string/
+    # strftime, which are format-dependent) are also unrestricted.
+    _DT_INVALID_RECEIVERS: dict[str, tuple[type[DataType], ...]] = {
+        **{
+            m: (Time, Duration)
+            for m in (
+                "year",
+                "iso_year",
+                "month",
+                "day",
+                "weekday",
+                "quarter",
+                "week",
+                "ordinal_day",
+                "date",
+                "timestamp",
+                "epoch",
+                "truncate",
+                "round",
+                "offset_by",
+                "month_start",
+                "month_end",
+            )
+        },
+        **{
+            m: (Date, Duration)
+            for m in ("hour", "minute", "second", "millisecond", "microsecond", "nanosecond")
+        },
+        **{
+            m: (Date, Datetime, Time)
+            for m in (
+                "total_days",
+                "total_hours",
+                "total_minutes",
+                "total_seconds",
+                "total_milliseconds",
+                "total_microseconds",
+                "total_nanoseconds",
+            )
+        },
+    }
     _LIST_ELEMENT_RETURN = LIST_NAMESPACE_ELEMENT_RETURN
     _BIN_RETURN = BIN_NAMESPACE_RETURN
     _CAT_RETURN = CAT_NAMESPACE_RETURN
@@ -4223,7 +4272,28 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             ):
                 result = Nullable(result)
         elif namespace == "dt":
-            if method in ("replace_time_zone", "convert_time_zone") and isinstance(
+            invalid_dt = (
+                method in self._DT_INVALID_RECEIVERS
+                and receiver_inner is not None
+                and isinstance(receiver_inner, self._DT_INVALID_RECEIVERS[method])
+            )
+            if invalid_dt:
+                # Per-method receiver mismatch (issue #139): the runtime raises
+                # InvalidOperationError / SchemaError. Flag it and degrade the
+                # output to Unknown.
+                invalid_types = self._DT_INVALID_RECEIVERS[method]
+                valid_names = ", ".join(
+                    t.__name__ for t in (Date, Datetime, Time, Duration) if t not in invalid_types
+                )
+                self.errors.append(
+                    tag(
+                        WRONG_NAMESPACE_DTYPE,
+                        f"dt.{method}: not supported for a {receiver_inner} column — "
+                        f"polars raises at runtime; dt.{method} requires {valid_names}",
+                    )
+                )
+                result = Unknown()
+            elif method in ("replace_time_zone", "convert_time_zone") and isinstance(
                 receiver_inner, Datetime
             ):
                 # These SET the tz — blanket receiver-preservation would

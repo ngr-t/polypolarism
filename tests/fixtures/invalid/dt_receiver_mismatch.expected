@@ -1,0 +1,18 @@
+duration_year: FAIL
+  error: [pple-wrong-namespace-dtype] dt.year: not supported for a Duration[us] column — polars raises at runtime; dt.year requires Date, Datetime
+  via: column 'r': passed via Unknown
+duration_hour: FAIL
+  error: [pple-wrong-namespace-dtype] dt.hour: not supported for a Duration[us] column — polars raises at runtime; dt.hour requires Datetime, Time
+  via: column 'r': passed via Unknown
+duration_truncate: FAIL
+  error: [pple-wrong-namespace-dtype] dt.truncate: not supported for a Duration[us] column — polars raises at runtime; dt.truncate requires Date, Datetime
+  via: column 'r': passed via Unknown
+datetime_total_minutes: FAIL
+  error: [pple-wrong-namespace-dtype] dt.total_minutes: not supported for a Datetime[us] column — polars raises at runtime; dt.total_minutes requires Duration
+  via: column 'r': passed via Unknown
+date_total_days: FAIL
+  error: [pple-wrong-namespace-dtype] dt.total_days: not supported for a Date column — polars raises at runtime; dt.total_days requires Duration
+  via: column 'r': passed via Unknown
+date_hour: FAIL
+  error: [pple-wrong-namespace-dtype] dt.hour: not supported for a Date column — polars raises at runtime; dt.hour requires Datetime, Time
+  via: column 'r': passed via Unknown
