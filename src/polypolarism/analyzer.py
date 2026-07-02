@@ -1679,6 +1679,27 @@ def _contains_name_accessor(node: ast.expr) -> bool:
     return any(isinstance(sub, ast.Attribute) and sub.attr == "name" for sub in ast.walk(node))
 
 
+def _is_positional_selector(node: ast.expr) -> bool:
+    """Whether ``node`` is a positional column selector (issue #142).
+
+    ``pl.nth(i)`` / ``pl.first()`` / ``pl.last()`` select a column BY POSITION —
+    the output name isn't inferable when the column order isn't pinned, so the
+    select opens the result frame (a loud degrade) instead of hard-failing.
+    ``pl.first("col")`` / ``pl.last("col")`` (with an argument) are value
+    aggregations, not selectors.
+    """
+    if not (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "pl"
+    ):
+        return False
+    if node.func.attr == "nth":
+        return True
+    return node.func.attr in ("first", "last") and not node.args
+
+
 def _nonboolean_predicate_error(
     dtype: DataType | None, op: str = "filter", noun: str = "predicate"
 ) -> str | None:
@@ -2284,6 +2305,30 @@ def _resolve_selector(node: ast.expr, frame: FrameType) -> list[str] | None:
         pattern = _regex_col_pattern(node)
         if pattern is not None:
             return _regex_matched_columns(pattern, frame)
+        if node.func.attr == "col" and node.args:
+            # ``pl.col(<dtype>)`` / ``pl.col(<dtype1>, <dtype2>)`` selects every
+            # column of that dtype, like ``cs.by_dtype`` (issue #142). Resolve
+            # only when every argument is a dtype; a string name / regex is
+            # handled elsewhere, so a non-dtype arg falls through.
+            dtype_targets: list[DataType] = []
+            all_dtypes = True
+            for arg in node.args:
+                elts = arg.elts if isinstance(arg, (ast.List, ast.Tuple)) else [arg]
+                for inner_arg in elts:
+                    resolved = _resolve_pl_dtype(inner_arg)
+                    if resolved is None:
+                        all_dtypes = False
+                        break
+                    dtype_targets.append(resolved)
+                if not all_dtypes:
+                    break
+            if all_dtypes and dtype_targets:
+
+                def _col_by_dtype(dtype: DataType) -> bool:
+                    inner = dtype.inner if isinstance(dtype, Nullable) else dtype
+                    return any(inner == t for t in dtype_targets)
+
+                return [c for c, spec in frame.columns.items() if _col_by_dtype(spec.dtype)]
         if node.func.attr == "all":
             # Only the no-arg form selects columns; ``pl.all("col")`` is the
             # "all values truthy" boolean aggregation — leave it to
@@ -7847,10 +7892,14 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     # Unknown so later references resolve (issue #8).
                     result_columns[name] = Unknown()
                     self._track_output_name(name, seen_outputs, "select")
-                elif dtype is not None and _contains_name_accessor(expr):
-                    # A ``.name.*`` output whose name is unknowable (issue
-                    # #56): the column exists at runtime under some name —
-                    # open the frame instead of losing it.
+                elif dtype is not None and (
+                    _contains_name_accessor(expr) or _is_positional_selector(expr)
+                ):
+                    # A ``.name.*`` output whose name is unknowable (issue #56),
+                    # or a positional selector ``pl.nth/first/last`` whose name
+                    # depends on unpinned column order (issue #142): the column
+                    # exists at runtime under some name — open the frame (a loud
+                    # degrade) instead of losing it and hard-failing.
                     has_opaque_outputs = True
 
         # Kwarg form ``select(name=expr)`` — polars treats it as
@@ -7901,6 +7950,10 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 row_var_dropped=row_var_dropped,
                 row_var_drop_node=_row_var_drop_node(input_frame, node, "select", this_reduces),
             )
+        if not node.args and not node.keywords:
+            # Documented zero-column ``df.select()`` — the result is the
+            # provably empty (closed) frame (issue #142).
+            return FrameType(columns={})
         return None
 
     def _infer_with_columns_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
@@ -7994,10 +8047,14 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     # Unknown so later references resolve (issue #8).
                     result_columns[name] = Unknown()
                     self._track_output_name(name, seen_outputs, "with_columns")
-                elif dtype is not None and _contains_name_accessor(expr):
-                    # A ``.name.*`` output whose name is unknowable (issue
-                    # #56): the column exists at runtime under some name —
-                    # open the frame instead of losing it.
+                elif dtype is not None and (
+                    _contains_name_accessor(expr) or _is_positional_selector(expr)
+                ):
+                    # A ``.name.*`` output whose name is unknowable (issue #56),
+                    # or a positional selector ``pl.nth/first/last`` whose name
+                    # depends on unpinned column order (issue #142): the column
+                    # exists at runtime under some name — open the frame (a loud
+                    # degrade) instead of losing it and hard-failing.
                     has_opaque_outputs = True
 
         # Kwarg form ``with_columns(name=expr)`` — polars treats it as
