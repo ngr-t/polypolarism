@@ -8199,7 +8199,27 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
     def _infer_hstack_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
         if not node.args:
             return input_frame
-        other = self._infer_expr_type(node.args[0])
+        arg = node.args[0]
+        # List-of-Series form: ``df.hstack([pl.Series("q3", ..., dtype=Int64)])``
+        # (issue #134). A Series literal with a constant name and explicit
+        # ``dtype=`` contributes that column; if any element can't be resolved
+        # statically, loud-degrade (warn + untrack) rather than silently add
+        # nothing.
+        if isinstance(arg, (ast.List, ast.Tuple)):
+            specs: dict[str, ColumnSpec] = {}
+            for el in arg.elts:
+                resolved = self._series_literal_spec(el)
+                if resolved is None:
+                    self.warnings.append(_unmodeled_method_warning(".hstack()", frame=True))
+                    return None
+                name, dtype = resolved
+                specs[name] = ColumnSpec(dtype=dtype)
+            try:
+                return concat_horizontal([input_frame, FrameType(columns=specs)])
+            except ReshapeError as e:
+                self.errors.append(tag(CONCAT_MISMATCH, str(e)))
+                return None
+        other = self._infer_expr_type(arg)
         if other is None:
             return input_frame
         try:
@@ -8207,6 +8227,35 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         except ReshapeError as e:
             self.errors.append(tag(CONCAT_MISMATCH, str(e)))
             return None
+
+    @staticmethod
+    def _series_literal_spec(node: ast.expr) -> tuple[str, DataType] | None:
+        """Resolve a ``pl.Series(name, ..., dtype=T)`` literal to ``(name, dtype)``.
+
+        Returns ``None`` when the node is not a ``pl.Series(...)`` call, or when
+        the name / dtype can't be read from literals (issue #134) — the caller
+        then loud-degrades instead of guessing.
+        """
+        if not isinstance(node, ast.Call):
+            return None
+        func = node.func
+        if not (
+            isinstance(func, ast.Attribute)
+            and func.attr == "Series"
+            and isinstance(func.value, ast.Name)
+            and func.value.id == "pl"
+        ):
+            return None
+        name: str | None = _str_constant(node.args[0]) if node.args else None
+        dtype: DataType | None = None
+        for kw in node.keywords:
+            if kw.arg == "name":
+                name = _str_constant(kw.value)
+            elif kw.arg == "dtype":
+                dtype = _resolve_pl_dtype(kw.value)
+        if name is None or dtype is None:
+            return None
+        return name, dtype
 
     def _infer_explode_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
         targets: list[str] = []
