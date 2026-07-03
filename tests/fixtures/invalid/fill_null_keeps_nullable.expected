@@ -1,0 +1,6 @@
+forward_fill: FAIL
+  error: [pple-return-type] Column 'a' has type Int64?, but declared type is Int64
+fill_with_nullable_expr: FAIL
+  error: [pple-return-type] Column 'a' has type Int64?, but declared type is Int64
+fill_nan_only: FAIL
+  error: [pple-return-type] Column 'f' has type Float64?, but declared type is Float64

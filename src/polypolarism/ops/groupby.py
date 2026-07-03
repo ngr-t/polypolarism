@@ -8,6 +8,7 @@ from enum import Enum, auto
 from typing import Literal, NoReturn
 
 from polypolarism.types import (
+    Boolean,
     DataType,
     Date,
     Datetime,
@@ -262,6 +263,12 @@ def _infer_sum(dtype: DataType) -> DataType:
     if isinstance(inner, TEMPORAL_TYPES):
         _reject_temporal("sum", dtype)
 
+    # Probed (polars 1.41.2, both contexts; issue #126): sum(Boolean) counts
+    # the True values and returns a non-null UInt32 (an empty / all-null group
+    # sums to 0, consistent with the sum-nullability rule of issue #107).
+    if isinstance(inner, Boolean):
+        return UInt32()
+
     if not isinstance(inner, NUMERIC_TYPES):
         raise GroupByTypeError(f"Cannot apply sum to type {dtype}: sum requires numeric type")
 
@@ -284,6 +291,11 @@ def _infer_mean(dtype: DataType) -> DataType:
 
     if isinstance(inner, TEMPORAL_TYPES):
         return _wrap_nullable(_temporal_mean_like(inner), is_nullable)
+
+    # Probed (polars 1.41.2, both contexts; issue #126): mean(Boolean) is the
+    # share of True values -> Float64 (nullability flows from the receiver).
+    if isinstance(inner, Boolean):
+        return _wrap_nullable(Float64(), is_nullable)
 
     if not isinstance(inner, NUMERIC_TYPES):
         raise GroupByTypeError(f"Cannot apply mean to type {dtype}: mean requires numeric type")
@@ -342,6 +354,7 @@ def _infer_float_reduction(
     *,
     always_nullable: bool = False,
     temporal_ok: tuple[type[DataType], ...] = (),
+    bool_ok: bool = False,
 ):
     """Build an inference fn for numeric -> Float64 reductions (std/var/median/quantile).
 
@@ -358,6 +371,11 @@ def _infer_float_reduction(
     Duration for std, none for var. Accepted temporals preserve the
     receiver instance (Date -> Datetime[us], see ``_temporal_mean_like``);
     every other temporal receiver is a probed runtime error.
+
+    ``bool_ok`` accepts a Boolean receiver -> Float64 (issue #126): probed
+    for std/var/median in both contexts. NOT set for quantile, whose Boolean
+    behaviour is asymmetric (select raises InvalidOperationError; grouped
+    silently yields an all-null Boolean) — so quantile keeps rejecting.
     """
 
     def _infer(dtype: DataType) -> DataType:
@@ -366,6 +384,8 @@ def _infer_float_reduction(
             return _wrap_nullable(_temporal_mean_like(inner), is_nullable or always_nullable)
         if isinstance(inner, TEMPORAL_TYPES):
             _reject_temporal(name, dtype)
+        if bool_ok and isinstance(inner, Boolean):
+            return _wrap_nullable(Float64(), is_nullable or always_nullable)
         if not isinstance(inner, NUMERIC_TYPES):
             raise GroupByTypeError(
                 f"Cannot apply {name} to type {dtype}: {name} requires numeric type"
@@ -407,9 +427,11 @@ _AGG_INFER_MAP: dict[AggFunction, Callable[[DataType], DataType]] = {
     # Temporal receiver support (issue #85): std accepts only Duration,
     # var accepts no temporal, median/quantile accept all four — probed,
     # see the TEMPORAL_TYPES comment.
-    AggFunction.STD: _infer_float_reduction("std", always_nullable=True, temporal_ok=(Duration,)),
-    AggFunction.VAR: _infer_float_reduction("var", always_nullable=True),
-    AggFunction.MEDIAN: _infer_float_reduction("median", temporal_ok=TEMPORAL_TYPES),
+    AggFunction.STD: _infer_float_reduction(
+        "std", always_nullable=True, temporal_ok=(Duration,), bool_ok=True
+    ),
+    AggFunction.VAR: _infer_float_reduction("var", always_nullable=True, bool_ok=True),
+    AggFunction.MEDIAN: _infer_float_reduction("median", temporal_ok=TEMPORAL_TYPES, bool_ok=True),
     AggFunction.QUANTILE: _infer_float_reduction("quantile", temporal_ok=TEMPORAL_TYPES),
     AggFunction.PRODUCT: _infer_product,
 }

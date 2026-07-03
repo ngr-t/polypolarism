@@ -127,6 +127,8 @@ from polypolarism.pandera_schema import (
     collect_schemas_with_imports,
 )
 from polypolarism.types import (
+    FLOAT_DTYPES,
+    INTEGER_DTYPES,
     NUMERIC_DTYPES,
     Array,
     Binary,
@@ -486,6 +488,10 @@ def _wrap_nullable_if_any(result: DataType, operands: list[DataType]) -> DataTyp
 # at runtime (InvalidOperationError) — report pple-incompatible-operands.
 _ARITH_INVALID = object()
 
+# ``list.<agg>`` reductions that return null for an empty sub-list (issue #130).
+# ``sum`` (empty -> 0) and ``len`` are excluded — they stay non-null.
+_LIST_AGG_EMPTY_NULLABLE = frozenset({"min", "max", "mean", "median", "std", "var"})
+
 _OP_SYMBOLS: dict[type[ast.operator], str] = {
     ast.Add: "+",
     ast.Sub: "-",
@@ -540,7 +546,11 @@ def _numeric_arith(
 ) -> DataType | object | None:
     """Arithmetic where both operands are numeric or Boolean."""
     if isinstance(op, ast.Div):
-        # True division always yields Float64, bool operands included.
+        # True division yields Float64 — except Float32 / Float32, which keeps
+        # Float32 (probed 1.41.2; issue #135). Any other operand (a wider
+        # float, an int, or a bool) widens the result to Float64.
+        if isinstance(left, Float32) and isinstance(right, Float32):
+            return Float32()
         return Float64()
     if isinstance(op, ast.Pow):
         # ``**`` rejects bool as base or exponent.
@@ -556,7 +566,15 @@ def _numeric_arith(
         return right  # bool acts as an int — numeric operand's dtype wins
     if rcat == "bool":
         return left
-    return _promote_or_none(left, right)
+    # Both operands numeric: follow polars' probed common-supertype lattice
+    # over the full integer/float width matrix (issue #127). ``+ - * // %``
+    # all agree on it (probed 1.41.2). This replaces the old keep-left
+    # fallback, which was wrong for 26/32 mixed-sign and every narrow
+    # same-sign pair. Unprobed widths (Float16/UInt128) come back Unknown —
+    # honest degradation rather than an invented dtype. (``**`` keeps the
+    # base dtype and is handled by its own branch above.)
+    result = supertype(left, right)
+    return result if result is not None else _promote_or_none(left, right)
 
 
 def _datetime_plus_duration(dt: Datetime, dur: Duration) -> Datetime:
@@ -1100,6 +1118,166 @@ def _cast_invalid(source_inner: DataType, target_inner: DataType) -> bool:
     return _cast_verdict(source_inner, target_inner) == "never"
 
 
+def _has_strict_false_kw(node: ast.Call) -> bool:
+    """True if the call passes an explicit literal ``strict=False``.
+
+    ``strict`` is a keyword-only flag on several polars calls with opposite
+    consequences: on ``Expr.cast`` / ``DataFrame.cast`` / ``str.to_integer`` /
+    ``str.to_datetime`` it injects nulls (issues #125/#129), while on
+    ``DataFrame.drop`` it makes a missing column a legal no-op (issue #132).
+    """
+    for kw in node.keywords:
+        if kw.arg == "strict" and isinstance(kw.value, ast.Constant) and kw.value.value is False:
+            return True
+    return False
+
+
+# (signed?, bit-width) for every integer dtype — drives the strict=False
+# null-injection check (issue #125). An integer cast target holds the source's
+# full value domain (so strict=False adds no nulls) iff it is at least as wide
+# with a compatible sign; otherwise overflow / a negative-into-unsigned value
+# is mapped to null.
+_INT_SIGN_WIDTH: dict[type[DataType], tuple[bool, int]] = {
+    Int8: (True, 8),
+    Int16: (True, 16),
+    Int32: (True, 32),
+    Int64: (True, 64),
+    Int128: (True, 128),
+    UInt8: (False, 8),
+    UInt16: (False, 16),
+    UInt32: (False, 32),
+    UInt64: (False, 64),
+    UInt128: (False, 128),
+}
+
+
+def _int_target_holds_source(source_inner: DataType, target_inner: DataType) -> bool:
+    """True if every value of integer ``source`` fits in integer ``target``."""
+    s = _INT_SIGN_WIDTH.get(type(source_inner))
+    t = _INT_SIGN_WIDTH.get(type(target_inner))
+    if s is None or t is None:
+        return True  # unknown width — assume safe (never over-nullify)
+    s_signed, s_width = s
+    t_signed, t_width = t
+    if s_signed == t_signed:
+        return t_width >= s_width
+    if not s_signed and t_signed:
+        # unsigned -> signed needs a strictly wider signed type (UInt8's 255
+        # does not fit in Int8, but fits in Int16).
+        return t_width > s_width
+    # signed -> unsigned: negative values never fit.
+    return False
+
+
+def _cast_injects_nulls(source_inner: DataType, target_inner: DataType) -> bool:
+    """Whether ``source.cast(target, strict=False)`` can turn an in-domain
+    source value into null — i.e. ``strict=True`` would raise (issue #125).
+
+    Probed polars 1.41.2. Returns True ONLY for provably-fallible casts
+    (default False), so a non-strict cast is over-nullified only when null
+    injection is certain — widening / lossless casts (int->float, narrow->wide
+    int, float->float, bool->numeric, ->Utf8) keep the receiver's nullability.
+    """
+    # Utf8 source: an unparseable string becomes null when parsed to a numeric
+    # or temporal target (str->str / ->Categorical / ->Enum never fail).
+    if isinstance(source_inner, Utf8):
+        return type(target_inner) in NUMERIC_DTYPES or isinstance(
+            target_inner, (Date, Datetime, Time, Duration)
+        )
+    tgt_is_int = type(target_inner) in INTEGER_DTYPES
+    # Float -> integer: NaN / inf / out-of-range values become null.
+    if type(source_inner) in FLOAT_DTYPES and tgt_is_int:
+        return True
+    # Integer -> integer: overflow / sign mismatch becomes null.
+    if type(source_inner) in INTEGER_DTYPES and tgt_is_int:
+        return not _int_target_holds_source(source_inner, target_inner)
+    return False
+
+
+def _cast_nonstrict_nullable(source_inner: DataType, target: DataType) -> DataType | None:
+    """``Nullable(target)`` when a ``strict=False`` cast provably injects nulls
+    (issue #125); ``None`` otherwise (the caller keeps the receiver's own
+    nullability — a lossless cast adds nothing)."""
+    target_inner = target.inner if isinstance(target, Nullable) else target
+    if not _cast_injects_nulls(source_inner, target_inner):
+        return None
+    return Nullable(target_inner)
+
+
+# Inverse of _INT_SIGN_WIDTH, for fitting integer literals (issue #147).
+_INT_BY_SIGN_WIDTH: dict[tuple[bool, int], type[DataType]] = {
+    sw: cls for cls, sw in _INT_SIGN_WIDTH.items()
+}
+
+
+def _minimal_int_dtype(col_inner: DataType, value: int) -> DataType | None:
+    """Smallest same-sign integer dtype (at least as wide as ``col_inner``) that
+    holds ``value`` — the literal-fitting rule (issue #147). ``None`` when the
+    value fits no modeled width of that sign (e.g. a negative into an unsigned
+    column)."""
+    sw = _INT_SIGN_WIDTH.get(type(col_inner))
+    if sw is None:
+        return None
+    signed, col_width = sw
+    for width in sorted({w for (s, w) in _INT_BY_SIGN_WIDTH if s == signed}):
+        if width < col_width:
+            continue
+        if signed:
+            if -(1 << (width - 1)) <= value <= (1 << (width - 1)) - 1:
+                return _INT_BY_SIGN_WIDTH[(True, width)]()
+        elif 0 <= value <= (1 << width) - 1:
+            return _INT_BY_SIGN_WIDTH[(False, width)]()
+    return None
+
+
+def _fit_literal_dtype(
+    col_inner: DataType, lit_inner: DataType, lit_value: int | float
+) -> DataType:
+    """Fit a numeric literal to the column operand's dtype (issue #147).
+
+    A float column absorbs any literal into its own width; an integer column
+    adopts its dtype for an int literal that fits (else the minimal same-sign
+    widening). An integer column with a FLOAT literal keeps the literal dtype so
+    the supertype widens to Float64 (probed). Unfittable cells keep the literal.
+    """
+    if type(col_inner) in FLOAT_DTYPES:
+        return col_inner
+    if type(col_inner) in INTEGER_DTYPES and isinstance(lit_value, int):
+        fitted = _minimal_int_dtype(col_inner, lit_value)
+        if fitted is not None:
+            return fitted
+    return lit_inner
+
+
+def _arith_literal_value(node: ast.expr) -> int | float | None:
+    """The numeric value of a bare int/float literal operand (issue #147).
+
+    Recognises a bare ``ast.Constant`` (int/float, not bool) and
+    ``pl.lit(<int/float const>)`` without an explicit ``dtype=`` (a pinned dtype
+    is not fitted). Columns, expressions and dtyped literals return ``None``.
+    """
+    if (
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, (int, float))
+        and not isinstance(node.value, bool)
+    ):
+        return node.value
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "lit"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "pl"
+        and not any(kw.arg == "dtype" for kw in node.keywords)
+        and node.args
+        and isinstance(node.args[0], ast.Constant)
+        and isinstance(node.args[0].value, (int, float))
+        and not isinstance(node.args[0].value, bool)
+    ):
+        return node.args[0].value
+    return None
+
+
 # ``Expr.diff`` on an unsigned-int receiver widens to the signed dtype of
 # the next width so negative differences are representable (probed polars
 # 1.41.2; issue #46). UInt128 is absent: it has no wider signed dtype and
@@ -1499,6 +1677,27 @@ def _contains_name_accessor(node: ast.expr) -> bool:
     declared column downstream would be a false positive.
     """
     return any(isinstance(sub, ast.Attribute) and sub.attr == "name" for sub in ast.walk(node))
+
+
+def _is_positional_selector(node: ast.expr) -> bool:
+    """Whether ``node`` is a positional column selector (issue #142).
+
+    ``pl.nth(i)`` / ``pl.first()`` / ``pl.last()`` select a column BY POSITION —
+    the output name isn't inferable when the column order isn't pinned, so the
+    select opens the result frame (a loud degrade) instead of hard-failing.
+    ``pl.first("col")`` / ``pl.last("col")`` (with an argument) are value
+    aggregations, not selectors.
+    """
+    if not (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "pl"
+    ):
+        return False
+    if node.func.attr == "nth":
+        return True
+    return node.func.attr in ("first", "last") and not node.args
 
 
 def _nonboolean_predicate_error(
@@ -2106,6 +2305,30 @@ def _resolve_selector(node: ast.expr, frame: FrameType) -> list[str] | None:
         pattern = _regex_col_pattern(node)
         if pattern is not None:
             return _regex_matched_columns(pattern, frame)
+        if node.func.attr == "col" and node.args:
+            # ``pl.col(<dtype>)`` / ``pl.col(<dtype1>, <dtype2>)`` selects every
+            # column of that dtype, like ``cs.by_dtype`` (issue #142). Resolve
+            # only when every argument is a dtype; a string name / regex is
+            # handled elsewhere, so a non-dtype arg falls through.
+            dtype_targets: list[DataType] = []
+            all_dtypes = True
+            for arg in node.args:
+                elts = arg.elts if isinstance(arg, (ast.List, ast.Tuple)) else [arg]
+                for inner_arg in elts:
+                    resolved = _resolve_pl_dtype(inner_arg)
+                    if resolved is None:
+                        all_dtypes = False
+                        break
+                    dtype_targets.append(resolved)
+                if not all_dtypes:
+                    break
+            if all_dtypes and dtype_targets:
+
+                def _col_by_dtype(dtype: DataType) -> bool:
+                    inner = dtype.inner if isinstance(dtype, Nullable) else dtype
+                    return any(inner == t for t in dtype_targets)
+
+                return [c for c, spec in frame.columns.items() if _col_by_dtype(spec.dtype)]
         if node.func.attr == "all":
             # Only the no-arg form selects columns; ``pl.all("col")`` is the
             # "all values truthy" boolean aggregation — leave it to
@@ -3101,6 +3324,22 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         UInt128,
     )
 
+    # Receivers ``-expr`` (unary minus / ``ast.USub``) is dtype-preserving on
+    # (issue #136, probed 1.41.2): signed ints, floats, Duration, Decimal.
+    # Unsigned ints, Boolean and Date/Datetime/Time raise InvalidOperationError.
+    _NEG_VALID_RECEIVERS = (
+        Int8,
+        Int16,
+        Int32,
+        Int64,
+        Int128,
+        Float16,
+        Float32,
+        Float64,
+        Duration,
+        Decimal,
+    )
+
     # Methods that return Float64 from any numeric receiver.
     _FLOAT_RETURN_METHODS = frozenset(
         {
@@ -3398,6 +3637,55 @@ class ExpressionAnalyzer(ast.NodeVisitor):
     _DT_RETURN = DT_NAMESPACE_RETURN
     _DT_PRESERVING = DT_NAMESPACE_PRESERVING
     _LIST_PRESERVING = LIST_NAMESPACE_PRESERVING
+
+    # Per-method receiver validity for the ``.dt`` namespace (issue #139),
+    # probed on polars 1.41.2: each method maps to the temporal receiver
+    # classes it is INVALID on (a runtime InvalidOperationError / SchemaError).
+    # Calendar accessors + date/timestamp/epoch + truncate/round/offset_by/
+    # month_* need Date/Datetime; time-of-day needs Datetime/Time; total_* needs
+    # Duration. ``replace/convert_time_zone`` (Datetime-only at runtime) stay out
+    # of this map: a non-Datetime receiver keeps the deliberate legacy leniency
+    # (issue #50 tz surface). Methods absent from the map (e.g. to_string/
+    # strftime, which are format-dependent) are also unrestricted.
+    _DT_INVALID_RECEIVERS: dict[str, tuple[type[DataType], ...]] = {
+        **{
+            m: (Time, Duration)
+            for m in (
+                "year",
+                "iso_year",
+                "month",
+                "day",
+                "weekday",
+                "quarter",
+                "week",
+                "ordinal_day",
+                "date",
+                "timestamp",
+                "epoch",
+                "truncate",
+                "round",
+                "offset_by",
+                "month_start",
+                "month_end",
+            )
+        },
+        **{
+            m: (Date, Duration)
+            for m in ("hour", "minute", "second", "millisecond", "microsecond", "nanosecond")
+        },
+        **{
+            m: (Date, Datetime, Time)
+            for m in (
+                "total_days",
+                "total_hours",
+                "total_minutes",
+                "total_seconds",
+                "total_milliseconds",
+                "total_microseconds",
+                "total_nanoseconds",
+            )
+        },
+    }
     _LIST_ELEMENT_RETURN = LIST_NAMESPACE_ELEMENT_RETURN
     _BIN_RETURN = BIN_NAMESPACE_RETURN
     _CAT_RETURN = CAT_NAMESPACE_RETURN
@@ -3457,15 +3745,30 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             resolved = [t for t in operand_types if t is not None]
             return alias, _wrap_nullable_if_any(Boolean(), resolved)
 
-        # Logical operators expressed as bitwise: a & b, a | b, a ^ b -> Boolean.
-        # Nullability propagates from either operand (``null & true`` is null).
+        # Bitwise a & b, a | b, a ^ b. On Boolean operands these are logical
+        # operators -> Boolean; on INTEGER operands polars performs real
+        # bitwise arithmetic and returns the integer promotion result (issue
+        # #137: ``i8 & i16`` -> Int16, same-dtype -> same dtype). Nullability
+        # propagates from either operand (``null & true`` is null).
         if isinstance(inner_node, ast.BinOp) and isinstance(
             inner_node.op, (ast.BitAnd, ast.BitOr, ast.BitXor)
         ):
             _, left_type = self.analyze_select_expr(inner_node.left)
             _, right_type = self.analyze_select_expr(inner_node.right)
             resolved = [t for t in (left_type, right_type) if t is not None]
-            return alias, _wrap_nullable_if_any(Boolean(), resolved)
+            left_inner = left_type.inner if isinstance(left_type, Nullable) else left_type
+            right_inner = right_type.inner if isinstance(right_type, Nullable) else right_type
+            result: DataType = Boolean()
+            if (
+                left_inner is not None
+                and right_inner is not None
+                and type(left_inner) in INTEGER_DTYPES
+                and type(right_inner) in INTEGER_DTYPES
+            ):
+                promoted = supertype(left_inner, right_inner)
+                if promoted is not None:
+                    result = promoted
+            return alias, _wrap_nullable_if_any(result, resolved)
 
         # ``~expr`` negates Booleans but operates BITWISE on integers,
         # preserving the dtype (issue #72) — same matrix as ``Expr.not_``;
@@ -3474,6 +3777,14 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         if isinstance(inner_node, ast.UnaryOp) and isinstance(inner_node.op, ast.Invert):
             _, operand_type = self.analyze_select_expr(inner_node.operand)
             return alias, self._not_dtype(operand_type, op_desc="~")
+
+        # ``-expr`` (unary minus): dtype-preserving for signed ints / floats /
+        # Duration / Decimal; unsigned ints and Boolean (and Date/Datetime/
+        # Time) raise InvalidOperationError at runtime -> pple-non-numeric-operand
+        # (issue #136). ``-null`` is null, so nullability carries through.
+        if isinstance(inner_node, ast.UnaryOp) and isinstance(inner_node.op, ast.USub):
+            _, operand_type = self.analyze_select_expr(inner_node.operand)
+            return alias, self._neg_dtype(operand_type)
 
         # Python ``not expr`` -> Boolean. On a polars Expr it raises
         # TypeError at expression-construction time (``Expr.__bool__`` is
@@ -3498,6 +3809,16 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             if left_type is not None and right_type is not None:
                 left_inner = left_type.inner if isinstance(left_type, Nullable) else left_type
                 right_inner = right_type.inner if isinstance(right_type, Nullable) else right_type
+                # Literal-operand fitting (issue #147): a bare numeric literal
+                # adopts the COLUMN operand's dtype (minimal widening if it does
+                # not fit), rather than promoting as a uniform Int64/Float64.
+                # Only when exactly one side is a literal.
+                left_lit = _arith_literal_value(inner_node.left)
+                right_lit = _arith_literal_value(inner_node.right)
+                if right_lit is not None and left_lit is None:
+                    right_inner = _fit_literal_dtype(left_inner, right_inner, right_lit)
+                elif left_lit is not None and right_lit is None:
+                    left_inner = _fit_literal_dtype(right_inner, left_inner, left_lit)
                 # Null literals keep promote_types' Null -> Nullable[T]
                 # rules — except next to a Decimal, where polars widens the
                 # precision even against an all-null literal (probed:
@@ -3623,7 +3944,27 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             )
             return None, Unknown()
 
-        if name == "concat_str" or name == "format":
+        if name == "concat_str":
+            # Under the default ``ignore_nulls=False`` a null in ANY operand
+            # nulls the whole result, so the output is nullable iff an operand
+            # is nullable (issue #138). ``ignore_nulls=True`` drops nulls before
+            # joining, so the result stays non-null. Each operand is resolved
+            # (a bare string is a column ref) to read its nullability and keep
+            # the column-not-found validation.
+            any_nullable = False
+            for arg in _flatten_expr_args(node.args):
+                _, arg_type = self._resolve_expr_or_col_str(arg)
+                if isinstance(arg_type, (Nullable, Null)):
+                    any_nullable = True
+            ignore_nulls = any(
+                kw.arg == "ignore_nulls"
+                and isinstance(kw.value, ast.Constant)
+                and kw.value.value is True
+                for kw in node.keywords
+            )
+            return None, Nullable(Utf8()) if (any_nullable and not ignore_nulls) else Utf8()
+
+        if name == "format":
             for arg in _flatten_expr_args(node.args):
                 self._validate_subexpr(arg)
             return None, Utf8()
@@ -3802,6 +4143,30 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 result = Nullable(result)
             return None, result
 
+        # Range constructors (issue #140): probed 1.41.2. ``int_range`` -> Int64
+        # (or an explicit literal ``dtype=``); ``int_ranges`` -> List of that;
+        # ``datetime_ranges`` -> List(Datetime[us]) — the plurals of the already
+        # modeled ``pl.datetime_range``.
+        if name in ("int_range", "int_ranges"):
+            range_dtype: DataType = Int64()
+            for kw in node.keywords:
+                if kw.arg == "dtype":
+                    resolved_dtype = _resolve_pl_dtype(kw.value)
+                    if resolved_dtype is not None:
+                        range_dtype = resolved_dtype
+            return None, ListT(range_dtype) if name == "int_ranges" else range_dtype
+
+        if name == "datetime_ranges":
+            return None, ListT(Datetime())
+
+        # Any other ``pl.<fn>(...)`` expression constructor is unmodeled: loud-
+        # degrade to Unknown with a warning, symmetric with an unmodeled method
+        # (issue #140), rather than the old silent hard-fail. ``pl.col`` /
+        # ``pl.lit`` are handled by the caller after this returns None.
+        if name not in ("col", "lit"):
+            self.warnings.append(_unmodeled_method_warning(f"pl.{name}()"))
+            return None, Unknown()
+
         return None
 
     def _resolve_expr_or_col_str(self, node: ast.expr) -> tuple[str | None, DataType | None]:
@@ -3873,7 +4238,51 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 )
             )
             return Unknown()
+        # An empty sub-list aggregates to null for the reducing aggregations
+        # (min/max/mean/median/std/var), and ``List(T)`` always admits empty
+        # sub-lists, so the result is unconditionally nullable (issue #130).
+        # ``sum`` (empty -> 0) and ``len`` stay non-null; fixed-width ``arr``
+        # sub-lists are never empty, so only the ``list`` namespace wraps.
+        if (
+            namespace == "list"
+            and method in _LIST_AGG_EMPTY_NULLABLE
+            and isinstance(verdict, DataType)
+            and not isinstance(verdict, (Nullable, Unknown))
+        ):
+            return Nullable(verdict)
         return verdict
+
+    @staticmethod
+    def _null_on_oob_true(call_node: ast.Call | None) -> bool:
+        """True if a ``list/arr.get(...)`` call passes literal ``null_on_oob=True``.
+
+        Default (``False``) raises on out-of-bounds; ``True`` maps OOB to null.
+        A non-literal keyword is treated as the default (only claim nullable
+        when provable) — see issue #128.
+        """
+        if call_node is None:
+            return False
+        for kw in call_node.keywords:
+            if kw.arg == "null_on_oob":
+                return isinstance(kw.value, ast.Constant) and kw.value.value is True
+        return False
+
+    def _element_return_is_nullable(
+        self, namespace: str, method: str, call_node: ast.Call | None
+    ) -> bool:
+        """Whether a list/arr element accessor can yield null (issue #128).
+
+        ``list.first`` / ``list.last`` always can — ``List(T)`` admits empty
+        sub-lists, which produce a null element (probed polars 1.41.2). ``get``
+        can when ``null_on_oob=True`` is passed (the default raises on OOB
+        instead). Fixed-width ``arr.first`` / ``arr.last`` never yield null
+        (probed), so only ``arr.get(null_on_oob=True)`` does.
+        """
+        if method in ("first", "last"):
+            return namespace == "list"
+        if method == "get":
+            return self._null_on_oob_true(call_node)
+        return False
 
     def _dispatch_namespace_method(
         self,
@@ -3918,8 +4327,42 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 result = _str_to_decimal_dtype(call_node)
             else:
                 result = self._STR_RETURN.get(method)
+            # ``str.to_integer`` / ``str.to_datetime`` accept ``strict=False``,
+            # which maps every unparseable string to null. The String source is
+            # always value-dependent, so a literal ``strict=False`` makes the
+            # result Nullable (issue #129, sibling of #125); ``strict=True`` /
+            # default keeps the current non-null result.
+            if (
+                method in ("to_integer", "to_datetime")
+                and result is not None
+                and not isinstance(result, (Nullable, Unknown))
+                and call_node is not None
+                and _has_strict_false_kw(call_node)
+            ):
+                result = Nullable(result)
         elif namespace == "dt":
-            if method in ("replace_time_zone", "convert_time_zone") and isinstance(
+            invalid_dt = (
+                method in self._DT_INVALID_RECEIVERS
+                and receiver_inner is not None
+                and isinstance(receiver_inner, self._DT_INVALID_RECEIVERS[method])
+            )
+            if invalid_dt:
+                # Per-method receiver mismatch (issue #139): the runtime raises
+                # InvalidOperationError / SchemaError. Flag it and degrade the
+                # output to Unknown.
+                invalid_types = self._DT_INVALID_RECEIVERS[method]
+                valid_names = ", ".join(
+                    t.__name__ for t in (Date, Datetime, Time, Duration) if t not in invalid_types
+                )
+                self.errors.append(
+                    tag(
+                        WRONG_NAMESPACE_DTYPE,
+                        f"dt.{method}: not supported for a {receiver_inner} column — "
+                        f"polars raises at runtime; dt.{method} requires {valid_names}",
+                    )
+                )
+                result = Unknown()
+            elif method in ("replace_time_zone", "convert_time_zone") and isinstance(
                 receiver_inner, Datetime
             ):
                 # These SET the tz — blanket receiver-preservation would
@@ -3953,6 +4396,11 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             elif isinstance(receiver_inner, ListT):
                 if method in self._LIST_ELEMENT_RETURN:
                     result = receiver_inner.inner
+                    if self._element_return_is_nullable(
+                        "list", method, call_node
+                    ) and not isinstance(result, (Nullable, Unknown)):
+                        # An empty / too-short sub-list yields null (issue #128).
+                        result = Nullable(result)
                 elif method in CONTAINER_AGG_METHODS:
                     result = self._container_agg_result("list", method, receiver_inner)
         elif namespace == "arr":
@@ -3998,6 +4446,12 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 element = receiver_inner.inner
                 if method in ARR_NAMESPACE_ELEMENT_RETURN:
                     result = element
+                    if self._element_return_is_nullable(
+                        "arr", method, call_node
+                    ) and not isinstance(result, (Nullable, Unknown)):
+                        # arr.get(null_on_oob=True) yields null out of bounds
+                        # (issue #128); fixed-width first/last never do.
+                        result = Nullable(result)
                 elif method in ARR_NAMESPACE_TO_LIST:
                     result = ListT(element)
                 elif method in CONTAINER_AGG_METHODS:
@@ -4082,6 +4536,30 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             tag(
                 NON_NUMERIC_OPERAND,
                 f"{op_desc}: operation not supported for dtype {inner} — "
+                f"polars raises InvalidOperationError at runtime",
+            )
+        )
+        return None
+
+    def _neg_dtype(self, receiver_type: DataType | None) -> DataType | None:
+        """Result dtype of ``-expr`` (unary minus / ``ast.USub``) — issue #136.
+
+        Dtype-preserving for signed ints / floats / Duration / Decimal (see
+        ``_NEG_VALID_RECEIVERS``); the Nullable wrapper flows through. Unsigned
+        ints, Boolean and Date/Datetime/Time raise InvalidOperationError at
+        runtime -> pple-non-numeric-operand. Unknown / unresolved stay silent.
+        """
+        if receiver_type is None:
+            return None
+        inner = receiver_type.inner if isinstance(receiver_type, Nullable) else receiver_type
+        if isinstance(inner, Unknown):
+            return receiver_type
+        if isinstance(inner, self._NEG_VALID_RECEIVERS):
+            return receiver_type
+        self.errors.append(
+            tag(
+                NON_NUMERIC_OPERAND,
+                f"unary '-': operation not supported for dtype {inner} — "
                 f"polars raises InvalidOperationError at runtime",
             )
         )
@@ -4381,6 +4859,32 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             return None
         return infer_shift_fill(receiver_type, fill_dtype, fill_is_literal=False)
 
+    def _fill_null_value_keeps_nulls(self, fill_node: ast.expr) -> bool:
+        """Whether a ``fill_null(value=<fill_node>)`` argument can itself be
+        null, so the receiver's nulls are not fully removed (issue #124).
+
+        A ``None`` / ``pl.lit(None)`` fill is a no-op (every null stays); a
+        resolved ``Nullable`` / ``Null`` expression can plug a null back in.
+        Bare literals and provably non-null expressions cover every null.
+        An unresolved fill is assumed non-null — consistent with
+        ``_shift_fill_dtype``, which fills the slots with *something* rather
+        than guessing a wrapper.
+        """
+        lit_dtype: DataType | None = None
+        if isinstance(fill_node, ast.Constant) and (
+            fill_node.value is None or isinstance(fill_node.value, (bool, int, float, str))
+        ):
+            lit_dtype = infer_lit(fill_node.value)
+        else:
+            lit_dtype = self._extract_lit_type(fill_node)
+        if lit_dtype is not None:
+            return isinstance(lit_dtype, Null)
+
+        _, fill_dtype = self.analyze_select_expr(fill_node)
+        if fill_dtype is None:
+            return False
+        return isinstance(fill_dtype, (Nullable, Null))
+
     def _analyze_name_method(
         self, method: str, inner_expr: ast.expr, call_node: ast.Call
     ) -> tuple[str | None, DataType | None] | None:
@@ -4546,12 +5050,17 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             ns_result = self._dispatch_namespace_method(ns, method, col_type, node)
             if ns_result is None:
                 # Unmodeled namespace method on a receiver that passed the
-                # dtype-validity gate above: the column silently degrades —
-                # warn (backlog B-4). Unresolved/Unknown receivers stay
-                # silent (the degradation happened upstream).
+                # dtype-validity gate above: the column degrades — warn
+                # (backlog B-4). Unresolved/Unknown receivers stay silent (the
+                # degradation happened upstream). Honor the (name, Unknown)
+                # contract (issue #144, #8 principle): the column still exists
+                # at runtime under ``col_name``, so register it as Unknown
+                # rather than discarding it — otherwise a positional select
+                # hard-fails (FP) and a with_columns keeps the stale precise
+                # dtype (FN).
                 if col_type is not None and not _base_is_unknown(col_type):
                     self.warnings.append(_unmodeled_method_warning(f".{ns}.{method}()"))
-                return None
+                return col_name, None
             return col_name, ns_result
 
         # ``.name`` namespace (issue #56): renames the OUTPUT column (or
@@ -4620,12 +5129,37 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         if method == "not_":
             return receiver_name, self._not_dtype(receiver_type, op_desc="not_")
 
-        # fill_null / fill_nan strip the Nullable wrapper.
-        if method in ("fill_null", "fill_nan"):
-            inner_dtype = receiver_type
-            if isinstance(receiver_type, Nullable):
-                inner_dtype = receiver_type.inner
-            return receiver_name, inner_dtype if inner_dtype is not None else Boolean()
+        # ``fill_nan`` replaces NaN floats only — nulls are untouched, so the
+        # receiver's nullability flows through unchanged (issue #124).
+        if method == "fill_nan":
+            return receiver_name, receiver_type
+
+        # ``fill_null`` removes nulls only when the fill provably covers every
+        # null row. A literal / non-null expression fill strips the Nullable
+        # wrapper (the historical behaviour); but a ``strategy=`` fill leaves a
+        # leading/trailing (or whole-column) null unfilled, and a nullable
+        # expression fill can plug a null back in — both keep the receiver
+        # Nullable (issue #124, mirroring ``infer_shift_fill``).
+        if method == "fill_null":
+            if receiver_type is None:
+                return receiver_name, Boolean()
+            if not isinstance(receiver_type, Nullable):
+                # Nothing to fill; dtype and nullability are unchanged.
+                return receiver_name, receiver_type
+            strategy_kw = next((kw for kw in node.keywords if kw.arg == "strategy"), None)
+            has_strategy = strategy_kw is not None and not (
+                isinstance(strategy_kw.value, ast.Constant) and strategy_kw.value.value is None
+            )
+            if has_strategy:
+                return receiver_name, receiver_type
+            fill_node = (
+                node.args[0]
+                if node.args
+                else next((kw.value for kw in node.keywords if kw.arg == "value"), None)
+            )
+            if fill_node is not None and self._fill_null_value_keeps_nulls(fill_node):
+                return receiver_name, receiver_type
+            return receiver_name, receiver_type.inner
 
         # ``Expr.filter(...)`` is row-subsetting: the dtype is preserved
         # (Nullable wrapper included — nulls may survive the predicate).
@@ -5056,6 +5590,10 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                         )
                     )
                     return receiver_name, None
+                if _has_strict_false_kw(node):
+                    nn = _cast_nonstrict_nullable(receiver_inner, target)
+                    if nn is not None:
+                        return receiver_name, nn
                 return receiver_name, _wrap_like(receiver_type, target)
             if target is not None:
                 # Receiver dtype was uninferable (e.g. ``.interpolate()``)
@@ -6319,9 +6857,12 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     return _lazy_like(self._infer_unique_call(receiver_type, node), receiver_type)
                 elif method_name == "explode":
                     return _lazy_like(self._infer_explode_call(receiver_type, node), receiver_type)
-                elif method_name == "vstack":
+                elif method_name in ("vstack", "extend"):
+                    # ``extend`` appends ROWS (memory-level vertical concat),
+                    # schema-preserving like ``vstack`` — NOT a horizontal
+                    # concat (issue #133).
                     return _lazy_like(self._infer_vstack_call(receiver_type, node), receiver_type)
-                elif method_name in ("hstack", "extend"):
+                elif method_name == "hstack":
                     return _lazy_like(self._infer_hstack_call(receiver_type, node), receiver_type)
                 elif method_name in ("unpivot", "melt"):
                     return _lazy_like(self._infer_unpivot_call(receiver_type, node), receiver_type)
@@ -7017,6 +7558,27 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                             _all_null_agg_warning(agg_expr.function, direct_col_type)
                         )
             result = infer_groupby_result(input_frame, keys, agg_exprs)
+            # ``group_by_dynamic(include_boundaries=True)`` prepends
+            # ``_lower_boundary`` / ``_upper_boundary`` columns of the index
+            # column's dtype (non-null), probed on polars 1.41.2 (issue #141).
+            if (
+                grouper == "group_by_dynamic"
+                and index_col is not None
+                and any(
+                    kw.arg == "include_boundaries"
+                    and isinstance(kw.value, ast.Constant)
+                    and kw.value.value is True
+                    for kw in groupby_receiver.keywords
+                )
+            ):
+                idx_dtype = input_frame.get_column_type(index_col)
+                if idx_dtype is not None:
+                    bound = idx_dtype.inner if isinstance(idx_dtype, Nullable) else idx_dtype
+                    result.columns = {
+                        "_lower_boundary": ColumnSpec(dtype=bound),
+                        "_upper_boundary": ColumnSpec(dtype=bound),
+                        **result.columns,
+                    }
             # Stamp only the columns we actually produced spans for; keys and
             # unstamped outputs fall back to the return line (#110).
             for name, span in column_spans.items():
@@ -7330,10 +7892,14 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     # Unknown so later references resolve (issue #8).
                     result_columns[name] = Unknown()
                     self._track_output_name(name, seen_outputs, "select")
-                elif dtype is not None and _contains_name_accessor(expr):
-                    # A ``.name.*`` output whose name is unknowable (issue
-                    # #56): the column exists at runtime under some name —
-                    # open the frame instead of losing it.
+                elif dtype is not None and (
+                    _contains_name_accessor(expr) or _is_positional_selector(expr)
+                ):
+                    # A ``.name.*`` output whose name is unknowable (issue #56),
+                    # or a positional selector ``pl.nth/first/last`` whose name
+                    # depends on unpinned column order (issue #142): the column
+                    # exists at runtime under some name — open the frame (a loud
+                    # degrade) instead of losing it and hard-failing.
                     has_opaque_outputs = True
 
         # Kwarg form ``select(name=expr)`` — polars treats it as
@@ -7384,6 +7950,10 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 row_var_dropped=row_var_dropped,
                 row_var_drop_node=_row_var_drop_node(input_frame, node, "select", this_reduces),
             )
+        if not node.args and not node.keywords:
+            # Documented zero-column ``df.select()`` — the result is the
+            # provably empty (closed) frame (issue #142).
+            return FrameType(columns={})
         return None
 
     def _infer_with_columns_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
@@ -7477,10 +8047,14 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     # Unknown so later references resolve (issue #8).
                     result_columns[name] = Unknown()
                     self._track_output_name(name, seen_outputs, "with_columns")
-                elif dtype is not None and _contains_name_accessor(expr):
-                    # A ``.name.*`` output whose name is unknowable (issue
-                    # #56): the column exists at runtime under some name —
-                    # open the frame instead of losing it.
+                elif dtype is not None and (
+                    _contains_name_accessor(expr) or _is_positional_selector(expr)
+                ):
+                    # A ``.name.*`` output whose name is unknowable (issue #56),
+                    # or a positional selector ``pl.nth/first/last`` whose name
+                    # depends on unpinned column order (issue #142): the column
+                    # exists at runtime under some name — open the frame (a loud
+                    # degrade) instead of losing it and hard-failing.
                     has_opaque_outputs = True
 
         # Kwarg form ``with_columns(name=expr)`` — polars treats it as
@@ -7565,9 +8139,17 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
 
     def _infer_drop_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
         targets = self._collect_drop_targets(node, input_frame)
+        # ``strict=False`` is polars' documented "drop if present" idiom — a
+        # missing target is a legal no-op rather than a ColumnNotFoundError
+        # (issue #132; FP-direction twin of #125/#129). Default (strict=True)
+        # keeps raising, so its static FAIL is preserved.
+        strict = not _has_strict_false_kw(node)
         result_columns = dict(input_frame.columns)
         for name in targets:
             if name not in result_columns:
+                if not strict:
+                    # drop-if-present: the column is simply not removed.
+                    continue
                 if input_frame.rest is None:
                     self.errors.append(
                         tag(
@@ -7615,8 +8197,15 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         )
 
     def _infer_rename_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
-        if not node.args or not isinstance(node.args[0], ast.Dict):
+        if not node.args:
             return input_frame
+        if not isinstance(node.args[0], ast.Dict):
+            # A callable rename (``df.rename(lambda c: ...)``) cannot be
+            # evaluated statically. Loud-degrade instead of silently pretending
+            # identity (issue #131): the old names would otherwise produce
+            # phantom missing/extra-column errors. Warn and untrack the schema.
+            self.warnings.append(_unmodeled_method_warning(".rename()", frame=True))
+            return None
         mapping_node = node.args[0]
         mapping: dict[str, str] = {}
         for key_node, val_node in zip(mapping_node.keys, mapping_node.values, strict=False):
@@ -7760,8 +8349,13 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                     )
                 )
                 continue
+            result_dtype = _wrap_like(spec.dtype, target)
+            if _has_strict_false_kw(node):
+                nn = _cast_nonstrict_nullable(source_inner, target)
+                if nn is not None:
+                    result_dtype = nn
             result_columns[col] = ColumnSpec(
-                dtype=_wrap_like(spec.dtype, target),
+                dtype=result_dtype,
                 required=spec.required,
             )
         return FrameType(
@@ -7953,7 +8547,27 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
     def _infer_hstack_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
         if not node.args:
             return input_frame
-        other = self._infer_expr_type(node.args[0])
+        arg = node.args[0]
+        # List-of-Series form: ``df.hstack([pl.Series("q3", ..., dtype=Int64)])``
+        # (issue #134). A Series literal with a constant name and explicit
+        # ``dtype=`` contributes that column; if any element can't be resolved
+        # statically, loud-degrade (warn + untrack) rather than silently add
+        # nothing.
+        if isinstance(arg, (ast.List, ast.Tuple)):
+            specs: dict[str, ColumnSpec] = {}
+            for el in arg.elts:
+                resolved = self._series_literal_spec(el)
+                if resolved is None:
+                    self.warnings.append(_unmodeled_method_warning(".hstack()", frame=True))
+                    return None
+                name, dtype = resolved
+                specs[name] = ColumnSpec(dtype=dtype)
+            try:
+                return concat_horizontal([input_frame, FrameType(columns=specs)])
+            except ReshapeError as e:
+                self.errors.append(tag(CONCAT_MISMATCH, str(e)))
+                return None
+        other = self._infer_expr_type(arg)
         if other is None:
             return input_frame
         try:
@@ -7961,6 +8575,35 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         except ReshapeError as e:
             self.errors.append(tag(CONCAT_MISMATCH, str(e)))
             return None
+
+    @staticmethod
+    def _series_literal_spec(node: ast.expr) -> tuple[str, DataType] | None:
+        """Resolve a ``pl.Series(name, ..., dtype=T)`` literal to ``(name, dtype)``.
+
+        Returns ``None`` when the node is not a ``pl.Series(...)`` call, or when
+        the name / dtype can't be read from literals (issue #134) — the caller
+        then loud-degrades instead of guessing.
+        """
+        if not isinstance(node, ast.Call):
+            return None
+        func = node.func
+        if not (
+            isinstance(func, ast.Attribute)
+            and func.attr == "Series"
+            and isinstance(func.value, ast.Name)
+            and func.value.id == "pl"
+        ):
+            return None
+        name: str | None = _str_constant(node.args[0]) if node.args else None
+        dtype: DataType | None = None
+        for kw in node.keywords:
+            if kw.arg == "name":
+                name = _str_constant(kw.value)
+            elif kw.arg == "dtype":
+                dtype = _resolve_pl_dtype(kw.value)
+        if name is None or dtype is None:
+            return None
+        return name, dtype
 
     def _infer_explode_call(self, input_frame: FrameType, node: ast.Call) -> FrameType | None:
         targets: list[str] = []
@@ -8331,6 +8974,21 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 # branch above, but the pinned fields still register.
                 result_rest = RowVar("unnest")
             for field_name, field_dtype in inner.fields.items():
+                if field_name in result_columns:
+                    # polars raises DuplicateError unconditionally when an
+                    # unnested field collides with a pre-existing column or a
+                    # previously-unnested field (issue #145). Fields of the same
+                    # struct can't collide; a collision against an open frame's
+                    # unknown extras is not provable and stays silent.
+                    self.errors.append(
+                        tag(
+                            DUPLICATE_COLUMN,
+                            f"unnest: field '{field_name}' collides with an existing "
+                            f"column — polars raises DuplicateError at runtime; "
+                            f"rename the field or column first",
+                        )
+                    )
+                    continue
                 wrapped: DataType = field_dtype
                 if outer_nullable and not isinstance(wrapped, Nullable):
                     wrapped = Nullable(wrapped)

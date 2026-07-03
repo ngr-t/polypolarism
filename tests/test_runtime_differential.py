@@ -323,6 +323,51 @@ def _value_overrides() -> dict[str, dict[str, pl.Series]]:
         "valid/container_dtypes.py": {
             "items": pl.Series([[{"qty": 1}], [{"qty": 2}], [{"qty": 3}]]),
         },
+        # issue #125: `strict_default = s.cast(Int64)` (strict=True) parses the
+        # column contents; generic "s0" strings raise instead of the intended
+        # clean run. Numeric strings keep the always-succeeding cast non-null.
+        "valid/cast_non_strict_always.py": {"s": pl.Series(["1", "2", "3"])},
+        # issue #125: the value-dependent strict=False casts only inject nulls
+        # for OUT-OF-RANGE values, which generic samples don't hit. `big`
+        # overflows Int8 and the floats are unrepresentable as Int64, so
+        # strict=False maps them to null (matching the sound static FAIL).
+        # `s` stays generic — non-numeric strings already null the Utf8->Int64
+        # casts in this fixture.
+        "invalid/cast_non_strict_nullable.py": {
+            "big": pl.Series([200, 300, 400], dtype=pl.Int64),
+            "f": pl.Series([float("nan"), float("inf"), 1e20], dtype=pl.Float64),
+        },
+        # issue #124: fill_null(strategy="forward") only leaves a null when it
+        # is LEADING, and fill_null(<nullable expr>) only when a row is null on
+        # BOTH sides. A leading null on `a` plus a row-0 null on `b` makes both
+        # forms keep a null (matching the sound static FAIL); the generic
+        # synth keeps row 0 non-null, which forward-fill would erase.
+        "invalid/fill_null_keeps_nullable.py": {
+            "a": pl.Series([None, 1, 2], dtype=pl.Int64),
+            "b": pl.Series([None, 6, 7], dtype=pl.Int64),
+        },
+        # issue #128: list.first/last and list.get(null_on_oob=True) only null
+        # on an EMPTY sub-list, which generic (non-empty) list samples never
+        # produce. A leading empty sub-list injects the null the sound static
+        # FAIL predicts.
+        "invalid/list_element_nullable.py": {
+            "xs": pl.Series([[], [1, 2], [3, 4]], dtype=pl.List(pl.Int64)),
+        },
+        # issue #129: the default strict=True str parsers raise on an
+        # unparseable string; generic "s0" samples would crash the intended
+        # clean run, so feed parseable integer / datetime strings.
+        "valid/str_parse_strict_nonnull.py": {
+            "num": pl.Series(["1", "2", "3"]),
+            "stamp": pl.Series(
+                ["2026-01-01 00:00:00", "2026-01-02 00:00:00", "2026-01-03 00:00:00"]
+            ),
+        },
+        # issue #130: list.min/max/mean/... null only on an EMPTY sub-list,
+        # which generic (non-empty) list samples never produce. A leading empty
+        # sub-list injects the null the sound static FAIL predicts.
+        "invalid/list_agg_nullable.py": {
+            "xs": pl.Series([[], [1, 2], [3, 4]], dtype=pl.List(pl.Int64)),
+        },
     }
 
 

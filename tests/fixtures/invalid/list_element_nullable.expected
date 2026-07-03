@@ -1,0 +1,8 @@
+get_null_on_oob: FAIL
+  error: [pple-return-type] Column 'x' has type Int64?, but declared type is Int64
+first_elem: FAIL
+  error: [pple-return-type] Column 'x' has type Int64?, but declared type is Int64
+last_elem: FAIL
+  error: [pple-return-type] Column 'x' has type Int64?, but declared type is Int64
+arr_get_null_on_oob: FAIL
+  error: [pple-return-type] Column 'x' has type Int64?, but declared type is Int64

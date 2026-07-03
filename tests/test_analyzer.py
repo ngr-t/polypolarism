@@ -6267,12 +6267,13 @@ class TestUnknownColumnRegistration:
         assert inferred.columns["total"].dtype == Int64()
 
     def test_agg_kwarg_uninferable_registers_unknown(self):
-        # ``pl.int_range(...)`` is not an aggregation polypolarism models —
-        # the kwarg output column must still register (as Unknown).
+        # ``pl.reduce(...)`` is not modeled (int_range is, since #140) — the
+        # kwarg output column must still register (as Unknown) even when the
+        # value degrades loudly.
         source = self.HEADER + textwrap.dedent(
             """
             def f(df: DataFrame[In]) -> DataFrame[In]:
-                return df.group_by("v").agg(n=pl.int_range(10))
+                return df.group_by("v").agg(n=pl.reduce(lambda acc, x: acc + x, pl.col("v")))
             """
         )
         results = analyze_source(source)
@@ -9162,17 +9163,19 @@ class TestContainerAggReturns:
     @pytest.mark.parametrize(
         ("expr", "expected"),
         [
-            ('pl.col("xs").list.mean()', Float64()),
-            ('pl.col("xs").list.median()', Float64()),
-            ('pl.col("xs").list.std()', Float64()),
-            ('pl.col("xs").list.var()', Float64()),
+            # Reducers null on an empty sub-list -> nullable (#130); sum -> 0
+            # (non-null) and explode is an element accessor (unchanged).
+            ('pl.col("xs").list.mean()', Nullable(Float64())),
+            ('pl.col("xs").list.median()', Nullable(Float64())),
+            ('pl.col("xs").list.std()', Nullable(Float64())),
+            ('pl.col("xs").list.var()', Nullable(Float64())),
             ('pl.col("xs").list.sum()', Int64()),
-            ('pl.col("f").list.mean()', Float32()),
+            ('pl.col("f").list.mean()', Nullable(Float32())),
             ('pl.col("f").list.sum()', Float32()),
             ('pl.col("w").list.sum()', Int64()),
-            ('pl.col("w").list.min()', Int16()),
+            ('pl.col("w").list.min()', Nullable(Int16())),
             # min/max over string elements is valid (lexicographic; probed).
-            ('pl.col("s").list.min()', Utf8()),
+            ('pl.col("s").list.min()', Nullable(Utf8())),
             ('pl.col("xs").list.explode()', Int64()),
         ],
     )
@@ -9230,22 +9233,25 @@ class TestContainerAggMatrix:
         ("expr", "expected"),
         [
             # -- list: probed-valid cells beyond the numeric core ----------
+            # Reducers (min/max/mean/median/std/var) null on an empty sub-list,
+            # so the list-namespace result is nullable (#130); sum stays
+            # non-null. arr cells (fixed width, never empty) are unaffected.
             ('pl.col("l_dur").list.sum()', Duration()),
             ('pl.col("l_dec").list.sum()', Decimal(10, 2)),
-            ('pl.col("l_date").list.mean()', Datetime()),
-            ('pl.col("l_dt").list.median()', Datetime()),
-            ('pl.col("l_time").list.mean()', Time()),
-            ('pl.col("l_dur").list.mean()', Duration()),
-            ('pl.col("l_dur").list.std()', Duration()),
-            ('pl.col("l_dec").list.median()', Float64()),
-            ('pl.col("l_dec").list.std()', Float64()),
-            ('pl.col("l_dec").list.var()', Float64()),
-            ('pl.col("l_bool").list.var()', Float64()),
-            ('pl.col("l_bool").list.min()', Boolean()),
-            ('pl.col("l_str").list.max()', Utf8()),
-            ('pl.col("l_date").list.max()', Date()),
-            ('pl.col("l_dur").list.min()', Duration()),
-            ('pl.col("l_dec").list.min()', Decimal(10, 2)),
+            ('pl.col("l_date").list.mean()', Nullable(Datetime())),
+            ('pl.col("l_dt").list.median()', Nullable(Datetime())),
+            ('pl.col("l_time").list.mean()', Nullable(Time())),
+            ('pl.col("l_dur").list.mean()', Nullable(Duration())),
+            ('pl.col("l_dur").list.std()', Nullable(Duration())),
+            ('pl.col("l_dec").list.median()', Nullable(Float64())),
+            ('pl.col("l_dec").list.std()', Nullable(Float64())),
+            ('pl.col("l_dec").list.var()', Nullable(Float64())),
+            ('pl.col("l_bool").list.var()', Nullable(Float64())),
+            ('pl.col("l_bool").list.min()', Nullable(Boolean())),
+            ('pl.col("l_str").list.max()', Nullable(Utf8())),
+            ('pl.col("l_date").list.max()', Nullable(Date())),
+            ('pl.col("l_dur").list.min()', Nullable(Duration())),
+            ('pl.col("l_dec").list.min()', Nullable(Decimal(10, 2))),
             # -- arr: probed-valid cells ------------------------------------
             ('pl.col("a_i64").arr.min()', Int64()),
             ('pl.col("a_i64").arr.max()', Int64()),

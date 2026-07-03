@@ -1,0 +1,2 @@
+concat_str_default: FAIL
+  error: [pple-return-type] Column 'r' has type Utf8?, but declared type is Utf8

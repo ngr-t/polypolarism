@@ -1,0 +1,4 @@
+to_integer_non_strict: FAIL
+  error: [pple-return-type] Column 'val' has type Int64?, but declared type is Int64
+to_datetime_non_strict: FAIL
+  error: [pple-return-type] Column 'val' has type Datetime[us]?, but declared type is Datetime[us]

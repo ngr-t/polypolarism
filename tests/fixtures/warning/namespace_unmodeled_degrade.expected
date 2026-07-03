@@ -1,0 +1,5 @@
+positional_namespace_select: WARN
+  warning: [pplw-unmodeled-method] `.list.contains()` is not modeled by polypolarism — the result dtype degrades to Unknown and downstream dtype checks weaken. Pin the dtype with `.cast(...)` after the call, or validate the frame against a schema, to keep checking precise.
+stale_dtype_overwritten: WARN
+  warning: [pplw-unmodeled-method] `.struct.json_encode()` is not modeled by polypolarism — the result dtype degrades to Unknown and downstream dtype checks weaken. Pin the dtype with `.cast(...)` after the call, or validate the frame against a schema, to keep checking precise.
+  via: column 's': passed via Unknown
