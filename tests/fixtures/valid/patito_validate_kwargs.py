@@ -43,3 +43,11 @@ def ok_superfluous_dropped(df: pt.DataFrame[Ks]) -> pt.DataFrame[Ks]:
 def ok_missing_allowed(df: pt.DataFrame[Ks]) -> pt.DataFrame[Ks]:
     KV.validate(df, allow_missing_columns=True)  # PASS; df still has only 'k'
     return df
+
+
+def ok_superfluous_stmt(df: pt.DataFrame[Ks]) -> pt.DataFrame[Ks]:
+    # Statement position: the #154 always-raises check must stay suppressed by
+    # allow_superfluous_columns (the extra is legal), so this does not raise.
+    x = df.with_columns(extra=pl.col("k").str.to_uppercase())
+    Ks.validate(x, allow_superfluous_columns=True)  # PASS; discarded result
+    return df.select("k")

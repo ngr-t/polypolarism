@@ -6305,13 +6305,16 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         return [self._infer_expr_type(node)]
 
     def visit_Expr(self, node: ast.Expr) -> None:
-        """Bare expression statement; recognise ``Schema.validate(df)`` as narrowing.
+        """Bare expression statement; recognise ``Schema.validate(df)``.
 
-        Narrowing only fires at the function body's top level; visits inside
-        if/for/while/try/with disable it via the ``_narrowing_enabled`` flag.
+        Two independent effects fire on a statement-position validate:
+        (1) the always-raises argument check — the same proof run in return /
+        assigned position (issue #154), so an assertion-style call that provably
+        raises is not silently accepted; it runs regardless of nesting, matching
+        return position. (2) variable narrowing — flow-sensitive, so it only
+        fires at the function body's top level (``_narrowing_enabled``; visits
+        inside if/for/while/try/with clear the flag).
         """
-        if not self._narrowing_enabled:
-            return
         inner = _unwrap_cast(node.value)
         if not isinstance(inner, ast.Call):
             return
@@ -6324,14 +6327,23 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         if not isinstance(schema_node, ast.Name):
             return
         schema_ft = self.schema_registry.to_frame_type(schema_node.id)
-        if schema_ft is not None:
-            self._note_schema_use(schema_node.id)
         if schema_ft is None or not call.args:
+            return
+        self._note_schema_use(schema_node.id)
+        flags = self._patito_validate_flags(call, schema_node.id)
+        # (1) Always-raises check (issue #154). Infer the argument and compare
+        # against the schema, honouring the relaxing kwargs — bare-statement
+        # expressions are otherwise not analysed, so this is the only place the
+        # discarded-result validate gets checked.
+        arg_type = self._infer_expr_type(call.args[0])
+        self._check_validate_argument(schema_node.id, schema_ft, arg_type, flags)
+        # (2) Narrowing (flow-scoped, top level only).
+        if not self._narrowing_enabled:
             return
         # ``allow_missing_columns=True``: a passing validate does not prove the
         # schema's missing columns exist, so it must NOT narrow the variable to
         # the full schema shape (issue #150) — leave its type untouched.
-        if "allow_missing_columns" in self._patito_validate_flags(call, schema_node.id):
+        if "allow_missing_columns" in flags:
             return
         arg = call.args[0]
         if isinstance(arg, ast.Name) and arg.id in self.var_types:

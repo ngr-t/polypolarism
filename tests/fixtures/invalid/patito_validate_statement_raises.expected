@@ -1,0 +1,2 @@
+statement_plain_raises: FAIL
+  error: validate: argument has extra column 'extra' (Utf8) but schema 'Ks' is strict — SchemaError on every call
