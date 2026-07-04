@@ -353,14 +353,16 @@ def _value_overrides() -> dict[str, dict[str, pl.Series]]:
         "invalid/list_element_nullable.py": {
             "xs": pl.Series([[], [1, 2], [3, 4]], dtype=pl.List(pl.Int64)),
         },
-        # issue #129: the default strict=True str parsers raise on an
+        # issues #129/#151: the default strict=True str parsers raise on an
         # unparseable string; generic "s0" samples would crash the intended
-        # clean run, so feed parseable integer / datetime strings.
+        # clean run, so feed parseable integer / datetime / date / time strings.
         "valid/str_parse_strict_nonnull.py": {
             "num": pl.Series(["1", "2", "3"]),
             "stamp": pl.Series(
                 ["2026-01-01 00:00:00", "2026-01-02 00:00:00", "2026-01-03 00:00:00"]
             ),
+            "day": pl.Series(["2026-01-01", "2026-01-02", "2026-01-03"]),
+            "clock": pl.Series(["01:02:03", "04:05:06", "07:08:09"]),
         },
         # issue #130: list.min/max/mean/... null only on an EMPTY sub-list,
         # which generic (non-empty) list samples never produce. A leading empty

@@ -4400,13 +4400,14 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 result = _str_to_decimal_dtype(call_node)
             else:
                 result = self._STR_RETURN.get(method)
-            # ``str.to_integer`` / ``str.to_datetime`` accept ``strict=False``,
-            # which maps every unparseable string to null. The String source is
-            # always value-dependent, so a literal ``strict=False`` makes the
-            # result Nullable (issue #129, sibling of #125); ``strict=True`` /
+            # ``str.to_integer`` / ``str.to_datetime`` / ``str.to_date`` /
+            # ``str.to_time`` accept ``strict=False``, which maps every
+            # unparseable string to null. The String source is always
+            # value-dependent, so a literal ``strict=False`` makes the result
+            # Nullable (issues #129/#151, siblings of #125); ``strict=True`` /
             # default keeps the current non-null result.
             if (
-                method in ("to_integer", "to_datetime")
+                method in ("to_integer", "to_datetime", "to_date", "to_time")
                 and result is not None
                 and not isinstance(result, (Nullable, Unknown))
                 and call_node is not None
