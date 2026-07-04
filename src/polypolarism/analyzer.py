@@ -5009,31 +5009,25 @@ class ExpressionAnalyzer(ast.NodeVisitor):
             return None
         return infer_shift_fill(receiver_type, fill_dtype, fill_is_literal=False)
 
-    def _fill_null_value_keeps_nulls(self, fill_node: ast.expr) -> bool:
-        """Whether a ``fill_null(value=<fill_node>)`` argument can itself be
-        null, so the receiver's nulls are not fully removed (issue #124).
+    def _resolve_fill_value_dtype(self, fill_node: ast.expr) -> DataType | None:
+        """Dtype of a ``fill_null(value=<fill_node>)`` argument (issues #124/#158).
 
-        A ``None`` / ``pl.lit(None)`` fill is a no-op (every null stays); a
-        resolved ``Nullable`` / ``Null`` expression can plug a null back in.
-        Bare literals and provably non-null expressions cover every null.
-        An unresolved fill is assumed non-null — consistent with
-        ``_shift_fill_dtype``, which fills the slots with *something* rather
-        than guessing a wrapper.
+        Drives both the result dtype (supertype of receiver and fill) and its
+        nullability (a null survives only where both sides are null, i.e. iff
+        the fill is itself ``Nullable`` / ``Null``). A bare constant uses literal
+        inference; ``pl.lit(...)`` and expressions resolve through the analyzer.
+        ``None`` when the fill can't be resolved — the caller then keeps the
+        receiver dtype rather than guessing.
         """
-        lit_dtype: DataType | None = None
         if isinstance(fill_node, ast.Constant) and (
             fill_node.value is None or isinstance(fill_node.value, (bool, int, float, str))
         ):
-            lit_dtype = infer_lit(fill_node.value)
-        else:
-            lit_dtype = self._extract_lit_type(fill_node)
+            return infer_lit(fill_node.value)
+        lit_dtype = self._extract_lit_type(fill_node)
         if lit_dtype is not None:
-            return isinstance(lit_dtype, Null)
-
+            return lit_dtype
         _, fill_dtype = self.analyze_select_expr(fill_node)
-        if fill_dtype is None:
-            return False
-        return isinstance(fill_dtype, (Nullable, Null))
+        return fill_dtype
 
     def _analyze_name_method(
         self, method: str, inner_expr: ast.expr, call_node: ast.Call
@@ -5293,9 +5287,8 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         if method == "fill_null":
             if receiver_type is None:
                 return receiver_name, Boolean()
-            receiver_inner = (
-                receiver_type.inner if isinstance(receiver_type, Nullable) else receiver_type
-            )
+            receiver_nullable = isinstance(receiver_type, Nullable)
+            receiver_inner = receiver_type.inner if receiver_nullable else receiver_type
             strategy_kw = next((kw for kw in node.keywords if kw.arg == "strategy"), None)
             has_strategy = strategy_kw is not None and not (
                 isinstance(strategy_kw.value, ast.Constant) and strategy_kw.value.value is None
@@ -5305,28 +5298,38 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 if node.args
                 else next((kw.value for kw in node.keywords if kw.arg == "value"), None)
             )
-            # A literal fill widens the dtype like a binary operand (issue #156):
-            # ``Int8`` filled with ``1000`` -> Int16. polars computes this
-            # supertype even on a column with no nulls, so it is independent of
-            # receiver nullability; a ``strategy=`` fill carries no such literal.
-            fitted = (
-                None
-                if has_strategy or fill_node is None
-                else _literal_fill_result(receiver_inner, fill_node)
+            # A ``strategy=`` fill (or no fill node) carries no value dtype and
+            # can leave a leading/trailing null unfilled — nothing changes.
+            if has_strategy or fill_node is None:
+                return receiver_name, receiver_type
+            # A bare numeric literal fits/widens the receiver and removes every
+            # null (issue #156); polars applies that supertype even on a
+            # null-free column, so it is independent of receiver nullability.
+            fitted = _literal_fill_result(receiver_inner, fill_node)
+            if fitted is not None:
+                return receiver_name, fitted
+            # Any other fill is an expression (or a non-numeric literal): the
+            # result dtype is the supertype of receiver and fill (issue #158,
+            # like ``shift(fill_value=<expr>)``); an unresolved fill keeps the
+            # receiver dtype rather than guessing.
+            fill_dtype = self._resolve_fill_value_dtype(fill_node)
+            if fill_dtype is None:
+                return receiver_name, receiver_inner if receiver_nullable else receiver_type
+            if isinstance(fill_dtype, Null):
+                # ``fill_null(None)`` / ``pl.lit(None)`` is a no-op — nulls stay.
+                return receiver_name, receiver_type
+            fill_inner, fill_nullable = (
+                (fill_dtype.inner, True)
+                if isinstance(fill_dtype, Nullable)
+                else (fill_dtype, False)
             )
-            if not isinstance(receiver_type, Nullable):
-                # No nulls to remove: nullability unchanged, but a widening
-                # literal fill still changes the dtype.
-                return receiver_name, fitted if fitted is not None else receiver_type
-            # A ``strategy=`` fill leaves a leading/trailing (or whole-column)
-            # null unfilled, and a nullable expression fill can plug a null back
-            # in — both keep the receiver Nullable (issue #124).
-            if has_strategy:
-                return receiver_name, receiver_type
-            if fill_node is not None and self._fill_null_value_keeps_nulls(fill_node):
-                return receiver_name, receiver_type
-            # Nulls are removed -> non-nullable; a widening literal changes dtype.
-            return receiver_name, fitted if fitted is not None else receiver_inner
+            merged = supertype(receiver_inner, fill_inner)
+            result_inner = merged if merged is not None else receiver_inner
+            # A null survives only where BOTH sides are null (issue #124), so
+            # the result is Nullable iff the receiver was AND the fill can be.
+            if receiver_nullable and fill_nullable:
+                return receiver_name, Nullable(result_inner)
+            return receiver_name, result_inner
 
         # ``Expr.filter(...)`` is row-subsetting: the dtype is preserved
         # (Nullable wrapper included — nulls may survive the predicate).

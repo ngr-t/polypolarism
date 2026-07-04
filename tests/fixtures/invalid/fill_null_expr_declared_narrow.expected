@@ -1,0 +1,2 @@
+fill_wider_declared_narrow: FAIL
+  error: [pple-return-type] Column 'r' has type Int64, but declared type is Int8
