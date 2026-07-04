@@ -136,6 +136,7 @@ from polypolarism.types import (
     Categorical,
     ColumnSpec,
     DataType,
+    DataTypeGroup,
     Date,
     Datetime,
     Decimal,
@@ -491,6 +492,13 @@ _ARITH_INVALID = object()
 # ``list.<agg>`` reductions that return null for an empty sub-list (issue #130).
 # ``sum`` (empty -> 0) and ``len`` are excluded — they stay non-null.
 _LIST_AGG_EMPTY_NULLABLE = frozenset({"min", "max", "mean", "median", "std", "var"})
+
+# Patito-only ``Model.validate`` keyword arguments that relax the default
+# strict/complete semantics (issue #150). Pandera's ``validate`` has none of
+# these, so they are honoured only for Patito schemas.
+_PATITO_VALIDATE_FLAGS = frozenset(
+    {"allow_superfluous_columns", "drop_superfluous_columns", "allow_missing_columns"}
+)
 
 _OP_SYMBOLS: dict[type[ast.operator], str] = {
     ast.Add: "+",
@@ -2892,6 +2900,26 @@ def _is_column_subtype(actual: DataType, expected: DataType) -> bool:
 
     # Nullable actual cannot fill a non-nullable expected slot.
     if isinstance(actual, Nullable) and not isinstance(expected, Nullable):
+        return False
+
+    # Patito acceptance group on the expected side (ADR-0010): the slot accepts
+    # any of a set of dtypes (``int`` -> any integer width, ``float`` -> any
+    # float, ``Literal[str]`` -> String/Enum). A concrete actual satisfies it
+    # when it is a subtype of any member; group-vs-group is member-subset. This
+    # mirrors the return-boundary checker's ``_subtype_verdict`` so ``validate()``
+    # arguments and function-call arguments normalize abstract families the same
+    # way (issue #150). ``datetime``/``timedelta`` groups are temporal-class
+    # wildcards (any unit/tz), matching ``checker._subtype_verdict``.
+    if isinstance(expected_base, DataTypeGroup):
+        if isinstance(actual_base, DataTypeGroup):
+            return actual_base.members <= expected_base.members
+        for member in expected_base.members:
+            if isinstance(member, Datetime) and isinstance(actual_base, Datetime):
+                return True
+            if isinstance(member, Duration) and isinstance(actual_base, Duration):
+                return True
+            if _is_column_subtype(actual_base, member):
+                return True
         return False
 
     # List / Array containers: compare element types with the same rules so
@@ -6269,6 +6297,11 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             self._note_schema_use(schema_node.id)
         if schema_ft is None or not call.args:
             return
+        # ``allow_missing_columns=True``: a passing validate does not prove the
+        # schema's missing columns exist, so it must NOT narrow the variable to
+        # the full schema shape (issue #150) — leave its type untouched.
+        if "allow_missing_columns" in self._patito_validate_flags(call, schema_node.id):
+            return
         arg = call.args[0]
         if isinstance(arg, ast.Name) and arg.id in self.var_types:
             # Preserve laziness from the variable being narrowed.
@@ -6975,7 +7008,11 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             )
 
     def _check_validate_argument(
-        self, schema_name: str, declared: FrameType, arg_type: FrameType | None
+        self,
+        schema_name: str,
+        declared: FrameType,
+        arg_type: FrameType | None,
+        flags: frozenset[str] = frozenset(),
     ) -> None:
         """Provable input incompatibilities of ``Schema.validate(arg)`` (issue #89).
 
@@ -6987,11 +7024,18 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         value-dependent — issues #82/#84/#88). Mirrors the function-call
         argument checks: ``check_types`` and an explicit ``validate`` run
         the same validation.
+
+        ``flags`` carries the Patito kwargs that relax those proofs (issue #150):
+        ``allow_missing_columns`` legalises a missing required column, and
+        ``allow_superfluous_columns`` / ``drop_superfluous_columns`` legalise an
+        extra column against a strict schema.
         """
         if arg_type is None:
             return
         from polypolarism.checker import _is_coercible_difference
 
+        allow_missing = "allow_missing_columns" in flags
+        allow_extras = bool(flags & {"allow_superfluous_columns", "drop_superfluous_columns"})
         for col_name, declared_spec in declared.columns.items():
             arg_spec = arg_type.columns.get(col_name)
             if arg_spec is None:
@@ -7003,6 +7047,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 # user's justification).
                 if (
                     declared_spec.required
+                    and not allow_missing
                     and arg_type.lacks(col_name)
                     and arg_type.nonstrict_schema is None
                 ):
@@ -7033,7 +7078,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 f"but schema '{schema_name}' declares {declared_spec.dtype} — "
                 f"SchemaError on every call"
             )
-        if declared.strict:
+        if declared.strict and not allow_extras:
             for col_name, arg_spec in arg_type.columns.items():
                 if col_name not in declared.columns and arg_spec.required:
                     self.errors.append(
@@ -7041,6 +7086,26 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                         f"({arg_spec.dtype}) but schema '{schema_name}' is strict — "
                         f"SchemaError on every call"
                     )
+
+    def _patito_validate_flags(self, call: ast.Call, schema_name: str) -> frozenset[str]:
+        """Names of the patito-only ``validate`` kwargs set to ``True`` (issue #150).
+
+        ``patito.Model.validate`` accepts ``allow_superfluous_columns``,
+        ``drop_superfluous_columns`` and ``allow_missing_columns``, each of which
+        relaxes the default strict/complete semantics. Empty for a non-Patito
+        schema — Pandera's ``validate`` has no such arguments, so honouring them
+        would be unsound there.
+        """
+        schema = self.schema_registry.get(schema_name)
+        if schema is None or schema.dialect != "patito":
+            return frozenset()
+        return frozenset(
+            kw.arg
+            for kw in call.keywords
+            if kw.arg in _PATITO_VALIDATE_FLAGS
+            and isinstance(kw.value, ast.Constant)
+            and kw.value.value is True
+        )
 
     def _validate_opens_extras(self, call: ast.Call, schema_name: str) -> bool:
         """True for ``PatitoModel.validate(df, allow_superfluous_columns=True)``.
@@ -7053,15 +7118,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         default is already correct there. Scoped to Patito schemas (the kwarg
         is patito.validate's; Pandera has no such argument).
         """
-        schema = self.schema_registry.get(schema_name)
-        if schema is None or schema.dialect != "patito":
-            return False
-        return any(
-            kw.arg == "allow_superfluous_columns"
-            and isinstance(kw.value, ast.Constant)
-            and kw.value.value is True
-            for kw in call.keywords
-        )
+        return "allow_superfluous_columns" in self._patito_validate_flags(call, schema_name)
 
     def _infer_validate_call(self, node: ast.Call) -> FrameType | None:
         """Resolve ``Schema.validate(df_or_lf)`` to the schema's FrameType.
@@ -7097,11 +7154,18 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             for w in self.warnings[warnings_before_arg:]
             if not w.startswith(f"[{UNMODELED_METHOD}]")
         ]
+        flags = self._patito_validate_flags(node, schema_node.id)
         declared = self.schema_registry.to_frame_type(schema_node.id)
         if declared is not None:
-            self._check_validate_argument(schema_node.id, declared, arg_type)
+            self._check_validate_argument(schema_node.id, declared, arg_type, flags)
         if arg_type is not None:
             ft.is_lazy = arg_type.is_lazy
+        # ``allow_missing_columns=True``: a passing validate does NOT prove the
+        # schema's missing columns exist, so it cannot narrow the result to the
+        # full schema shape (issue #150). Fall back to the argument's own type
+        # (the validated columns keep whatever they already carried).
+        if "allow_missing_columns" in flags:
+            return arg_type
         return ft
 
     def _infer_pipe_call(
