@@ -136,6 +136,7 @@ from polypolarism.types import (
     Categorical,
     ColumnSpec,
     DataType,
+    DataTypeGroup,
     Date,
     Datetime,
     Decimal,
@@ -491,6 +492,13 @@ _ARITH_INVALID = object()
 # ``list.<agg>`` reductions that return null for an empty sub-list (issue #130).
 # ``sum`` (empty -> 0) and ``len`` are excluded — they stay non-null.
 _LIST_AGG_EMPTY_NULLABLE = frozenset({"min", "max", "mean", "median", "std", "var"})
+
+# Patito-only ``Model.validate`` keyword arguments that relax the default
+# strict/complete semantics (issue #150). Pandera's ``validate`` has none of
+# these, so they are honoured only for Patito schemas.
+_PATITO_VALIDATE_FLAGS = frozenset(
+    {"allow_superfluous_columns", "drop_superfluous_columns", "allow_missing_columns"}
+)
 
 _OP_SYMBOLS: dict[type[ast.operator], str] = {
     ast.Add: "+",
@@ -1132,6 +1140,25 @@ def _has_strict_false_kw(node: ast.Call) -> bool:
     return False
 
 
+def _tz_injects_null(node: ast.Call) -> bool:
+    """True if ``dt.replace_time_zone`` passes a literal ``ambiguous="null"`` or
+    ``non_existent="null"`` (issue #152).
+
+    Those DST policies map ambiguous (fall-back, occurs twice) and non-existent
+    (spring-forward gap) local times to null — value-dependent injection, like
+    ``strict=False``. The other policy values (``"raise"`` / ``"earliest"`` /
+    ``"latest"``) keep the result non-null.
+    """
+    for kw in node.keywords:
+        if (
+            kw.arg in ("ambiguous", "non_existent")
+            and isinstance(kw.value, ast.Constant)
+            and kw.value.value == "null"
+        ):
+            return True
+    return False
+
+
 # (signed?, bit-width) for every integer dtype — drives the strict=False
 # null-injection check (issue #125). An integer cast target holds the source's
 # full value domain (so strict=False adds no nulls) iff it is at least as wide
@@ -1230,38 +1257,82 @@ def _minimal_int_dtype(col_inner: DataType, value: int) -> DataType | None:
     return None
 
 
-def _fit_literal_dtype(
-    col_inner: DataType, lit_inner: DataType, lit_value: int | float
-) -> DataType:
-    """Fit a numeric literal to the column operand's dtype (issue #147).
+def _signed_safe_dtype(col_inner: DataType) -> DataType | None:
+    """Smallest SIGNED integer that safely holds an UNSIGNED column's full range
+    (issue #149).
 
-    A float column absorbs any literal into its own width; an integer column
+    A negative literal can never fit an unsigned column, so polars resolves the
+    operation to a signed supertype of double the column width, capped at Int64
+    (``u8 -> Int16``, ``u16 -> Int32``, ``u32 -> Int64``, ``u64 -> Int64``).
+    ``None`` for a dtype that is not a modeled unsigned integer.
+    """
+    sw = _INT_SIGN_WIDTH.get(type(col_inner))
+    if sw is None or sw[0]:  # not modeled, or already signed
+        return None
+    return _INT_BY_SIGN_WIDTH[(True, min(sw[1] * 2, 64))]()
+
+
+def _fit_literal_operands(
+    col_inner: DataType, lit_inner: DataType, lit_value: int | float
+) -> tuple[DataType, DataType]:
+    """Adjust ``(column, literal)`` operand dtypes so the promotion lattice
+    reproduces polars' literal-fitting result (issues #147, #149).
+
+    A float column absorbs any literal into its own width. An integer column
     adopts its dtype for an int literal that fits (else the minimal same-sign
-    widening). An integer column with a FLOAT literal keeps the literal dtype so
-    the supertype widens to Float64 (probed). Unfittable cells keep the literal.
+    widening). A NEGATIVE int literal against an unsigned column can never fit;
+    polars resolves it to a signed supertype, so promote the column to its
+    signed-safe width and fit the literal to its minimal signed width — the
+    lattice then yields the right signed result, incl. ``UInt64 -> Int64`` which
+    the raw column-vs-column supertype (Float64) would miss. An integer column
+    with a FLOAT literal keeps both dtypes so the supertype widens to Float64.
+    Returns the operands unchanged when nothing fits.
     """
     if type(col_inner) in FLOAT_DTYPES:
-        return col_inner
+        return col_inner, col_inner
     if type(col_inner) in INTEGER_DTYPES and isinstance(lit_value, int):
         fitted = _minimal_int_dtype(col_inner, lit_value)
         if fitted is not None:
-            return fitted
-    return lit_inner
+            return col_inner, fitted
+        signed_col = _signed_safe_dtype(col_inner)
+        if signed_col is not None:
+            return signed_col, _minimal_int_dtype(Int8(), lit_value) or Int64()
+    return col_inner, lit_inner
 
 
-def _arith_literal_value(node: ast.expr) -> int | float | None:
-    """The numeric value of a bare int/float literal operand (issue #147).
+def _fold_numeric_constant(node: ast.expr) -> int | float | None:
+    """Value of a bare int/float literal, folding a leading unary ``+``/``-``
+    sign (issue #149).
 
-    Recognises a bare ``ast.Constant`` (int/float, not bool) and
-    ``pl.lit(<int/float const>)`` without an explicit ``dtype=`` (a pinned dtype
-    is not fitted). Columns, expressions and dtyped literals return ``None``.
+    ``-1`` parses as ``UnaryOp(USub, Constant(1))`` — not a bare ``ast.Constant``
+    — so without this fold a negative literal escapes the fit path entirely.
+    Bools are excluded; other expressions return ``None``.
     """
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        inner = _fold_numeric_constant(node.operand)
+        if inner is None:
+            return None
+        return -inner if isinstance(node.op, ast.USub) else inner
     if (
         isinstance(node, ast.Constant)
         and isinstance(node.value, (int, float))
         and not isinstance(node.value, bool)
     ):
         return node.value
+    return None
+
+
+def _arith_literal_value(node: ast.expr) -> int | float | None:
+    """The numeric value of a bare int/float literal operand (issues #147, #149).
+
+    Recognises a bare ``ast.Constant`` (int/float, not bool, possibly with a
+    unary sign) and ``pl.lit(<int/float const>)`` without an explicit ``dtype=``
+    (a pinned dtype is not fitted). Columns, expressions and dtyped literals
+    return ``None``.
+    """
+    value = _fold_numeric_constant(node)
+    if value is not None:
+        return value
     if (
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
@@ -1270,11 +1341,8 @@ def _arith_literal_value(node: ast.expr) -> int | float | None:
         and node.func.value.id == "pl"
         and not any(kw.arg == "dtype" for kw in node.keywords)
         and node.args
-        and isinstance(node.args[0], ast.Constant)
-        and isinstance(node.args[0].value, (int, float))
-        and not isinstance(node.args[0].value, bool)
     ):
-        return node.args[0].value
+        return _fold_numeric_constant(node.args[0])
     return None
 
 
@@ -2853,6 +2921,26 @@ def _is_column_subtype(actual: DataType, expected: DataType) -> bool:
     if isinstance(actual, Nullable) and not isinstance(expected, Nullable):
         return False
 
+    # Patito acceptance group on the expected side (ADR-0010): the slot accepts
+    # any of a set of dtypes (``int`` -> any integer width, ``float`` -> any
+    # float, ``Literal[str]`` -> String/Enum). A concrete actual satisfies it
+    # when it is a subtype of any member; group-vs-group is member-subset. This
+    # mirrors the return-boundary checker's ``_subtype_verdict`` so ``validate()``
+    # arguments and function-call arguments normalize abstract families the same
+    # way (issue #150). ``datetime``/``timedelta`` groups are temporal-class
+    # wildcards (any unit/tz), matching ``checker._subtype_verdict``.
+    if isinstance(expected_base, DataTypeGroup):
+        if isinstance(actual_base, DataTypeGroup):
+            return actual_base.members <= expected_base.members
+        for member in expected_base.members:
+            if isinstance(member, Datetime) and isinstance(actual_base, Datetime):
+                return True
+            if isinstance(member, Duration) and isinstance(actual_base, Duration):
+                return True
+            if _is_column_subtype(actual_base, member):
+                return True
+        return False
+
     # List / Array containers: compare element types with the same rules so
     # the Unknown leniency reaches nested dtypes (e.g. List[Unknown] from
     # an un-inferable ``list.eval`` body vs a declared List[T]). Array vs
@@ -3816,9 +3904,13 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 left_lit = _arith_literal_value(inner_node.left)
                 right_lit = _arith_literal_value(inner_node.right)
                 if right_lit is not None and left_lit is None:
-                    right_inner = _fit_literal_dtype(left_inner, right_inner, right_lit)
+                    left_inner, right_inner = _fit_literal_operands(
+                        left_inner, right_inner, right_lit
+                    )
                 elif left_lit is not None and right_lit is None:
-                    left_inner = _fit_literal_dtype(right_inner, left_inner, left_lit)
+                    right_inner, left_inner = _fit_literal_operands(
+                        right_inner, left_inner, left_lit
+                    )
                 # Null literals keep promote_types' Null -> Nullable[T]
                 # rules — except next to a Decimal, where polars widens the
                 # precision even against an all-null literal (probed:
@@ -4327,13 +4419,14 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 result = _str_to_decimal_dtype(call_node)
             else:
                 result = self._STR_RETURN.get(method)
-            # ``str.to_integer`` / ``str.to_datetime`` accept ``strict=False``,
-            # which maps every unparseable string to null. The String source is
-            # always value-dependent, so a literal ``strict=False`` makes the
-            # result Nullable (issue #129, sibling of #125); ``strict=True`` /
+            # ``str.to_integer`` / ``str.to_datetime`` / ``str.to_date`` /
+            # ``str.to_time`` accept ``strict=False``, which maps every
+            # unparseable string to null. The String source is always
+            # value-dependent, so a literal ``strict=False`` makes the result
+            # Nullable (issues #129/#151, siblings of #125); ``strict=True`` /
             # default keeps the current non-null result.
             if (
-                method in ("to_integer", "to_datetime")
+                method in ("to_integer", "to_datetime", "to_date", "to_time")
                 and result is not None
                 and not isinstance(result, (Nullable, Unknown))
                 and call_node is not None
@@ -4370,6 +4463,17 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 # that tz mismatches are flagged (issue #50 collateral).
                 # The receiver's time unit is preserved (issue #66).
                 result = _time_zone_arg_dtype(method, call_node, receiver_inner)
+                # ``replace_time_zone`` injects nulls under the DST policies
+                # ``ambiguous="null"`` / ``non_existent="null"`` (issue #152),
+                # value-dependent like ``cast(strict=False)``.
+                if (
+                    method == "replace_time_zone"
+                    and result is not None
+                    and not isinstance(result, (Nullable, Unknown))
+                    and call_node is not None
+                    and _tz_injects_null(call_node)
+                ):
+                    result = Nullable(result)
             elif method == "epoch":
                 # Argument-dependent (issue #73): "d" -> Int32, the
                 # sub-second units -> Int64 — dispatched before the fixed
@@ -6224,6 +6328,11 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             self._note_schema_use(schema_node.id)
         if schema_ft is None or not call.args:
             return
+        # ``allow_missing_columns=True``: a passing validate does not prove the
+        # schema's missing columns exist, so it must NOT narrow the variable to
+        # the full schema shape (issue #150) — leave its type untouched.
+        if "allow_missing_columns" in self._patito_validate_flags(call, schema_node.id):
+            return
         arg = call.args[0]
         if isinstance(arg, ast.Name) and arg.id in self.var_types:
             # Preserve laziness from the variable being narrowed.
@@ -6930,7 +7039,11 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             )
 
     def _check_validate_argument(
-        self, schema_name: str, declared: FrameType, arg_type: FrameType | None
+        self,
+        schema_name: str,
+        declared: FrameType,
+        arg_type: FrameType | None,
+        flags: frozenset[str] = frozenset(),
     ) -> None:
         """Provable input incompatibilities of ``Schema.validate(arg)`` (issue #89).
 
@@ -6942,11 +7055,18 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         value-dependent — issues #82/#84/#88). Mirrors the function-call
         argument checks: ``check_types`` and an explicit ``validate`` run
         the same validation.
+
+        ``flags`` carries the Patito kwargs that relax those proofs (issue #150):
+        ``allow_missing_columns`` legalises a missing required column, and
+        ``allow_superfluous_columns`` / ``drop_superfluous_columns`` legalise an
+        extra column against a strict schema.
         """
         if arg_type is None:
             return
         from polypolarism.checker import _is_coercible_difference
 
+        allow_missing = "allow_missing_columns" in flags
+        allow_extras = bool(flags & {"allow_superfluous_columns", "drop_superfluous_columns"})
         for col_name, declared_spec in declared.columns.items():
             arg_spec = arg_type.columns.get(col_name)
             if arg_spec is None:
@@ -6958,6 +7078,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 # user's justification).
                 if (
                     declared_spec.required
+                    and not allow_missing
                     and arg_type.lacks(col_name)
                     and arg_type.nonstrict_schema is None
                 ):
@@ -6988,7 +7109,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                 f"but schema '{schema_name}' declares {declared_spec.dtype} — "
                 f"SchemaError on every call"
             )
-        if declared.strict:
+        if declared.strict and not allow_extras:
             for col_name, arg_spec in arg_type.columns.items():
                 if col_name not in declared.columns and arg_spec.required:
                     self.errors.append(
@@ -6996,6 +7117,26 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
                         f"({arg_spec.dtype}) but schema '{schema_name}' is strict — "
                         f"SchemaError on every call"
                     )
+
+    def _patito_validate_flags(self, call: ast.Call, schema_name: str) -> frozenset[str]:
+        """Names of the patito-only ``validate`` kwargs set to ``True`` (issue #150).
+
+        ``patito.Model.validate`` accepts ``allow_superfluous_columns``,
+        ``drop_superfluous_columns`` and ``allow_missing_columns``, each of which
+        relaxes the default strict/complete semantics. Empty for a non-Patito
+        schema — Pandera's ``validate`` has no such arguments, so honouring them
+        would be unsound there.
+        """
+        schema = self.schema_registry.get(schema_name)
+        if schema is None or schema.dialect != "patito":
+            return frozenset()
+        return frozenset(
+            kw.arg
+            for kw in call.keywords
+            if kw.arg in _PATITO_VALIDATE_FLAGS
+            and isinstance(kw.value, ast.Constant)
+            and kw.value.value is True
+        )
 
     def _validate_opens_extras(self, call: ast.Call, schema_name: str) -> bool:
         """True for ``PatitoModel.validate(df, allow_superfluous_columns=True)``.
@@ -7008,15 +7149,7 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
         default is already correct there. Scoped to Patito schemas (the kwarg
         is patito.validate's; Pandera has no such argument).
         """
-        schema = self.schema_registry.get(schema_name)
-        if schema is None or schema.dialect != "patito":
-            return False
-        return any(
-            kw.arg == "allow_superfluous_columns"
-            and isinstance(kw.value, ast.Constant)
-            and kw.value.value is True
-            for kw in call.keywords
-        )
+        return "allow_superfluous_columns" in self._patito_validate_flags(call, schema_name)
 
     def _infer_validate_call(self, node: ast.Call) -> FrameType | None:
         """Resolve ``Schema.validate(df_or_lf)`` to the schema's FrameType.
@@ -7052,11 +7185,18 @@ class FunctionBodyAnalyzer(ast.NodeVisitor):
             for w in self.warnings[warnings_before_arg:]
             if not w.startswith(f"[{UNMODELED_METHOD}]")
         ]
+        flags = self._patito_validate_flags(node, schema_node.id)
         declared = self.schema_registry.to_frame_type(schema_node.id)
         if declared is not None:
-            self._check_validate_argument(schema_node.id, declared, arg_type)
+            self._check_validate_argument(schema_node.id, declared, arg_type, flags)
         if arg_type is not None:
             ft.is_lazy = arg_type.is_lazy
+        # ``allow_missing_columns=True``: a passing validate does NOT prove the
+        # schema's missing columns exist, so it cannot narrow the result to the
+        # full schema shape (issue #150). Fall back to the argument's own type
+        # (the validated columns keep whatever they already carried).
+        if "allow_missing_columns" in flags:
+            return arg_type
         return ft
 
     def _infer_pipe_call(
