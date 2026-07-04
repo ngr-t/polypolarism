@@ -1140,6 +1140,25 @@ def _has_strict_false_kw(node: ast.Call) -> bool:
     return False
 
 
+def _tz_injects_null(node: ast.Call) -> bool:
+    """True if ``dt.replace_time_zone`` passes a literal ``ambiguous="null"`` or
+    ``non_existent="null"`` (issue #152).
+
+    Those DST policies map ambiguous (fall-back, occurs twice) and non-existent
+    (spring-forward gap) local times to null — value-dependent injection, like
+    ``strict=False``. The other policy values (``"raise"`` / ``"earliest"`` /
+    ``"latest"``) keep the result non-null.
+    """
+    for kw in node.keywords:
+        if (
+            kw.arg in ("ambiguous", "non_existent")
+            and isinstance(kw.value, ast.Constant)
+            and kw.value.value == "null"
+        ):
+            return True
+    return False
+
+
 # (signed?, bit-width) for every integer dtype — drives the strict=False
 # null-injection check (issue #125). An integer cast target holds the source's
 # full value domain (so strict=False adds no nulls) iff it is at least as wide
@@ -4444,6 +4463,17 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 # that tz mismatches are flagged (issue #50 collateral).
                 # The receiver's time unit is preserved (issue #66).
                 result = _time_zone_arg_dtype(method, call_node, receiver_inner)
+                # ``replace_time_zone`` injects nulls under the DST policies
+                # ``ambiguous="null"`` / ``non_existent="null"`` (issue #152),
+                # value-dependent like ``cast(strict=False)``.
+                if (
+                    method == "replace_time_zone"
+                    and result is not None
+                    and not isinstance(result, (Nullable, Unknown))
+                    and call_node is not None
+                    and _tz_injects_null(call_node)
+                ):
+                    result = Nullable(result)
             elif method == "epoch":
                 # Argument-dependent (issue #73): "d" -> Int32, the
                 # sub-second units -> Int64 — dispatched before the fixed

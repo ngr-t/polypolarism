@@ -370,6 +370,17 @@ def _value_overrides() -> dict[str, dict[str, pl.Series]]:
         "invalid/list_agg_nullable.py": {
             "xs": pl.Series([[], [1, 2], [3, 4]], dtype=pl.List(pl.Int64)),
         },
+        # issue #152: replace_time_zone(ambiguous="null") nulls only a DST
+        # fall-back time (occurs twice) and (non_existent="null") only a
+        # spring-forward gap time (never happens). Generic datetimes hit neither,
+        # so feed a witness of each — 01:30 on 2024-11-03 (ambiguous) and 02:30
+        # on 2024-03-10 (non-existent) in America/New_York — plus a normal row.
+        # `amb`/`gap` are read by their own function, so the other policy's
+        # default "raise" never sees an offending value.
+        "invalid/tz_replace_null_injection.py": {
+            "amb": pl.Series([datetime(2024, 11, 3, 1, 30), datetime(2024, 6, 1, 12, 0)]),
+            "gap": pl.Series([datetime(2024, 3, 10, 2, 30), datetime(2024, 6, 1, 12, 0)]),
+        },
     }
 
 

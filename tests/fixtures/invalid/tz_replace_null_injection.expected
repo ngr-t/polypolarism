@@ -1,0 +1,4 @@
+ambiguous_null: FAIL
+  error: [pple-return-type] Column 'r' has type Datetime[us, America/New_York]?, but declared type is Datetime[us, America/New_York]
+non_existent_null: FAIL
+  error: [pple-return-type] Column 'r' has type Datetime[us, America/New_York]?, but declared type is Datetime[us, America/New_York]
