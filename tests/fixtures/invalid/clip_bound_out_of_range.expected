@@ -1,0 +1,9 @@
+clip_lower_oob: FAIL
+  error: [pple-invalid-cast] clip: bound -1000 is out of range for dtype Int8 — polars raises InvalidOperationError (conversion failed) on every call
+  via: column 'r': passed via Unknown
+clip_upper_oob: FAIL
+  error: [pple-invalid-cast] clip: bound 1000 is out of range for dtype Int8 — polars raises InvalidOperationError (conversion failed) on every call
+  via: column 'r': passed via Unknown
+clip_unsigned_negative: FAIL
+  error: [pple-invalid-cast] clip: bound -1 is out of range for dtype UInt8 — polars raises InvalidOperationError (conversion failed) on every call
+  via: column 'r': passed via Unknown

@@ -1346,6 +1346,40 @@ def _arith_literal_value(node: ast.expr) -> int | float | None:
     return None
 
 
+def _literal_fill_result(col_inner: DataType, fill_node: ast.expr) -> DataType | None:
+    """Result dtype of a numeric column combined with a scalar literal fill —
+    ``fill_null(value)`` / ``shift(fill_value=)`` (issue #156).
+
+    polars fits the literal to the column exactly like a binary operand
+    (#147/#149): it adopts the column dtype when it fits, else the minimal
+    widening (``i8`` filled with ``1000`` -> Int16), folds a unary sign
+    (``-1`` fits), and resolves a negative literal against an unsigned column to
+    the signed supertype. ``None`` when the fill is not a bare numeric literal
+    or the column is not numeric — the caller keeps its existing handling
+    (bool / str / expression fills, and the strategy path).
+    """
+    value = _arith_literal_value(fill_node)
+    if value is None:
+        return None
+    if type(col_inner) not in INTEGER_DTYPES and type(col_inner) not in FLOAT_DTYPES:
+        return None
+    lit_inner: DataType = Int64() if isinstance(value, int) else Float64()
+    col_adj, lit_adj = _fit_literal_operands(col_inner, lit_inner, value)
+    merged = supertype(col_adj, lit_adj)
+    return merged if merged is not None else col_inner
+
+
+def _int_value_fits(col_inner: DataType, value: int) -> bool:
+    """True if integer ``value`` fits the exact range of integer ``col_inner``
+    (issue #156). Drives the ``clip`` bound check: a bound outside the column
+    dtype's range is a provable InvalidOperationError (clip never widens, unlike
+    fill_null/shift). Reuses ``_minimal_int_dtype``: a value fits iff its minimal
+    same-sign dtype is exactly the column's (a wider fit, or ``None`` for a
+    negative into an unsigned column, means out of range)."""
+    fitted = _minimal_int_dtype(col_inner, value)
+    return fitted is not None and type(fitted) is type(col_inner)
+
+
 # ``Expr.diff`` on an unsigned-int receiver widens to the signed dtype of
 # the next width so negative differences are representable (probed polars
 # 1.41.2; issue #46). UInt128 is absent: it has no wider signed dtype and
@@ -4938,6 +4972,18 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         receiver dtype: the slots are filled with *something*, so no
         Nullable wrap, and claiming any other dtype would be a guess.
         """
+        # A numeric literal fill_value fits the receiver like a binary operand
+        # (issue #156): fold a unary sign (``fill_value=-1`` is Int8-fittable,
+        # not Int64) and widen when it does not fit (``fill_value=1000`` ->
+        # Int16). Shift preserves the receiver's own nullability (the fill only
+        # plugs the shifted-in slots, adding no nulls).
+        receiver_inner = (
+            receiver_type.inner if isinstance(receiver_type, Nullable) else receiver_type
+        )
+        fitted = _literal_fill_result(receiver_inner, fill_node)
+        if fitted is not None:
+            return Nullable(fitted) if isinstance(receiver_type, Nullable) else fitted
+
         lit_dtype: DataType | None = None
         if isinstance(fill_node, ast.Constant) and (
             fill_node.value is None or isinstance(fill_node.value, (bool, int, float, str))
@@ -5247,23 +5293,40 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         if method == "fill_null":
             if receiver_type is None:
                 return receiver_name, Boolean()
-            if not isinstance(receiver_type, Nullable):
-                # Nothing to fill; dtype and nullability are unchanged.
-                return receiver_name, receiver_type
+            receiver_inner = (
+                receiver_type.inner if isinstance(receiver_type, Nullable) else receiver_type
+            )
             strategy_kw = next((kw for kw in node.keywords if kw.arg == "strategy"), None)
             has_strategy = strategy_kw is not None and not (
                 isinstance(strategy_kw.value, ast.Constant) and strategy_kw.value.value is None
             )
-            if has_strategy:
-                return receiver_name, receiver_type
             fill_node = (
                 node.args[0]
                 if node.args
                 else next((kw.value for kw in node.keywords if kw.arg == "value"), None)
             )
+            # A literal fill widens the dtype like a binary operand (issue #156):
+            # ``Int8`` filled with ``1000`` -> Int16. polars computes this
+            # supertype even on a column with no nulls, so it is independent of
+            # receiver nullability; a ``strategy=`` fill carries no such literal.
+            fitted = (
+                None
+                if has_strategy or fill_node is None
+                else _literal_fill_result(receiver_inner, fill_node)
+            )
+            if not isinstance(receiver_type, Nullable):
+                # No nulls to remove: nullability unchanged, but a widening
+                # literal fill still changes the dtype.
+                return receiver_name, fitted if fitted is not None else receiver_type
+            # A ``strategy=`` fill leaves a leading/trailing (or whole-column)
+            # null unfilled, and a nullable expression fill can plug a null back
+            # in — both keep the receiver Nullable (issue #124).
+            if has_strategy:
+                return receiver_name, receiver_type
             if fill_node is not None and self._fill_null_value_keeps_nulls(fill_node):
                 return receiver_name, receiver_type
-            return receiver_name, receiver_type.inner
+            # Nulls are removed -> non-nullable; a widening literal changes dtype.
+            return receiver_name, fitted if fitted is not None else receiver_inner
 
         # ``Expr.filter(...)`` is row-subsetting: the dtype is preserved
         # (Nullable wrapper included — nulls may survive the predicate).
@@ -5391,6 +5454,30 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                         )
                     )
                     return receiver_name, None
+            # ``clip`` never widens (unlike fill_null/shift): a literal bound
+            # outside the integer column's range is a provable conversion
+            # failure — InvalidOperationError on every call (issue #156).
+            if method == "clip":
+                inner = (
+                    receiver_type.inner if isinstance(receiver_type, Nullable) else receiver_type
+                )
+                if type(inner) in INTEGER_DTYPES:
+                    bounds = [*node.args[:2]]
+                    bounds += [
+                        kw.value for kw in node.keywords if kw.arg in ("lower_bound", "upper_bound")
+                    ]
+                    for bound in bounds:
+                        value = _arith_literal_value(bound)
+                        if isinstance(value, int) and not _int_value_fits(inner, value):
+                            self.errors.append(
+                                tag(
+                                    INVALID_CAST,
+                                    f"clip: bound {value} is out of range for dtype {inner} "
+                                    f"— polars raises InvalidOperationError (conversion "
+                                    f"failed) on every call",
+                                )
+                            )
+                            return receiver_name, None
             return receiver_name, receiver_type
 
         # Cumulative reducers are strictly typed (issue #49) — see the
