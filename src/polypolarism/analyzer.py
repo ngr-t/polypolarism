@@ -1230,38 +1230,82 @@ def _minimal_int_dtype(col_inner: DataType, value: int) -> DataType | None:
     return None
 
 
-def _fit_literal_dtype(
-    col_inner: DataType, lit_inner: DataType, lit_value: int | float
-) -> DataType:
-    """Fit a numeric literal to the column operand's dtype (issue #147).
+def _signed_safe_dtype(col_inner: DataType) -> DataType | None:
+    """Smallest SIGNED integer that safely holds an UNSIGNED column's full range
+    (issue #149).
 
-    A float column absorbs any literal into its own width; an integer column
+    A negative literal can never fit an unsigned column, so polars resolves the
+    operation to a signed supertype of double the column width, capped at Int64
+    (``u8 -> Int16``, ``u16 -> Int32``, ``u32 -> Int64``, ``u64 -> Int64``).
+    ``None`` for a dtype that is not a modeled unsigned integer.
+    """
+    sw = _INT_SIGN_WIDTH.get(type(col_inner))
+    if sw is None or sw[0]:  # not modeled, or already signed
+        return None
+    return _INT_BY_SIGN_WIDTH[(True, min(sw[1] * 2, 64))]()
+
+
+def _fit_literal_operands(
+    col_inner: DataType, lit_inner: DataType, lit_value: int | float
+) -> tuple[DataType, DataType]:
+    """Adjust ``(column, literal)`` operand dtypes so the promotion lattice
+    reproduces polars' literal-fitting result (issues #147, #149).
+
+    A float column absorbs any literal into its own width. An integer column
     adopts its dtype for an int literal that fits (else the minimal same-sign
-    widening). An integer column with a FLOAT literal keeps the literal dtype so
-    the supertype widens to Float64 (probed). Unfittable cells keep the literal.
+    widening). A NEGATIVE int literal against an unsigned column can never fit;
+    polars resolves it to a signed supertype, so promote the column to its
+    signed-safe width and fit the literal to its minimal signed width — the
+    lattice then yields the right signed result, incl. ``UInt64 -> Int64`` which
+    the raw column-vs-column supertype (Float64) would miss. An integer column
+    with a FLOAT literal keeps both dtypes so the supertype widens to Float64.
+    Returns the operands unchanged when nothing fits.
     """
     if type(col_inner) in FLOAT_DTYPES:
-        return col_inner
+        return col_inner, col_inner
     if type(col_inner) in INTEGER_DTYPES and isinstance(lit_value, int):
         fitted = _minimal_int_dtype(col_inner, lit_value)
         if fitted is not None:
-            return fitted
-    return lit_inner
+            return col_inner, fitted
+        signed_col = _signed_safe_dtype(col_inner)
+        if signed_col is not None:
+            return signed_col, _minimal_int_dtype(Int8(), lit_value) or Int64()
+    return col_inner, lit_inner
 
 
-def _arith_literal_value(node: ast.expr) -> int | float | None:
-    """The numeric value of a bare int/float literal operand (issue #147).
+def _fold_numeric_constant(node: ast.expr) -> int | float | None:
+    """Value of a bare int/float literal, folding a leading unary ``+``/``-``
+    sign (issue #149).
 
-    Recognises a bare ``ast.Constant`` (int/float, not bool) and
-    ``pl.lit(<int/float const>)`` without an explicit ``dtype=`` (a pinned dtype
-    is not fitted). Columns, expressions and dtyped literals return ``None``.
+    ``-1`` parses as ``UnaryOp(USub, Constant(1))`` — not a bare ``ast.Constant``
+    — so without this fold a negative literal escapes the fit path entirely.
+    Bools are excluded; other expressions return ``None``.
     """
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        inner = _fold_numeric_constant(node.operand)
+        if inner is None:
+            return None
+        return -inner if isinstance(node.op, ast.USub) else inner
     if (
         isinstance(node, ast.Constant)
         and isinstance(node.value, (int, float))
         and not isinstance(node.value, bool)
     ):
         return node.value
+    return None
+
+
+def _arith_literal_value(node: ast.expr) -> int | float | None:
+    """The numeric value of a bare int/float literal operand (issues #147, #149).
+
+    Recognises a bare ``ast.Constant`` (int/float, not bool, possibly with a
+    unary sign) and ``pl.lit(<int/float const>)`` without an explicit ``dtype=``
+    (a pinned dtype is not fitted). Columns, expressions and dtyped literals
+    return ``None``.
+    """
+    value = _fold_numeric_constant(node)
+    if value is not None:
+        return value
     if (
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
@@ -1270,11 +1314,8 @@ def _arith_literal_value(node: ast.expr) -> int | float | None:
         and node.func.value.id == "pl"
         and not any(kw.arg == "dtype" for kw in node.keywords)
         and node.args
-        and isinstance(node.args[0], ast.Constant)
-        and isinstance(node.args[0].value, (int, float))
-        and not isinstance(node.args[0].value, bool)
     ):
-        return node.args[0].value
+        return _fold_numeric_constant(node.args[0])
     return None
 
 
@@ -3816,9 +3857,13 @@ class ExpressionAnalyzer(ast.NodeVisitor):
                 left_lit = _arith_literal_value(inner_node.left)
                 right_lit = _arith_literal_value(inner_node.right)
                 if right_lit is not None and left_lit is None:
-                    right_inner = _fit_literal_dtype(left_inner, right_inner, right_lit)
+                    left_inner, right_inner = _fit_literal_operands(
+                        left_inner, right_inner, right_lit
+                    )
                 elif left_lit is not None and right_lit is None:
-                    left_inner = _fit_literal_dtype(right_inner, left_inner, left_lit)
+                    right_inner, left_inner = _fit_literal_operands(
+                        right_inner, left_inner, left_lit
+                    )
                 # Null literals keep promote_types' Null -> Nullable[T]
                 # rules — except next to a Decimal, where polars widens the
                 # precision even against an all-null literal (probed:
