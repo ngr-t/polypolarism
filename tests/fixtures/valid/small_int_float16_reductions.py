@@ -1,15 +1,17 @@
 """Small-int, Float16 and 128-bit receivers through numeric reductions (backlog N-5).
 
-Probed (polars 1.41.2):
+Probed (polars 1.41.2; Float16 grouped forms re-probed on 1.43.2/1.44.2):
 
 - ``sum``/``product`` upcast Int8/Int16/UInt8/UInt16 to **Int64** — signed
   Int64 even for the unsigned receivers — identically in ``select`` and
   ``group_by().agg()`` contexts.
 - ``mean``/``std``/``var``/``median``/``quantile`` on integer receivers
   return Float64.
-- Float16 keeps its width through every whole-frame (``select``) reduction,
-  like Float32. The grouped forms of mean/median/quantile on Float16 PANIC
-  instead — see ``invalid/float16_uint128_grouped_panic``.
+- Float16 keeps its width through every reduction, like Float32 — in
+  ``select`` and, since polars 1.43.2, in grouped contexts too (through
+  1.42 grouped mean/median/quantile on Float16 panicked in rust).
+- Grouped ``product`` on UInt128 still panics — see
+  ``invalid/uint128_grouped_product_panic``.
 - Int128/UInt128 ``sum``/``min``/``max`` preserve the receiver width.
 
 The false-negative twin is ``invalid/small_int_float16_reductions_wrong``.
@@ -75,13 +77,40 @@ class HalfStats(pa.DataFrameModel):
 
 
 def select_float16_reductions(df: DataFrame[Telemetry]) -> DataFrame[HalfStats]:
-    # Valid ONLY as a whole-frame reduction: the grouped forms of these
-    # exact cells panic in rust (probed 1.41.2) and are flagged in the
-    # ``invalid/float16_uint128_grouped_panic`` twin.
     return df.select(
         pl.col("half").mean().alias("avg_half"),
         pl.col("half").quantile(0.5).alias("q_half"),
     )
+
+
+class PerDeviceHalf(pa.DataFrameModel):
+    device: str
+    avg_half: pl.Float16
+    med_half: pl.Float16
+
+    class Config:
+        strict = True
+
+
+def agg_float16_reductions(df: DataFrame[Telemetry]) -> DataFrame[PerDeviceHalf]:
+    # Grouped mean/median on Float16 keep the width (polars >= 1.43.2;
+    # these panicked in rust through 1.42).
+    return df.group_by("device").agg(
+        pl.col("half").mean().alias("avg_half"),
+        pl.col("half").median().alias("med_half"),
+    )
+
+
+class HalfWindow(pa.DataFrameModel):
+    q_half: pl.Float16
+
+    class Config:
+        strict = True
+
+
+def over_float16_quantile(df: DataFrame[Telemetry]) -> DataFrame[HalfWindow]:
+    # over windows agree with group_by().agg() (polars >= 1.43.2).
+    return df.select(pl.col("half").quantile(0.5).over("device").alias("q_half"))
 
 
 class BigTotals(pa.DataFrameModel):
