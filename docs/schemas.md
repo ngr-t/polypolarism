@@ -39,15 +39,15 @@ re-interpretation is a `pple-annotation-conflict` error).
 
 ```python
 class Example(pa.DataFrameModel):
-    id: int                                          # required, non-null
-    name: str = pa.Field(nullable=True)              # required, may be null
-    age: Optional[int]                               # column may be absent
+    id: int  # required, non-null
+    name: str = pa.Field(nullable=True)  # required, may be null
+    age: Optional[int]  # column may be absent
     score: pl.Float64
     tags: Annotated[pl.List, pl.Utf8()]
     addr: Annotated[pl.Struct, {"city": pl.Utf8()}]
 
     class Config:
-        strict = True   # reject any column not listed above
+        strict = True  # reject any column not listed above
 ```
 
 ## Validation as type narrowing
@@ -55,10 +55,10 @@ class Example(pa.DataFrameModel):
 Any of the following bind a downstream variable's type to the schema:
 
 ```python
-df2 = Schema.validate(df)            # assignment-bound LHS
-Schema.validate(df)                  # bare statement narrows df
-df.pipe(Schema.validate)             # pipe chain
-Schema.validate(lf).collect()        # LazyFrame -> DataFrame
+df2 = Schema.validate(df)  # assignment-bound LHS
+Schema.validate(df)  # bare statement narrows df
+df.pipe(Schema.validate)  # pipe chain
+Schema.validate(lf).collect()  # LazyFrame -> DataFrame
 ```
 
 Bare-statement narrowing only fires at the function body's top level;
