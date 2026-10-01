@@ -579,22 +579,27 @@ def _synthesize_patito_frame(model: Any, offset: int = 0) -> pl.DataFrame:
     """Synthesize an input frame for a Patito model via ``Model.examples``.
 
     patito generates a valid dummy row honoring the model's dtypes (including
-    nested-model structs and ``Field(dtype=...)`` overrides — probed). N_ROWS
-    rows are produced by varying the first integer column when present so the
-    body sees more than one row; otherwise a single example row is replicated.
-    The Patito fixtures do not join, so partial-key overlap is unneeded.
+    nested-model structs and ``Field(dtype=...)`` overrides — probed). A single
+    example row is replicated to N_ROWS, then the first integer column (when
+    present) is varied so the body sees distinct rows. The Patito fixtures do
+    not join, so partial-key overlap is unneeded.
+
+    Only the zero-argument ``examples()`` is used: passing a multi-row column
+    makes patito mix it with length-1 Series for the remaining columns, which
+    polars >= 1.44 no longer broadcasts (``ShapeError``).
     """
+    # ``examples`` returns a model-bound patito DataFrame subclass; hand the
+    # plain polars frame to the function under test.
+    frame = pl.concat([pl.DataFrame(model.examples())] * N_ROWS)
     int_col = next(
         (name for name, dtype in model.dtypes.items() if dtype.is_integer()),
         None,
     )
     if int_col is not None:
-        example = model.examples({int_col: [offset + i for i in range(N_ROWS)]})
-    else:
-        example = pl.concat([model.examples()] * N_ROWS)
-    # ``examples`` returns a model-bound patito DataFrame subclass; hand the
-    # plain polars frame to the function under test.
-    return pl.DataFrame(example)
+        frame = frame.with_columns(
+            pl.Series(int_col, [offset + i for i in range(N_ROWS)], dtype=model.dtypes[int_col])
+        )
+    return frame
 
 
 def _to_schema(model: type[DataFrameModel]) -> DataFrameSchema:
@@ -806,7 +811,7 @@ def test_runtime_agrees_with_static_verdict(
         # Static FAIL: the call or the return validation must raise.
         # ``PanicException`` (a rust panic surfaced by pyo3) derives from
         # BaseException, not Exception; a static FAIL predicting a
-        # guaranteed crash (e.g. grouped Float16 mean, backlog N-5) is
+        # guaranteed crash (e.g. grouped UInt128 product, backlog N-5) is
         # confirmed by it exactly like by a regular polars error. Probed
         # (polars 1.41.2): these panics are catchable and leave the
         # process healthy.

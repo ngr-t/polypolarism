@@ -113,8 +113,7 @@ def compute_revenue(
     products: DataFrame[Products],
 ) -> DataFrame[RevenueByRegion]:
     return (
-        sales
-        .join(products, on="product_id", how="inner")
+        sales.join(products, on="product_id", how="inner")
         .with_columns(revenue=pl.col("quantity") * pl.col("unit_price"))
         .group_by("region")
         .agg(total_revenue=pl.col("revenue").sum())

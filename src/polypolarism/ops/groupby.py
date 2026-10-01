@@ -152,17 +152,18 @@ TEMPORAL_TYPES = (Date, Datetime, Duration, Time)
 # Cells that PANIC in rust (pyo3 ``PanicException``, a BaseException — not a
 # catchable polars error class) when evaluated in a grouped context —
 # ``group_by().agg()`` and ``Expr.over`` windows — while the same expression
-# is fine as a whole-frame (select) reduction. Probed (polars 1.41.2):
-#   mean/median/quantile on Float16 -> "not implemented for dtype Float16"
-#   product on UInt128 -> SchemaMismatch panic ("Expected list[i64], got u128")
-# Note the asymmetry: sum/std/var/min/max/product on Float16 do NOT panic.
-# Every panic cell is width-preserving in select context, so callers that
-# only see the aggregation's OUTPUT dtype (the analyzer's ``over`` branch)
-# can check it against this table directly.
+# is fine as a whole-frame (select) reduction. Probed (polars 1.41.2 and
+# 1.44.2): product on UInt128 -> SchemaMismatch panic ("Expected list[i64],
+# got u128"). Every panic cell is width-preserving in select context, so
+# callers that only see the aggregation's OUTPUT dtype (the analyzer's
+# ``over`` branch) can check it against this table directly.
+#
+# mean/median/quantile on Float16 panicked the same way through polars 1.42
+# ("not implemented for dtype Float16") and were listed here; polars 1.43.2
+# fixed them (they keep the Float16 width). The cells were dropped rather
+# than version-gated — a diagnostic must not be a false positive on current
+# polars (ADR-0009), at the cost of silence for 1.37–1.42 users.
 GROUPED_PANIC_CELLS: dict[AggFunction, tuple[type[DataType], ...]] = {
-    AggFunction.MEAN: (Float16,),
-    AggFunction.MEDIAN: (Float16,),
-    AggFunction.QUANTILE: (Float16,),
     AggFunction.PRODUCT: (UInt128,),
 }
 
@@ -301,9 +302,8 @@ def _infer_mean(dtype: DataType) -> DataType:
         raise GroupByTypeError(f"Cannot apply mean to type {dtype}: mean requires numeric type")
 
     # Probed (polars 1.41.2; backlog N-2/N-5): Float32 and Float16
-    # receivers keep their width (Float16 in select context only — the
-    # grouped form is a panic cell handled in ``infer_agg_result_type``);
-    # every other numeric receiver yields Float64.
+    # receivers keep their width (Float16 in grouped contexts too since
+    # polars 1.43.2); every other numeric receiver yields Float64.
     return _wrap_nullable(_float_reduction_width(inner), is_nullable)
 
 

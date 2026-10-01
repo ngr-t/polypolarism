@@ -3223,7 +3223,7 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         # True while ``analyze_agg_expr``'s chain fallback re-enters the
         # expression analyser (backlog N-5): expression-level aggregations
         # then infer with the grouped ("agg") context, so the probed
-        # grouped-panic cells (e.g. ``mean`` on Float16) are still rejected
+        # grouped-panic cells (e.g. ``product`` on UInt128) are still rejected
         # inside ``agg(...)`` method chains. False everywhere else —
         # ``select``/``with_columns`` are whole-frame reductions.
         self._in_agg_chain = False
@@ -5393,10 +5393,10 @@ class ExpressionAnalyzer(ast.NodeVisitor):
         # the list) but broadcasts a scalar-per-group expression unchanged.
         # An unknown / non-literal strategy degrades to Unknown.
         if method == "over":
-            # Grouped-context panic cells (backlog N-5): mean/median/quantile
-            # on Float16 and product on UInt128 panic in rust inside ANY
-            # grouped evaluation — over windows included, not just
-            # group_by().agg() (probed, polars 1.41.2). The receiver's dtype
+            # Grouped-context panic cells (backlog N-5): product on UInt128
+            # panics in rust inside ANY grouped evaluation — over windows
+            # included, not just group_by().agg() (probed, polars 1.41.2 and
+            # 1.44.2). The receiver's dtype
             # was inferred with the lenient "select" context; re-check the
             # cell here. Every panic cell is width-preserving, so the
             # aggregation's output dtype (= ``receiver_type``) equals its

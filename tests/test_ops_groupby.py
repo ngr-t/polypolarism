@@ -350,23 +350,17 @@ class TestSmallIntAndLandmarkReceivers:
         result = infer_agg_result_type(func, Float16(), context="select")
         assert result == expected
 
-    @pytest.mark.parametrize("func", [AggFunction.MEAN, AggFunction.MEDIAN, AggFunction.QUANTILE])
-    def test_float16_grouped_float_reductions_raise(self, func):
-        # Probed (polars 1.41.2): mean/median/quantile on Float16 panic in
-        # rust in grouped contexts ("not implemented for dtype Float16").
-        with pytest.raises(GroupByTypeError) as exc_info:
-            infer_agg_result_type(func, Float16(), context="agg")
-        assert "Float16" in str(exc_info.value)
-        assert "panic" in str(exc_info.value).lower()
-
-    def test_float16_grouped_panic_applies_to_nullable_receiver(self):
+    def test_uint128_grouped_product_panic_applies_to_nullable_receiver(self):
         with pytest.raises(GroupByTypeError):
-            infer_agg_result_type(AggFunction.MEAN, Nullable(Float16()), context="agg")
+            infer_agg_result_type(AggFunction.PRODUCT, Nullable(UInt128()), context="agg")
 
     @pytest.mark.parametrize(
         ("func", "expected"),
         [
             (AggFunction.SUM, Float16()),
+            (AggFunction.MEAN, Float16()),
+            (AggFunction.MEDIAN, Float16()),
+            (AggFunction.QUANTILE, Float16()),
             (AggFunction.PRODUCT, Float16()),
             (AggFunction.STD, Nullable(Float16())),
             (AggFunction.VAR, Nullable(Float16())),
@@ -375,9 +369,12 @@ class TestSmallIntAndLandmarkReceivers:
         ],
         ids=lambda p: str(p),
     )
-    def test_float16_grouped_non_panicking_cells_keep_width(self, func, expected):
-        # Probed (polars 1.41.2): sum/product/std/var/min/max on Float16 do
-        # NOT panic in group_by().agg() and keep the receiver width.
+    def test_float16_grouped_reductions_keep_width(self, func, expected):
+        # Probed (polars 1.43.2/1.44.2): every grouped reduction on Float16
+        # keeps the receiver width. mean/median/quantile panicked in rust
+        # through polars 1.42 ("not implemented for dtype Float16"); that
+        # error was dropped once polars fixed it (ADR-0009: no
+        # false-positive-prone diagnostics on current polars).
         result = infer_agg_result_type(func, Float16(), context="agg")
         assert result == expected
 
@@ -385,11 +382,11 @@ class TestSmallIntAndLandmarkReceivers:
         # The conservative default: an unspecified context must reject the
         # guaranteed-crash cells.
         with pytest.raises(GroupByTypeError):
-            infer_agg_result_type(AggFunction.MEAN, Float16())
+            infer_agg_result_type(AggFunction.PRODUCT, UInt128())
 
-    def test_infer_groupby_result_rejects_float16_mean(self):
-        input_frame = FrameType({"g": Utf8(), "v": Float16()})
-        agg_exprs = [AggExpr(column="v", function=AggFunction.MEAN, alias="avg")]
+    def test_infer_groupby_result_rejects_uint128_product(self):
+        input_frame = FrameType({"g": Utf8(), "v": UInt128()})
+        agg_exprs = [AggExpr(column="v", function=AggFunction.PRODUCT, alias="p")]
         with pytest.raises(GroupByTypeError):
             infer_groupby_result(input_frame, ["g"], agg_exprs)
 

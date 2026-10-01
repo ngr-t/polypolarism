@@ -12742,10 +12742,11 @@ class TestSmallIntLandmarkReductionContexts:
 
     Probed (polars 1.41.2): sub-32-bit ints aggregate fine in both contexts
     (sum/product upcast to Int64, float reductions to Float64); Float16
-    keeps its width through every select-context reduction; but
-    mean/median/quantile on Float16 and product on UInt128 PANIC in rust
-    in every grouped evaluation — ``group_by().agg()`` and ``Expr.over``
-    windows alike.
+    keeps its width through every select-context reduction; but product
+    on UInt128 PANICS in rust in every grouped evaluation —
+    ``group_by().agg()`` and ``Expr.over`` windows alike. (mean/median/
+    quantile on Float16 panicked the same way through polars 1.42; fixed
+    in 1.43, so they now keep the Float16 width in grouped contexts too.)
     """
 
     def _frame(self, dtype) -> FrameType:
@@ -12796,15 +12797,14 @@ class TestSmallIntLandmarkReductionContexts:
         assert analyzer.var_types["out"].columns["total"].dtype == Float16()
 
     # -- grouped panic cells are errors ------------------------------------
-    def test_agg_mean_float16_errors(self):
+    def test_agg_mean_float16_keeps_width(self):
+        # Probed (polars 1.43.2/1.44.2): no longer a panic cell.
         analyzer = _run_body(
             self._frame(Float16()),
             'out = df.group_by("g").agg(pl.col("v").mean().alias("avg"))',
         )
-        assert len(analyzer.errors) == 1, analyzer.errors
-        err = analyzer.errors[0]
-        assert "pple-groupby" in err and "Float16" in err, err
-        assert "panic" in err.lower(), err
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["avg"].dtype == Float16()
 
     def test_agg_product_uint128_errors(self):
         analyzer = _run_body(
@@ -12814,25 +12814,23 @@ class TestSmallIntLandmarkReductionContexts:
         assert len(analyzer.errors) == 1, analyzer.errors
         assert "pple-groupby" in analyzer.errors[0], analyzer.errors
 
-    def test_agg_chain_fallback_mean_float16_errors(self):
-        # ``mean().cast(...)`` routes through the chain fallback (the
+    def test_agg_chain_fallback_product_uint128_errors(self):
+        # ``product().cast(...)`` routes through the chain fallback (the
         # expression analyser); the agg context must survive the re-entry.
         analyzer = _run_body(
-            self._frame(Float16()),
-            'out = df.group_by("g").agg(pl.col("v").mean().cast(pl.Float64).alias("avg"))',
+            self._frame(UInt128()),
+            'out = df.group_by("g").agg(pl.col("v").product().cast(pl.Int64).alias("p"))',
         )
         assert any("panic" in e.lower() for e in analyzer.errors), analyzer.errors
 
-    def test_over_mean_float16_errors(self):
-        # Probed (polars 1.41.2): ``mean().over(...)`` panics on Float16
-        # exactly like group_by().agg() — windows are grouped evaluation.
+    def test_over_mean_float16_keeps_width(self):
+        # Probed (polars 1.43.2/1.44.2): windows agree with group_by().agg().
         analyzer = _run_body(
             self._frame(Float16()),
             'out = df.select(a=pl.col("v").mean().over("g"))',
         )
-        assert any("pple-groupby" in e and "panic" in e.lower() for e in analyzer.errors), (
-            analyzer.errors
-        )
+        assert analyzer.errors == [], analyzer.errors
+        assert analyzer.var_types["out"].columns["a"].dtype == Float16()
 
     def test_over_product_uint128_errors(self):
         analyzer = _run_body(

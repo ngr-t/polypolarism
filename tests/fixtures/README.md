@@ -104,7 +104,7 @@ Rules with both sides present (valid twin -> invalid twin):
 | partition_by elements | `m14_partition_by` | `m14_partition_by_wrong_element` |
 | landmark dtypes | `dtype_enum`, `dtype_float16`, `dtype_int128`, `dtype_uint128` | `dtype_landmarks_wrong_declared` |
 | small-int / Float16 / 128-bit agg widths (N-5) | `small_int_float16_reductions` | `small_int_float16_reductions_wrong` |
-| grouped-context agg panic cells (N-5) | `small_int_float16_reductions` (the same cells in select context) | `float16_uint128_grouped_panic` |
+| grouped-context agg panic cells (N-5) | `small_int_float16_reductions` (the same cell in select context; grouped Float16 reductions, fixed in polars 1.43.2) | `uint128_grouped_product_panic` |
 | frame literals | `frame_literal` | `frame_literal_wrong_declared` |
 | pl expression constructors | `m6_pl_constructors` | `m6_pl_constructors_wrong_declared` |
 | variable annotations | `variable_annotation_basic`, `variable_annotation_chain` | `variable_annotation_wrong_downstream` |

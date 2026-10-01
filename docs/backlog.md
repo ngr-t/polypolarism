@@ -78,6 +78,11 @@ Status legend: `[ ]` open / `[x]` done / `[-]` deliberately deferred.
   chains/`.over()`), valid in select. Runtime harness now catches
   `PanicException` (BaseException) as the predicted crash. Pair:
   `valid/small_int_float16_reductions` + 2 invalid twins.
+  **Update 2026-10-01:** polars 1.43.2 fixed the three Float16 cells
+  (grouped mean/median/quantile now keep Float16), so they were dropped
+  from `GROUPED_PANIC_CELLS` rather than version-gated (ADR-0009); only
+  product×UInt128 remains. The invalid twin is now
+  `invalid/uint128_grouped_product_panic`.
 - [x] **N-3: pplw-unmodeled-method for unmodeled FRAME-level methods.** Done 2026-06-11:
   probed frame-returning sets (`EAGER/LAZY_FRAME_RETURNING_METHODS`,
   73/66 names from signature return annotations on 1.41.2) gate the
@@ -474,7 +479,7 @@ orthogonal decorator:
 
 ```python
 @pa.check_types
-@pp.rowpoly("R")                      # ships from polypolarism; returns fn unchanged
+@pp.rowpoly("R")  # ships from polypolarism; returns fn unchanged
 def add_score(df: DataFrame[S]) -> DataFrame[OutScore]: ...
 ```
 
